@@ -37,9 +37,10 @@ Welcome! This document provides complete operational guidelines and technical co
 ## 3. Architecture Quick Reference
 
 * Application Root: `Mead.Supervisor` (`rest_for_one` strategy)
-* Session Pool: `DynamicSupervisor` managing stateful `Mead.Session.Server` processes.
+* Session Pool: `Mead.Session.Pool` (`DynamicSupervisor`) starting one `Mead.Session.Supervisor` per conversation, which holds a `Mead.Session.History` agent and a `Mead.Session.Server`.
 * Process Registry: Elixir `Registry` mapping UUIDs to running GenServer PIDs.
 * Router: `Mead.Router` coordinating Ollama vs. Cloud endpoints with token cost ledgers.
 * MCP Hub: `Mead.MCP.Hub` translating JSON-RPC requests.
+* Verification gates: `mix test`, `mix format --check-formatted`, and `mix compile --warnings-as-errors`.
 
 For full architectural diagrams and specifications, see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
