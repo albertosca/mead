@@ -6,6 +6,13 @@ defmodule Mead.Session.Server do
   under `Mead.TurnSupervisor`, and replies to the caller once the task reports back. A handler
   that raises, exits, returns garbage, or runs past the turn timeout fails only that turn.
 
+  The task is linked to the server and the server traps exits. A task failure therefore arrives
+  as a message instead of killing the server, while a server death takes the running task down
+  with it, so no orphaned handler keeps running for a conversation that restarted.
+
+  When the server restarts after a crash, `init/1` marks every turn still recorded as in
+  progress as interrupted. A reader that bypasses the server can observe the old status in the
+  moment between the new server registering its name and finishing `init/1`.
   """
 
   use GenServer
@@ -27,8 +34,13 @@ defmodule Mead.Session.Server do
 
   @impl true
   def init(options) do
+    Process.flag(:trap_exit, true)
+
+    session_id = Keyword.fetch!(options, :session_id)
+    History.mark_interrupted(session_id)
+
     state = %{
-      session_id: Keyword.fetch!(options, :session_id),
+      session_id: session_id,
       handler: Keyword.fetch!(options, :handler),
       turn_timeout: Keyword.fetch!(options, :turn_timeout),
       running: nil
@@ -49,7 +61,7 @@ defmodule Mead.Session.Server do
     History.append(state.session_id, Turn.start(input))
 
     task =
-      Task.Supervisor.async_nolink(Mead.TurnSupervisor, fn ->
+      Task.Supervisor.async(Mead.TurnSupervisor, fn ->
         handler.handle_turn(history, input)
       end)
 
@@ -81,7 +93,7 @@ defmodule Mead.Session.Server do
     end
   end
 
-  # Late timers and replies from a turn that already concluded.
+  # Exit signals from finished tasks, and late timers or replies from a turn that concluded.
   def handle_info(_stray_message, state), do: {:noreply, state}
 
   defp normalize({:ok, output}), do: {:ok, output}
