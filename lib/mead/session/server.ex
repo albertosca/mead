@@ -89,7 +89,8 @@ defmodule Mead.Session.Server do
       ) do
     case Task.shutdown(task, :brutal_kill) do
       {:ok, result} -> conclude(state, normalize(result))
-      _unfinished -> conclude(state, {:timeout, nil})
+      {:exit, reason} -> conclude(state, {:failed, reason})
+      nil -> conclude(state, {:timeout, nil})
     end
   end
 

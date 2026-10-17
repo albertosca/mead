@@ -40,6 +40,24 @@ defmodule Mead.MeadTest do
       end
     end
 
+    test "rejects a turn timeout too large for a timer" do
+      for invalid <- [4_294_967_296, Integer.pow(2, 63)] do
+        assert_raise ArgumentError, ~r/turn_timeout/, fn ->
+          Mead.start_session(turn_timeout: invalid)
+        end
+      end
+
+      {:ok, session_id} = Mead.start_session(turn_timeout: 4_294_967_295)
+      on_exit(fn -> Mead.stop_session(session_id) end)
+      assert Mead.submit_turn(session_id, "still works") == {:ok, "still works"}
+    end
+
+    test "rejects options that are not a keyword list" do
+      for invalid <- [%{}, nil, "options", [:handler]] do
+        assert_raise ArgumentError, ~r/keyword list/, fn -> Mead.start_session(invalid) end
+      end
+    end
+
     test "rejects a handler that is not a module implementing handle_turn/2" do
       for invalid <- [Mead.NoSuchHandler, "handler", nil, Mead.UUID] do
         assert_raise ArgumentError, ~r/handler/, fn -> Mead.start_session(handler: invalid) end
@@ -93,6 +111,18 @@ defmodule Mead.MeadTest do
   end
 
   describe "stop_session/1" do
+    test "a caller waiting on a running turn is told the session was stopped, not that it crashed" do
+      {:ok, session_id} =
+        Mead.start_session(handler: Mead.Test.ScriptedHandler, turn_timeout: 5_000)
+
+      test_pid = self()
+      waiting_caller = Task.async(fn -> Mead.submit_turn(session_id, {:block, test_pid}) end)
+      assert_receive {:handler_started, _handler_pid}
+
+      assert Mead.stop_session(session_id) == :ok
+      assert Task.await(waiting_caller) == {:error, :session_stopped}
+    end
+
     test "removes the conversation and discards its history" do
       session_id = start_session!()
       Mead.submit_turn(session_id, "hello")

@@ -94,4 +94,22 @@ defmodule Mead.Session.TurnFailuresTest do
     wait_until(fn -> match?({:ok, [%Turn{status: :ok}]}, Mead.history(session_id)) end)
     assert Mead.submit_turn(session_id, {:echo, "next"}) == {:ok, "next"}
   end
+
+  test "a handler that dies on its own as the timer fires is a failure, not a timeout", context do
+    %{session_id: session_id, server_pid: server_pid} = context
+    test_pid = self()
+
+    caller = Task.async(fn -> Mead.submit_turn(session_id, {:block, test_pid}) end)
+    assert_receive {:handler_started, handler_pid}
+
+    # Queue the timer message ahead of the task's own death signals, then let the server go.
+    :sys.suspend(server_pid)
+    %{running: %{task: %Task{ref: reference}}} = :sys.get_state(server_pid)
+    send(server_pid, {:turn_timeout, reference})
+    Process.exit(handler_pid, :scripted_death)
+    :sys.resume(server_pid)
+
+    assert Task.await(caller) == {:error, :failed}
+    assert {:ok, [%Turn{status: :failed, output: :scripted_death}]} = Mead.history(session_id)
+  end
 end
