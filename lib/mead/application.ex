@@ -7,7 +7,8 @@ defmodule Mead.Application do
   def start(_type, _arguments) do
     children = [
       {Registry, keys: :unique, name: Mead.Registry},
-      {Task.Supervisor, name: Mead.TurnSupervisor}
+      {Task.Supervisor, name: Mead.TurnSupervisor},
+      Mead.Session.Pool
     ]
 
     Supervisor.start_link(children, strategy: :rest_for_one, name: Mead.Supervisor)
