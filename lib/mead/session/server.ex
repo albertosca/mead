@@ -3,7 +3,9 @@ defmodule Mead.Session.Server do
   Orchestrates the turns of one conversation.
 
   It records each turn in the history before running the handler, runs the handler in a task
-  under `Mead.TurnSupervisor`, and replies to the caller once the task reports back.
+  under `Mead.TurnSupervisor`, and replies to the caller once the task reports back. A handler
+  that raises, exits, returns garbage, or runs past the turn timeout fails only that turn.
+
   """
 
   use GenServer
@@ -36,6 +38,10 @@ defmodule Mead.Session.Server do
   end
 
   @impl true
+  def handle_call({:submit, _input}, _from, %{running: running} = state) when running != nil do
+    {:reply, {:error, :turn_in_progress}, state}
+  end
+
   def handle_call({:submit, input}, from, state) do
     handler = state.handler
     history = History.all(state.session_id)
@@ -47,15 +53,51 @@ defmodule Mead.Session.Server do
         handler.handle_turn(history, input)
       end)
 
-    {:noreply, %{state | running: %{from: from, task: task}}}
+    timer = Process.send_after(self(), {:turn_timeout, task.ref}, state.turn_timeout)
+
+    {:noreply, %{state | running: %{from: from, task: task, timer: timer}}}
   end
 
   @impl true
-  def handle_info({reference, {:ok, output}}, %{running: %{task: %Task{ref: reference}}} = state) do
+  def handle_info({reference, result}, %{running: %{task: %Task{ref: reference}}} = state) do
     Process.demonitor(reference, [:flush])
-    History.update_last(state.session_id, &Turn.finish(&1, :ok, output))
-    GenServer.reply(state.running.from, {:ok, output})
+    conclude(state, normalize(result))
+  end
+
+  def handle_info(
+        {:DOWN, reference, :process, _pid, reason},
+        %{running: %{task: %Task{ref: reference}}} = state
+      ) do
+    conclude(state, {:failed, reason})
+  end
+
+  def handle_info(
+        {:turn_timeout, reference},
+        %{running: %{task: %Task{ref: reference} = task}} = state
+      ) do
+    case Task.shutdown(task, :brutal_kill) do
+      {:ok, result} -> conclude(state, normalize(result))
+      _unfinished -> conclude(state, {:timeout, nil})
+    end
+  end
+
+  # Late timers and replies from a turn that already concluded.
+  def handle_info(_stray_message, state), do: {:noreply, state}
+
+  defp normalize({:ok, output}), do: {:ok, output}
+  defp normalize({:error, reason}), do: {:failed, reason}
+  defp normalize(other), do: {:failed, {:bad_return, other}}
+
+  defp conclude(state, {status, output} = outcome) do
+    %{from: from, timer: timer} = state.running
+
+    Process.cancel_timer(timer)
+    History.update_last(state.session_id, &Turn.finish(&1, status, output))
+    GenServer.reply(from, reply_for(outcome))
 
     {:noreply, %{state | running: nil}}
   end
+
+  defp reply_for({:ok, output}), do: {:ok, output}
+  defp reply_for({status, _output}), do: {:error, status}
 end
