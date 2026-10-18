@@ -13,14 +13,13 @@ graph TD
         RootSup["Mead.Supervisor"]
         SessionSup["DynamicSupervisor - Sessions"]
         Registry["Registry - Session Registry"]
-        RouterEngine["Mead.Router - Cost & Model Dispatcher"]
+        RouterEngine["Mead.Router - Stateless Model Dispatcher"]
         MCPHub["Mead.MCP.Hub - Tool Registry & Protocol"]
         Metrics["Mead.Telemetry - Tokens & Cost Tracker"]
     end
 
     RootSup --> SessionSup
     RootSup --> Registry
-    RootSup --> RouterEngine
     RootSup --> MCPHub
     RootSup --> Metrics
 
@@ -39,11 +38,11 @@ graph TD
 1. **`Mead.Supervisor`:** The application root supervisor. Enforces a `rest_for_one` strategy for foundational infrastructure.
 2. **`Mead.Session.Pool` (Sessions):** A `DynamicSupervisor` that starts one `Mead.Session.Supervisor` per active conversation. Each of those supervises that conversation's `Mead.Session.History` and `Mead.Session.Server`.
 3. **`Registry`:** Fast in-memory process registry mapping conversation UUIDs to runtime PIDs for microsecond WebSocket routing.
-4. **`Mead.Router`:** Analyzes incoming prompt characteristics and decides routing destinations (local Ollama vs. cloud models) based on latency, cost, and complexity.
+4. **`Mead.Router`:** A stateless `Mead.Session.TurnHandler` with no process of its own. It classifies each turn as local or cloud (or obeys a `route:` override), calls the provider in that slot, and emits `[:mead, :router, :route]` events. It is not a child of the root supervisor, so no conversation shares a router process with another.
 5. **`Mead.MCP.Hub`:** Aggregates registered tool definitions, manages execution permissions, and translates JSON-RPC MCP messages.
 6. **`Mead.Telemetry`:** Real-time token consumption ledger emitting alerts as spend thresholds approach limits.
 
-Implemented so far: the registry, the turn supervisor, and the session pool. `Mead.Router`, `Mead.MCP.Hub`, and `Mead.Telemetry` are specified here and arrive in later slices.
+Implemented so far: the registry, the turn supervisor, the session pool, and the router core with the Anthropic provider. `Mead.MCP.Hub`, `Mead.Telemetry`, and the Ollama provider are specified here and arrive in later slices.
 
 ---
 
@@ -70,3 +69,7 @@ flowchart LR
 Each conversation is a `Mead.Session.Supervisor` started by `Mead.Session.Pool`. It supervises two processes with a `rest_for_one` strategy: `Mead.Session.History`, an agent holding the turns, and `Mead.Session.Server`, which orchestrates them. Because the history starts first, a crashed server restarts with the same session id and the same history, and a turn that was running is marked `interrupted`. A server that crashes more than three times in five seconds takes its whole pair down and that conversation is gone; neighbouring conversations are never affected.
 
 A turn runs in a task under `Mead.TurnSupervisor`, linked to the server, which traps exits. A handler that raises, exits, returns garbage, or exceeds the turn timeout fails only that turn (`failed` or `timeout`), and a server death takes its running task with it. The full design is in `docs/superpowers/specs/2026-10-17-session-skeleton-design.md`.
+
+## 4. Router Internals
+
+`Mead.Router.route/4` takes the forced route or asks `Mead.Router.Classifier`, which is a pure function that sends a turn to the local model only when the input is short, the history is light, and it asks for triage or formatting without asking for reasoning; any doubt goes to the cloud. The route names a slot holding a `{provider, options}` pair implementing `Mead.Provider`. A turn routed to an empty slot fails with `:local_unavailable` or `:cloud_unavailable` and is never sent to the other slot. Only completed text turns are replayed to the provider as history. A failed turn replies `{:error, {:failed, reason}}`. The full design is in `docs/superpowers/specs/2026-10-17-model-router-design.md`.

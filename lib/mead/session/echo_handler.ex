@@ -8,5 +8,5 @@ defmodule Mead.Session.EchoHandler do
   @behaviour Mead.Session.TurnHandler
 
   @impl true
-  def handle_turn(_history, input), do: {:ok, input}
+  def handle_turn(_history, input, _options), do: {:ok, input}
 end

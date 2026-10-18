@@ -4,7 +4,8 @@ defmodule Mead.Session.Server do
 
   It records each turn in the history before running the handler, runs the handler in a task
   under `Mead.TurnSupervisor`, and replies to the caller once the task reports back. A handler
-  that raises, exits, returns garbage, or runs past the turn timeout fails only that turn.
+  that raises, exits, returns garbage, or runs past the turn timeout fails only that turn. A
+  failed turn replies `{:error, {:failed, reason}}`, with the same reason stored as its output.
 
   The task is linked to the server and the server traps exits. A task failure therefore arrives
   as a message instead of killing the server, while a server death takes the running task down
@@ -50,11 +51,12 @@ defmodule Mead.Session.Server do
   end
 
   @impl true
-  def handle_call({:submit, _input}, _from, %{running: running} = state) when running != nil do
+  def handle_call({:submit, _input, _options}, _from, %{running: running} = state)
+      when running != nil do
     {:reply, {:error, :turn_in_progress}, state}
   end
 
-  def handle_call({:submit, input}, from, state) do
+  def handle_call({:submit, input, options}, from, state) do
     handler = state.handler
     history = History.all(state.session_id)
 
@@ -62,7 +64,7 @@ defmodule Mead.Session.Server do
 
     task =
       Task.Supervisor.async(Mead.TurnSupervisor, fn ->
-        handler.handle_turn(history, input)
+        handler.handle_turn(history, input, options)
       end)
 
     timer = Process.send_after(self(), {:turn_timeout, task.ref}, state.turn_timeout)
@@ -112,5 +114,6 @@ defmodule Mead.Session.Server do
   end
 
   defp reply_for({:ok, output}), do: {:ok, output}
+  defp reply_for({:failed, reason}), do: {:error, {:failed, reason}}
   defp reply_for({status, _output}), do: {:error, status}
 end

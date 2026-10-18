@@ -58,7 +58,7 @@ defmodule Mead.MeadTest do
       end
     end
 
-    test "rejects a handler that is not a module implementing handle_turn/2" do
+    test "rejects a handler that is not a module implementing handle_turn/3" do
       for invalid <- [Mead.NoSuchHandler, "handler", nil, Mead.UUID] do
         assert_raise ArgumentError, ~r/handler/, fn -> Mead.start_session(handler: invalid) end
       end
@@ -89,6 +89,48 @@ defmodule Mead.MeadTest do
                 %Turn{input: "first", output: "first", status: :ok},
                 %Turn{input: "second", output: "second", status: :ok}
               ]} = Mead.history(session_id)
+    end
+  end
+
+  describe "submit_turn/3 options" do
+    test "the route reaches the handler" do
+      {:ok, session_id} =
+        Mead.start_session(handler: Mead.Test.ScriptedHandler, turn_timeout: 5_000)
+
+      on_exit(fn -> Mead.stop_session(session_id) end)
+
+      assert Mead.submit_turn(session_id, {:report_options, self()}, route: :cloud) ==
+               {:ok, :reported}
+
+      assert_received {:handler_options, [route: :cloud]}
+    end
+
+    test "the route defaults to :auto" do
+      {:ok, session_id} =
+        Mead.start_session(handler: Mead.Test.ScriptedHandler, turn_timeout: 5_000)
+
+      on_exit(fn -> Mead.stop_session(session_id) end)
+
+      Mead.submit_turn(session_id, {:report_options, self()})
+      assert_received {:handler_options, [route: :auto]}
+    end
+
+    test "an unknown route is rejected before any turn is recorded" do
+      session_id = start_session!()
+
+      for invalid <- [:nowhere, "cloud", nil, 1] do
+        assert Mead.submit_turn(session_id, "hello", route: invalid) == {:error, :invalid_route}
+      end
+
+      assert Mead.history(session_id) == {:ok, []}
+    end
+
+    test "options that are not a known keyword list raise" do
+      session_id = start_session!()
+
+      for invalid <- [%{}, nil, "options", [:route], [rout: :cloud]] do
+        assert_raise ArgumentError, fn -> Mead.submit_turn(session_id, "hello", invalid) end
+      end
     end
   end
 
