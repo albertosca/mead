@@ -6,7 +6,7 @@ defmodule Mead.Router.Classifier do
   testable without a network. Local is chosen only when the input positively looks routine; any
   doubt goes to the cloud, where the quality is. The rules are applied in this order:
 
-    1. an input that is not a string is `:cloud`, because it cannot be judged;
+    1. an input that is not a string, or not valid UTF-8, is `:cloud`, because it cannot be judged;
     2. an input longer than 280 characters is `:cloud`;
     3. a history of more than 20 turns is `:cloud`, because the context is heavy;
     4. an input that asks for reasoning or writing is `:cloud`;
@@ -26,6 +26,7 @@ defmodule Mead.Router.Classifier do
   @spec classify([Turn.t()], term()) :: :local | :cloud
   def classify(history, input) when is_binary(input) do
     cond do
+      not String.valid?(input) -> :cloud
       String.length(input) > @maximum_local_length -> :cloud
       length(history) > @maximum_local_history -> :cloud
       Regex.match?(@reasoning_pattern, input) -> :cloud

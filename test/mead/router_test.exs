@@ -110,6 +110,41 @@ defmodule Mead.RouterTest do
     end
   end
 
+  describe "a misconfigured slot" do
+    test "fails the turn with :invalid_slot instead of crashing or echoing its content" do
+      for invalid <- [{FakeProvider, %{api_key: "sk-secret"}}, :nonsense, {"module", []}] do
+        assert Router.route([], "explain", [], slots(cloud: invalid)) == {:error, :invalid_slot}
+      end
+
+      assert Router.route([], "explain", [], %{cloud: {FakeProvider, []}}) ==
+               {:error, :invalid_slot}
+
+      refute_received {:provider_called, _messages}
+    end
+  end
+
+  describe "text that is not valid UTF-8" do
+    test "fails without calling the provider" do
+      assert Router.route([], <<255, "x">>, [route: :cloud], slots()) ==
+               {:error, :unsupported_input}
+
+      refute_received {:provider_called, _messages}
+    end
+  end
+
+  describe "a long conversation" do
+    test "replays only the most recent twenty exchanges" do
+      history = for index <- 1..25, do: completed("question #{index}", "answer #{index}")
+
+      Router.route(history, "now", [route: :cloud], slots())
+
+      assert_received {:provider_called, messages}
+      assert length(messages) == 41
+      assert hd(messages) == %{role: :user, content: "question 6"}
+      assert List.last(messages) == %{role: :user, content: "now"}
+    end
+  end
+
   describe "the route event" do
     setup do
       test_pid = self()

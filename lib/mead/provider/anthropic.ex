@@ -11,6 +11,8 @@ defmodule Mead.Provider.Anthropic do
       `~/.config/anthropic/api.env`.
     * `:receive_timeout` - milliseconds to wait for the reply; defaults to 25 seconds, below the
       default turn timeout so a slow provider reports its own reason first.
+    * `:maximum_retry_delay` - milliseconds; the longest wait before a retry, even when the server
+      asks for more with `retry-after`; defaults to 2 seconds.
     * `:req_options` - extra options merged into the `Req` request, used by tests to stub the
       network.
 
@@ -26,14 +28,26 @@ defmodule Mead.Provider.Anthropic do
   @default_model "claude-sonnet-5-5"
   @default_max_tokens 1024
   @default_receive_timeout 25_000
+  @default_maximum_retry_delay 2_000
   @default_api_key_file "~/.config/anthropic/api.env"
   @api_key_variable "ANTHROPIC_API_KEY"
 
   @impl true
   def complete(messages, options) do
-    with {:ok, api_key} <- fetch_api_key(options),
+    with :ok <- validate_options(options),
+         {:ok, api_key} <- fetch_api_key(options),
          {:ok, response} <- request(messages, api_key, options) do
       parse(response)
+    end
+  end
+
+  # A map or any other shape would crash deep inside `Keyword` with the key among the arguments of
+  # the stacktrace, which the session stores and replies. Refuse it before the key is read.
+  defp validate_options(options) do
+    if Keyword.keyword?(options) and Keyword.keyword?(Keyword.get(options, :req_options, [])) do
+      :ok
+    else
+      {:error, :invalid_options}
     end
   end
 
@@ -90,7 +104,7 @@ defmodule Mead.Provider.Anthropic do
         json: body,
         headers: [{"x-api-key", api_key}, {"anthropic-version", @api_version}],
         receive_timeout: Keyword.get(options, :receive_timeout, @default_receive_timeout),
-        retry: &retry?/2,
+        retry: &retry?(&1, &2, maximum_retry_delay(options)),
         max_retries: 2
       ]
       |> Keyword.merge(Keyword.get(options, :req_options, []))
@@ -104,8 +118,26 @@ defmodule Mead.Provider.Anthropic do
     end
   end
 
-  defp retry?(_request, %Req.Response{status: status}), do: status == 429 or status >= 500
-  defp retry?(_request, _exception), do: false
+  defp maximum_retry_delay(options),
+    do: Keyword.get(options, :maximum_retry_delay, @default_maximum_retry_delay)
+
+  # A `retry-after` header would otherwise be obeyed in full, and two long waits overrun the turn
+  # timeout, so the caller would see `:timeout` instead of the status that caused the retries.
+  defp retry?(_request, %Req.Response{status: status} = response, maximum_delay)
+       when status == 429 or status >= 500 do
+    case Req.Response.get_header(response, "retry-after") do
+      [seconds | _rest] ->
+        case Integer.parse(seconds) do
+          {seconds, ""} -> {:delay, min(seconds * 1_000, maximum_delay)}
+          _date_or_garbage -> {:delay, maximum_delay}
+        end
+
+      [] ->
+        true
+    end
+  end
+
+  defp retry?(_request, _response_or_exception, _maximum_delay), do: false
 
   defp parse(%Req.Response{body: %{"content" => content, "usage" => usage}})
        when is_list(content) do

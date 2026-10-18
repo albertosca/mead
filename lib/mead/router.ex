@@ -31,6 +31,9 @@ defmodule Mead.Router do
   alias Mead.Session.Turn
 
   @event [:mead, :router, :route]
+  # A conversation that grows without bound eventually overflows the model's context and then
+  # every later turn fails, so only the most recent exchanges are replayed.
+  @maximum_replayed_exchanges 20
 
   @impl true
   def handle_turn(history, input, options) do
@@ -52,7 +55,7 @@ defmodule Mead.Router do
   def route(history, input, options, slots) do
     started_at = System.monotonic_time()
     {route, route_source} = choose_route(history, input, options)
-    slot = Keyword.get(slots, route)
+    slot = if Keyword.keyword?(slots), do: Keyword.get(slots, route), else: :invalid
 
     {result, provider, usage} = call_slot(slot, route, history, input)
 
@@ -85,8 +88,22 @@ defmodule Mead.Router do
     {{:error, unavailable_reason(route)}, nil, no_usage()}
   end
 
-  defp call_slot({provider, provider_options}, _route, history, input) do
-    if is_binary(input) do
+  # A slot of any other shape would crash inside the provider with its content in the stacktrace,
+  # which the session stores and replies; refuse it by shape instead.
+  defp call_slot({provider, provider_options} = slot, _route, history, input) do
+    if is_atom(provider) and Keyword.keyword?(provider_options) do
+      call_provider(slot, history, input)
+    else
+      {{:error, :invalid_slot}, nil, no_usage()}
+    end
+  end
+
+  defp call_slot(_invalid, _route, _history, _input) do
+    {{:error, :invalid_slot}, nil, no_usage()}
+  end
+
+  defp call_provider({provider, provider_options}, history, input) do
+    if is_binary(input) and String.valid?(input) do
       messages = build_messages(history, input)
 
       case provider.complete(messages, provider_options) do
@@ -109,12 +126,12 @@ defmodule Mead.Router do
     earlier =
       for %Turn{status: :ok, input: past_input, output: past_output} <- history,
           is_binary(past_input) and is_binary(past_output),
-          message <- [
+          do: [
             %{role: :user, content: past_input},
             %{role: :assistant, content: past_output}
-          ],
-          do: message
+          ]
 
-    earlier ++ [%{role: :user, content: input}]
+    Enum.concat(Enum.take(earlier, -@maximum_replayed_exchanges)) ++
+      [%{role: :user, content: input}]
   end
 end

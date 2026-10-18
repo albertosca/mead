@@ -15,6 +15,7 @@ defmodule Mead.Provider do
           :missing_api_key
           | :timeout
           | :malformed_response
+          | :invalid_options
           | {:http_status, pos_integer()}
           | {:transport, term()}
 

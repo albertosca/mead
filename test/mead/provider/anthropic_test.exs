@@ -142,6 +142,44 @@ defmodule Mead.Provider.AnthropicTest do
     assert Anthropic.complete(@messages, options()) == {:error, :malformed_response}
   end
 
+  test "a long retry-after is capped, and a persistent 429 is reported after two retries" do
+    {:ok, counter} = Agent.start_link(fn -> 0 end)
+
+    Req.Test.stub(__MODULE__, fn conn ->
+      Agent.update(counter, &(&1 + 1))
+
+      conn
+      |> Plug.Conn.put_resp_header("retry-after", "1")
+      |> Plug.Conn.send_resp(429, "slow down")
+    end)
+
+    started_at = System.monotonic_time(:millisecond)
+
+    assert Anthropic.complete(
+             @messages,
+             options(maximum_retry_delay: 10, req_options: [plug: {Req.Test, __MODULE__}])
+           ) ==
+             {:error, {:http_status, 429}}
+
+    assert System.monotonic_time(:millisecond) - started_at < 1_000
+    assert Agent.get(counter, & &1) == 3
+  end
+
+  test "options that are not keyword lists fail without echoing the key" do
+    log =
+      capture_log(fn ->
+        assert Anthropic.complete(@messages, %{api_key: @sentinel_key}) ==
+                 {:error, :invalid_options}
+
+        assert Anthropic.complete(
+                 @messages,
+                 options(req_options: %{plug: {Req.Test, __MODULE__}})
+               ) == {:error, :invalid_options}
+      end)
+
+    refute log =~ @sentinel_key
+  end
+
   describe "the API key" do
     @describetag :tmp_dir
 

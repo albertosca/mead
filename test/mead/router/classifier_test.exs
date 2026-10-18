@@ -58,4 +58,8 @@ defmodule Mead.Router.ClassifierTest do
     assert Classifier.classify([], "the planet status") == :local
     assert Classifier.classify([], "whitelist") == :cloud
   end
+
+  test "text that is not valid UTF-8 goes to the cloud" do
+    assert Classifier.classify([], <<255, "list">>) == :cloud
+  end
 end
