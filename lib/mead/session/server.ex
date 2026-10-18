@@ -50,11 +50,12 @@ defmodule Mead.Session.Server do
   end
 
   @impl true
-  def handle_call({:submit, _input}, _from, %{running: running} = state) when running != nil do
+  def handle_call({:submit, _input, _options}, _from, %{running: running} = state)
+      when running != nil do
     {:reply, {:error, :turn_in_progress}, state}
   end
 
-  def handle_call({:submit, input}, from, state) do
+  def handle_call({:submit, input, options}, from, state) do
     handler = state.handler
     history = History.all(state.session_id)
 
@@ -62,7 +63,7 @@ defmodule Mead.Session.Server do
 
     task =
       Task.Supervisor.async(Mead.TurnSupervisor, fn ->
-        handler.handle_turn(history, input)
+        handler.handle_turn(history, input, options)
       end)
 
     timer = Process.send_after(self(), {:turn_timeout, task.ref}, state.turn_timeout)
