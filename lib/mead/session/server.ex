@@ -59,12 +59,13 @@ defmodule Mead.Session.Server do
   def handle_call({:submit, input, options}, from, state) do
     handler = state.handler
     history = History.all(state.session_id)
+    handler_options = Keyword.put(options, :session_id, state.session_id)
 
     History.append(state.session_id, Turn.start(input))
 
     task =
       Task.Supervisor.async(Mead.TurnSupervisor, fn ->
-        handler.handle_turn(history, input, options)
+        handler.handle_turn(history, input, handler_options)
       end)
 
     timer = Process.send_after(self(), {:turn_timeout, task.ref}, state.turn_timeout)

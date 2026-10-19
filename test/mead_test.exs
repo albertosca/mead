@@ -102,7 +102,32 @@ defmodule Mead.MeadTest do
       assert Mead.submit_turn(session_id, {:report_options, self()}, route: :cloud) ==
                {:ok, :reported}
 
-      assert_received {:handler_options, [route: :cloud]}
+      assert_received {:handler_options, options}
+      assert options[:route] == :cloud
+    end
+
+    test "the server tells the handler which session the turn belongs to" do
+      {:ok, session_id} =
+        Mead.start_session(handler: Mead.Test.ScriptedHandler, turn_timeout: 5_000)
+
+      on_exit(fn -> Mead.stop_session(session_id) end)
+
+      Mead.submit_turn(session_id, {:report_options, self()})
+      assert_received {:handler_options, options}
+      assert options[:session_id] == session_id
+    end
+
+    test "a caller cannot choose the session id the handler sees" do
+      {:ok, session_id} =
+        Mead.start_session(handler: Mead.Test.ScriptedHandler, turn_timeout: 5_000)
+
+      on_exit(fn -> Mead.stop_session(session_id) end)
+
+      assert_raise ArgumentError, fn ->
+        Mead.submit_turn(session_id, {:report_options, self()}, session_id: "forged")
+      end
+
+      refute_received {:handler_options, _options}
     end
 
     test "the route defaults to :auto" do
@@ -112,7 +137,8 @@ defmodule Mead.MeadTest do
       on_exit(fn -> Mead.stop_session(session_id) end)
 
       Mead.submit_turn(session_id, {:report_options, self()})
-      assert_received {:handler_options, [route: :auto]}
+      assert_received {:handler_options, options}
+      assert options[:route] == :auto
     end
 
     test "an unknown route is rejected before any turn is recorded" do

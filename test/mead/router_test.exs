@@ -174,8 +174,16 @@ defmodule Mead.RouterTest do
                route: :local,
                route_source: :classified,
                provider: FakeProvider,
-               status: :ok
+               status: :ok,
+               session_id: nil
              }
+    end
+
+    test "reports the session id the server passed in the options" do
+      Router.route([], "list my tasks", [session_id: "session-1"], slots())
+
+      assert_received {:route_event, _measurements, metadata}
+      assert metadata.session_id == "session-1"
     end
 
     test "reports a forced route and zero tokens on failure" do

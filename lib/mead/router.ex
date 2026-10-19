@@ -21,7 +21,8 @@ defmodule Mead.Router do
   emits `[:mead, :router, :route]` with the measurements `duration` (in native time units),
   `input_tokens`, and `output_tokens` (both zero on failure), and the metadata `route`,
   `route_source` (`:classified` or `:forced`), `provider` (the module, or `nil` for an empty
-  slot), and `status` (`:ok` or `:error`). A provider that raises instead of returning an error
+  slot), `status` (`:ok` or `:error`), and `session_id` (the session the server passed in the
+  options, `nil` outside a session). A provider that raises instead of returning an error
   emits no event.
   """
 
@@ -70,7 +71,8 @@ defmodule Mead.Router do
         route: route,
         route_source: route_source,
         provider: provider,
-        status: if(match?({:ok, _text}, result), do: :ok, else: :error)
+        status: if(match?({:ok, _text}, result), do: :ok, else: :error),
+        session_id: Keyword.get(options, :session_id)
       }
     )
 

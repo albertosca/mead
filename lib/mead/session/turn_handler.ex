@@ -3,8 +3,9 @@ defmodule Mead.Session.TurnHandler do
   Behaviour for the code that produces the output of a turn.
 
   A handler receives the turns recorded before the current one, the input of the current turn,
-  and the options given to `Mead.submit_turn/3` (for example `route: :cloud`). It runs in an
-  isolated task, so raising, exiting, or running too long never takes the session down.
+  and the options for the turn: the ones given to `Mead.submit_turn/3` (for example
+  `route: :cloud`) plus `session_id`, which the server adds and a caller can never set. It runs
+  in an isolated task, so raising, exiting, or running too long never takes the session down.
   """
 
   alias Mead.Session.Turn
