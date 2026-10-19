@@ -216,5 +216,37 @@ defmodule Mead.LedgerTest do
 
       :telemetry.detach({Ledger, name})
     end
+
+    test "a supervised ledger that is killed comes back with one handler that counts" do
+      name = :"restarted_ledger_#{System.unique_integer([:positive])}"
+      event = [:mead_test, name]
+      first_pid = start_supervised!({Ledger, name: name, event: event})
+      reference = Process.monitor(first_pid)
+      Process.exit(first_pid, :kill)
+      assert_receive {:DOWN, ^reference, :process, ^first_pid, :killed}
+
+      second_pid = await_restart(name, first_pid)
+
+      assert second_pid != first_pid
+      assert [_single] = Enum.filter(:telemetry.list_handlers(event), &(&1.id == {Ledger, name}))
+
+      emit(event)
+
+      assert Ledger.totals(name).turns == 1
+    end
+  end
+
+  defp await_restart(name, old_pid, attempts \\ 100) do
+    case Process.whereis(name) do
+      pid when is_pid(pid) and pid != old_pid ->
+        pid
+
+      _missing when attempts > 0 ->
+        Process.sleep(10)
+        await_restart(name, old_pid, attempts - 1)
+
+      _missing ->
+        flunk("the ledger #{inspect(name)} was not restarted")
+    end
   end
 end
