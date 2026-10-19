@@ -90,7 +90,7 @@ defmodule Mead.Session.Server do
         {:turn_timeout, reference},
         %{running: %{task: %Task{ref: reference} = task}} = state
       ) do
-    case Task.shutdown(task, :brutal_kill) do
+    case kill_task(task) do
       {:ok, result} -> conclude(state, normalize(result))
       {:exit, reason} -> conclude(state, {:failed, reason})
       nil -> conclude(state, {:timeout, nil})
@@ -99,6 +99,23 @@ defmodule Mead.Session.Server do
 
   # Exit signals from finished tasks, and late timers or replies from a turn that concluded.
   def handle_info(_stray_message, state), do: {:noreply, state}
+
+  # Task.shutdown/2 monitors the pid again, and for a task that already died that second monitor
+  # answers :noproc and the task's real exit reason is thrown away. The monitor taken when the
+  # task started always delivers the real reason, so wait on that one.
+  defp kill_task(%Task{pid: pid, ref: reference}) do
+    Process.unlink(pid)
+    Process.exit(pid, :kill)
+
+    receive do
+      {:DOWN, ^reference, :process, _pid, reason} ->
+        receive do
+          {^reference, result} -> {:ok, result}
+        after
+          0 -> if reason == :killed, do: nil, else: {:exit, reason}
+        end
+    end
+  end
 
   defp normalize({:ok, output}), do: {:ok, output}
   defp normalize({:error, reason}), do: {:failed, reason}

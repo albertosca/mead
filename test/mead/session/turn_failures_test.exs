@@ -119,4 +119,23 @@ defmodule Mead.Session.TurnFailuresTest do
     assert Task.await(caller) == {:error, {:failed, :scripted_death}}
     assert {:ok, [%Turn{status: :failed, output: :scripted_death}]} = Mead.history(session_id)
   end
+
+  test "the death reason survives however the timer and the task's death interleave", context do
+    %{session_id: session_id, server_pid: server_pid} = context
+    test_pid = self()
+
+    # The interleaving is up to the scheduler, so repeat the scenario until the race has been hit.
+    for _attempt <- 1..300 do
+      caller = Task.async(fn -> Mead.submit_turn(session_id, {:block, test_pid}) end)
+      assert_receive {:handler_started, handler_pid}
+
+      :sys.suspend(server_pid)
+      %{running: %{task: %Task{ref: reference}}} = :sys.get_state(server_pid)
+      send(server_pid, {:turn_timeout, reference})
+      Process.exit(handler_pid, :scripted_death)
+      :sys.resume(server_pid)
+
+      assert Task.await(caller) == {:error, {:failed, :scripted_death}}
+    end
+  end
 end
