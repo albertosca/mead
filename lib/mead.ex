@@ -147,7 +147,11 @@ defmodule Mead do
     :exit, _reason -> {:error, :not_found}
   end
 
-  @doc "Stops a session and discards its history."
+  @doc "Stops a session, discarding its history and its ledger aggregate."
   @spec stop_session(String.t()) :: :ok | {:error, :not_found}
-  def stop_session(session_id), do: Pool.stop_session(session_id)
+  def stop_session(session_id) do
+    with :ok <- Pool.stop_session(session_id) do
+      Mead.Ledger.forget(session_id)
+    end
+  end
 end

@@ -5,17 +5,19 @@ defmodule Mead.ApplicationTest do
 
   import Mead.TestHelpers
 
-  test "the root supervisor starts the registry, the turn supervisor, and the pool in that order" do
+  test "the root supervisor starts the ledger, the registry, the turn supervisor, and the pool in that order" do
     child_ids =
       Mead.Supervisor
       |> Supervisor.which_children()
       |> Enum.map(fn {child_id, _pid, _type, _modules} -> child_id end)
       |> Enum.reverse()
 
-    assert child_ids == [Mead.Registry, Mead.TurnSupervisor, Mead.Session.Pool]
+    assert child_ids == [Mead.Ledger, Mead.Registry, Mead.TurnSupervisor, Mead.Session.Pool]
   end
 
   test "the root supervisor restarts later children when an earlier one dies (rest_for_one)" do
+    ledger_pid = Process.whereis(Mead.Ledger)
+    assert is_pid(ledger_pid)
     registry_pid = Process.whereis(Mead.Registry)
     turn_supervisor_pid = Process.whereis(Mead.TurnSupervisor)
     pool_pid = Process.whereis(Mead.Session.Pool)
@@ -29,6 +31,7 @@ defmodule Mead.ApplicationTest do
       end)
 
     assert new_pool_pid != pool_pid
+    assert Process.whereis(Mead.Ledger) == ledger_pid
     assert Process.whereis(Mead.Registry) == registry_pid
     assert Process.whereis(Mead.TurnSupervisor) != turn_supervisor_pid
   end

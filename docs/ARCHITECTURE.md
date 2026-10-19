@@ -15,7 +15,7 @@ graph TD
         Registry["Registry - Session Registry"]
         RouterEngine["Mead.Router - Stateless Model Dispatcher"]
         MCPHub["Mead.MCP.Hub - Tool Registry & Protocol"]
-        Metrics["Mead.Telemetry - Tokens & Cost Tracker"]
+        Metrics["Mead.Ledger - Token Usage Aggregates"]
     end
 
     RootSup --> SessionSup
@@ -40,9 +40,9 @@ graph TD
 3. **`Registry`:** Fast in-memory process registry mapping conversation UUIDs to runtime PIDs for microsecond WebSocket routing.
 4. **`Mead.Router`:** A stateless `Mead.Session.TurnHandler` with no process of its own. It classifies each turn as local or cloud (or obeys a `route:` override), calls the provider in that slot, and emits `[:mead, :router, :route]` events. It is not a child of the root supervisor, so no conversation shares a router process with another.
 5. **`Mead.MCP.Hub`:** Aggregates registered tool definitions, manages execution permissions, and translates JSON-RPC MCP messages.
-6. **`Mead.Telemetry`:** Real-time token consumption ledger emitting alerts as spend thresholds approach limits.
+6. **`Mead.Ledger`:** An in-memory ledger of what the router sends to providers, the first child of the root supervisor. It keeps usage aggregates per session and per route and a ring of the last 100 turns, written by a telemetry handler in the process that emitted the event. Budgets, prices, and disk persistence are not part of it.
 
-Implemented so far: the registry, the turn supervisor, the session pool, and the router core with the Anthropic provider. `Mead.MCP.Hub`, `Mead.Telemetry`, and the Ollama provider are specified here and arrive in later slices.
+Implemented so far: the registry, the turn supervisor, the session pool, the router core with the Anthropic provider, and the ledger. `Mead.MCP.Hub` and the Ollama provider are specified here and arrive in later slices.
 
 ---
 
@@ -55,7 +55,7 @@ flowchart LR
     Classifier -->|"Complex Reasoning, Synthesis"| CloudExec["Cloud Executor - Claude / Gemini"]
     LocalExec --> TurnHandler["Response Formatter & Action Cards"]
     CloudExec --> TurnHandler
-    TurnHandler --> Ledger["Telemetry - Token & Cost Ledger"]
+    TurnHandler --> Ledger["Mead.Ledger - Token Usage"]
 ```
 
 * **Local Executor:** Handles zero-cost tasks with full privacy (command parsing, email categorization, status checks).
@@ -73,3 +73,7 @@ A turn runs in a task under `Mead.TurnSupervisor`, linked to the server, which t
 ## 4. Router Internals
 
 `Mead.Router.route/4` takes the forced route or asks `Mead.Router.Classifier`, which is a pure function that sends a turn to the local model only when the input is short, the history is light, and it asks for triage or formatting without asking for reasoning; any doubt goes to the cloud. The route names a slot holding a `{provider, options}` pair implementing `Mead.Provider`. A turn routed to an empty slot fails with `:local_unavailable` or `:cloud_unavailable` and is never sent to the other slot. Only completed text turns are replayed to the provider as history. A failed turn replies `{:error, {:failed, reason}}`. The full design is in `docs/superpowers/specs/2026-10-17-model-router-design.md`.
+
+## 5. Ledger Internals
+
+`Mead.Session.Server` adds `session_id` to the options it passes to the handler, and `Mead.Router` puts it in the metadata of `[:mead, :router, :route]`. `Mead.Ledger` owns two public ETS tables and attaches a `:telemetry` handler that validates each event and updates counter rows atomically with `:ets.update_counter`, in the process that emitted the event; an event it cannot read is counted as `dropped` and the handler never raises, because `:telemetry` detaches a handler that does. Totals are kept per session and per `{route, provider}`, and the last 100 turns sit in a ring. `Mead.stop_session/1` forgets the session row while the route totals keep what it added. The ledger is the first root child so that a crash of a later child does not wipe its numbers. The full design is in `docs/superpowers/specs/2026-10-18-token-ledger-design.md`.
