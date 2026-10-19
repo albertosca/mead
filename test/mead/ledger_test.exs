@@ -135,6 +135,47 @@ defmodule Mead.LedgerTest do
     end
   end
 
+  describe "recent turns" do
+    test "come back newest first with every field", %{event: event, ledger: ledger} do
+      emit(event, %{}, %{input_tokens: 1})
+      emit(event, %{status: :error, session_id: "session-b"}, %{input_tokens: 2})
+
+      assert [newest, oldest] = Ledger.recent(10, ledger)
+
+      assert newest.input_tokens == 2
+      assert newest.status == :error
+      assert newest.session_id == "session-b"
+      assert oldest.input_tokens == 1
+      assert oldest.route == :cloud
+      assert oldest.route_source == :classified
+      assert oldest.provider == Mead.Test.FakeProvider
+      assert oldest.duration_ms == 7
+      assert is_integer(oldest.at)
+    end
+
+    test "keep exactly the last 100 after 150 turns", %{event: event, ledger: ledger} do
+      for number <- 1..150, do: emit(event, %{}, %{input_tokens: number})
+
+      recent = Ledger.recent(1_000, ledger)
+
+      assert length(recent) == 100
+      assert Enum.map(recent, & &1.input_tokens) == Enum.to_list(150..51//-1)
+    end
+
+    test "honour a smaller limit and an empty one", %{event: event, ledger: ledger} do
+      for number <- 1..5, do: emit(event, %{}, %{input_tokens: number})
+
+      assert Enum.map(Ledger.recent(2, ledger), & &1.input_tokens) == [5, 4]
+      assert Ledger.recent(0, ledger) == []
+    end
+
+    test "do not include dropped events", %{event: event, ledger: ledger} do
+      emit(event, %{status: :weird})
+
+      assert Ledger.recent(10, ledger) == []
+    end
+  end
+
   describe "malformed events" do
     test "are counted as dropped and the next valid event is still recorded", %{
       event: event,

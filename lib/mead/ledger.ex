@@ -20,6 +20,7 @@ defmodule Mead.Ledger do
   use GenServer
 
   @default_event [:mead, :router, :route]
+  @ring_size 100
 
   @doc """
   Starts the ledger.
@@ -78,6 +79,18 @@ defmodule Mead.Ledger do
           route_rows(counters),
         into: %{},
         do: {{route, provider}, totals_from(row)}
+  end
+
+  @doc "Returns up to `limit` of the most recent turns, newest first; at most 100 are kept."
+  @spec recent(non_neg_integer(), GenServer.server()) :: [map()]
+  def recent(limit, ledger \\ __MODULE__) when is_integer(limit) and limit >= 0 do
+    %{ring: ring} = tables(ledger)
+
+    ring
+    |> :ets.tab2list()
+    |> Enum.sort_by(fn {_slot, sequence, _entry} -> sequence end, :desc)
+    |> Enum.take(limit)
+    |> Enum.map(fn {_slot, _sequence, entry} -> entry end)
   end
 
   @doc "Forgets the aggregate of a session; the route totals keep what the session added."
@@ -184,8 +197,13 @@ defmodule Mead.Ledger do
     :ets.update_counter(counters, key, operations, {key, 0, 0, 0, 0, 0})
   end
 
-  # Replaced in Task 3.
-  defp write_ring(_counters, _ring, _entry), do: :ok
+  # The counter hands out a strictly increasing sequence, and the slot is its remainder, so a new
+  # record replaces the oldest one with no cleanup pass.
+  defp write_ring(counters, ring, entry) do
+    sequence = :ets.update_counter(counters, :ring_index, 1, {:ring_index, 0})
+    slot = rem(sequence - 1, @ring_size)
+    :ets.insert(ring, {slot, sequence, Map.put(entry, :at, System.system_time(:millisecond))})
+  end
 
   defp tables(ledger), do: GenServer.call(ledger, :tables)
 
