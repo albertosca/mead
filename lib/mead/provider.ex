@@ -5,9 +5,23 @@ defmodule Mead.Provider do
   A provider receives the conversation as a list of messages and returns the text of the reply
   together with the token usage, which the token ledger will consume. Failures are returned, not
   raised, as a normalized reason.
+
+  A provider may also export `converse/3`, which lets the model call tools; see that callback.
   """
 
-  @type message :: %{role: :user | :assistant, content: String.t()}
+  @type block ::
+          %{type: :text, text: String.t()}
+          | %{type: :tool_use, id: String.t(), name: String.t(), input: map()}
+          | %{
+              type: :tool_result,
+              tool_use_id: String.t(),
+              content: String.t(),
+              is_error: boolean()
+            }
+
+  @type message :: %{role: :user | :assistant, content: String.t() | [block()]}
+
+  @type tool :: %{name: String.t(), description: String.t() | nil, input_schema: map()}
 
   @type usage :: %{input_tokens: non_neg_integer(), output_tokens: non_neg_integer()}
 
@@ -21,4 +35,15 @@ defmodule Mead.Provider do
 
   @callback complete(messages :: [message()], options :: keyword()) ::
               {:ok, %{text: String.t(), usage: usage()}} | {:error, reason()}
+
+  @doc """
+  Like `complete/2`, but the model may ask for tools. It returns the blocks of the answer and why
+  the model stopped: `:tool_use` means the blocks include `tool_use` blocks whose results the
+  caller must send back in a following call. Optional: a provider without it is never given tools.
+  """
+  @callback converse(messages :: [message()], tools :: [tool()], options :: keyword()) ::
+              {:ok, %{content: [block()], stop_reason: :end_turn | :tool_use, usage: usage()}}
+              | {:error, reason()}
+
+  @optional_callbacks converse: 3
 end

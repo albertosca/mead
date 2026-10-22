@@ -16,6 +16,8 @@ defmodule Mead.Provider.Anthropic do
     * `:req_options` - extra options merged into the `Req` request, used by tests to stub the
       network.
 
+  `converse/3` also sends `tools` (omitted from the request when the list is empty) and returns the blocks of the answer; `complete/2` is built on it and keeps returning the joined text. Blocks other than text and tool_use are dropped.
+
   Requests are retried at most twice, and only after HTTP 429 or a 5xx status. A timeout or a
   transport error is never retried. The key travels only in the request header and is never part
   of a returned reason.
@@ -34,9 +36,20 @@ defmodule Mead.Provider.Anthropic do
 
   @impl true
   def complete(messages, options) do
+    with {:ok, %{content: content, usage: usage}} <- converse(messages, [], options),
+         [_ | _] = texts <- for(%{type: :text, text: text} <- content, do: text) do
+      {:ok, %{text: Enum.join(texts), usage: usage}}
+    else
+      {:error, _reason} = error -> error
+      _no_text -> {:error, :malformed_response}
+    end
+  end
+
+  @impl true
+  def converse(messages, tools, options) do
     with :ok <- validate_options(options),
          {:ok, api_key} <- fetch_api_key(options),
-         {:ok, response} <- request(messages, api_key, options) do
+         {:ok, response} <- request(messages, tools, api_key, options) do
       parse(response)
     end
   end
@@ -91,12 +104,14 @@ defmodule Mead.Provider.Anthropic do
   defp non_empty(""), do: nil
   defp non_empty(value), do: value
 
-  defp request(messages, api_key, options) do
-    body = %{
-      model: Keyword.get(options, :model, @default_model),
-      max_tokens: Keyword.get(options, :max_tokens, @default_max_tokens),
-      messages: messages
-    }
+  defp request(messages, tools, api_key, options) do
+    body =
+      %{
+        model: Keyword.get(options, :model, @default_model),
+        max_tokens: Keyword.get(options, :max_tokens, @default_max_tokens),
+        messages: messages
+      }
+      |> put_tools(tools)
 
     request_options =
       [
@@ -139,16 +154,31 @@ defmodule Mead.Provider.Anthropic do
 
   defp retry?(_request, _response_or_exception, _maximum_delay), do: false
 
-  defp parse(%Req.Response{body: %{"content" => content, "usage" => usage}})
-       when is_list(content) do
-    texts = for %{"type" => "text", "text" => text} <- content, is_binary(text), do: text
+  defp put_tools(body, []), do: body
+  defp put_tools(body, tools), do: Map.put(body, :tools, Enum.map(tools, &encode_tool/1))
 
-    with [_ | _] <- texts,
+  defp encode_tool(%{name: name, input_schema: input_schema} = tool) do
+    base = %{name: name, input_schema: input_schema}
+
+    case Map.get(tool, :description) do
+      description when is_binary(description) -> Map.put(base, :description, description)
+      _none -> base
+    end
+  end
+
+  defp parse(%Req.Response{body: %{"content" => content, "usage" => usage} = body})
+       when is_list(content) do
+    blocks = parse_blocks(content)
+    stop_reason = if Map.get(body, "stop_reason") == "tool_use", do: :tool_use, else: :end_turn
+
+    with [_ | _] <- blocks,
+         true <- stop_reason != :tool_use or Enum.any?(blocks, &(&1.type == :tool_use)),
          %{"input_tokens" => input_tokens, "output_tokens" => output_tokens}
          when is_integer(input_tokens) and is_integer(output_tokens) <- usage do
       {:ok,
        %{
-         text: Enum.join(texts),
+         content: blocks,
+         stop_reason: stop_reason,
          usage: %{input_tokens: input_tokens, output_tokens: output_tokens}
        }}
     else
@@ -157,4 +187,19 @@ defmodule Mead.Provider.Anthropic do
   end
 
   defp parse(_response), do: {:error, :malformed_response}
+
+  # Blocks of any other type (thinking, for one) are not requested and are left out.
+  defp parse_blocks(content) do
+    Enum.flat_map(content, fn
+      %{"type" => "text", "text" => text} when is_binary(text) ->
+        [%{type: :text, text: text}]
+
+      %{"type" => "tool_use", "id" => id, "name" => name, "input" => input}
+      when is_binary(id) and is_binary(name) and is_map(input) ->
+        [%{type: :tool_use, id: id, name: name, input: input}]
+
+      _other ->
+        []
+    end)
+  end
 end

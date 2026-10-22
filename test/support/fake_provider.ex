@@ -13,5 +13,25 @@ defmodule Mead.Test.FakeProvider do
     Keyword.get(options, :result, {:ok, %{text: "fake reply", usage: usage()}})
   end
 
+  # Scripted conversation: the next step comes from the Agent given as `:script`, so a test can
+  # play a model that asks for a tool and then answers. A step is the whole return value.
+  @impl true
+  def converse(messages, tools, options) do
+    send(Keyword.fetch!(options, :test_pid), {:provider_conversed, messages, tools})
+
+    Agent.get_and_update(Keyword.fetch!(options, :script), fn [next | rest] -> {next, rest} end)
+  end
+
+  def text_step(text, usage \\ usage()) do
+    {:ok, %{content: [%{type: :text, text: text}], stop_reason: :end_turn, usage: usage}}
+  end
+
+  def tool_step(tool_uses, usage \\ usage()) do
+    blocks =
+      for {id, name, input} <- tool_uses, do: %{type: :tool_use, id: id, name: name, input: input}
+
+    {:ok, %{content: blocks, stop_reason: :tool_use, usage: usage}}
+  end
+
   def usage, do: %{input_tokens: 5, output_tokens: 3}
 end
