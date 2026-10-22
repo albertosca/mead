@@ -5,14 +5,20 @@ defmodule Mead.ApplicationTest do
 
   import Mead.TestHelpers
 
-  test "the root supervisor starts the ledger, the registry, the turn supervisor, and the pool in that order" do
+  test "the root supervisor starts the ledger, the registry, the turn supervisor, the pool, and the MCP hub in that order" do
     child_ids =
       Mead.Supervisor
       |> Supervisor.which_children()
       |> Enum.map(fn {child_id, _pid, _type, _modules} -> child_id end)
       |> Enum.reverse()
 
-    assert child_ids == [Mead.Ledger, Mead.Registry, Mead.TurnSupervisor, Mead.Session.Pool]
+    assert child_ids == [
+             Mead.Ledger,
+             Mead.Registry,
+             Mead.TurnSupervisor,
+             Mead.Session.Pool,
+             Mead.MCP.Hub
+           ]
   end
 
   test "the root supervisor restarts later children when an earlier one dies (rest_for_one)" do
@@ -34,5 +40,24 @@ defmodule Mead.ApplicationTest do
     assert Process.whereis(Mead.Ledger) == ledger_pid
     assert Process.whereis(Mead.Registry) == registry_pid
     assert Process.whereis(Mead.TurnSupervisor) != turn_supervisor_pid
+  end
+
+  test "killing the hub restarts only the hub" do
+    hub_pid = Process.whereis(Mead.MCP.Hub)
+    pool_pid = Process.whereis(Mead.Session.Pool)
+    ledger_pid = Process.whereis(Mead.Ledger)
+
+    Process.exit(hub_pid, :kill)
+
+    new_hub_pid =
+      wait_until(fn ->
+        candidate = Process.whereis(Mead.MCP.Hub)
+        candidate != hub_pid and candidate
+      end)
+
+    assert is_pid(new_hub_pid)
+    assert Process.whereis(Mead.Session.Pool) == pool_pid
+    assert Process.whereis(Mead.Ledger) == ledger_pid
+    assert Mead.MCP.Hub.tools_for([]) == []
   end
 end

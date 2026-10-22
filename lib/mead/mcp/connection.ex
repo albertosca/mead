@@ -14,6 +14,8 @@ defmodule Mead.MCP.Connection do
 
   Only messages from the current transport are honoured: a late message from a replaced one is
   ignored. The connection traps exits so that a transport that dies is an ordinary event.
+
+  Calls are carried by `call_tool/5`; each pending call monitors its caller and has its own timer.
   """
 
   use GenServer
@@ -25,6 +27,7 @@ defmodule Mead.MCP.Connection do
   @default_handshake_timeout 10_000
   @default_reconnect_delays [1_000, 2_000, 5_000, 15_000, 30_000]
   @maximum_tool_pages 20
+  @maximum_result_characters 50_000
   @default_schema %{"type" => "object", "properties" => %{}}
 
   @spec start_link(keyword()) :: GenServer.on_start()
@@ -33,6 +36,23 @@ defmodule Mead.MCP.Connection do
     registry = Keyword.fetch!(options, :registry)
 
     GenServer.start_link(__MODULE__, options, name: {:via, Registry, {registry, server}})
+  end
+
+  @spec call_tool(atom(), atom(), String.t(), map(), pos_integer()) ::
+          {:ok, %{content: String.t(), is_error: boolean()}} | {:error, term()}
+  def call_tool(registry, server, tool, arguments, timeout) do
+    case Registry.lookup(registry, server) do
+      [{connection, _value}] ->
+        try do
+          GenServer.call(connection, {:call_tool, tool, arguments, timeout}, timeout + 1_000)
+        catch
+          :exit, {:timeout, _call} -> {:error, :timeout}
+          :exit, _reason -> {:error, :connection_lost}
+        end
+
+      [] ->
+        {:error, :connection_unavailable}
+    end
   end
 
   @impl GenServer
@@ -60,6 +80,26 @@ defmodule Mead.MCP.Connection do
   end
 
   @impl GenServer
+  def handle_call(
+        {:call_tool, tool, arguments, timeout},
+        {caller, _tag} = from,
+        %{phase: :ready} = state
+      ) do
+    monitor = Process.monitor(caller)
+
+    make_pending = fn id ->
+      {:call, from, monitor, Process.send_after(self(), {:call_timeout, id}, timeout)}
+    end
+
+    {:noreply,
+     send_request(state, make_pending, &Protocol.call_tool_request(&1, tool, arguments))}
+  end
+
+  def handle_call({:call_tool, _tool, _arguments, _timeout}, _from, state) do
+    {:reply, {:error, :connection_unavailable}, state}
+  end
+
+  @impl GenServer
   def handle_continue(:connect, state), do: {:noreply, connect(state)}
 
   @impl GenServer
@@ -84,6 +124,21 @@ defmodule Mead.MCP.Connection do
   def handle_info({:handshake_timeout, reference}, %{handshake_reference: reference} = state)
       when state.phase in [:initializing, :listing] do
     {:noreply, disconnect(state, :handshake_timeout)}
+  end
+
+  def handle_info({:call_timeout, id}, state), do: {:noreply, fail_request(state, id, :timeout)}
+
+  def handle_info({:DOWN, monitor, :process, _caller, _reason}, state) do
+    case Enum.find(state.pending, fn {_id, step} ->
+           match?({:call, _from, ^monitor, _timer}, step)
+         end) do
+      {id, {:call, _from, _monitor, timer}} ->
+        Process.cancel_timer(timer)
+        {:noreply, %{state | pending: Map.delete(state.pending, id)}}
+
+      nil ->
+        {:noreply, state}
+    end
   end
 
   def handle_info(_stale_or_unknown, state), do: {:noreply, state}
@@ -311,6 +366,29 @@ defmodule Mead.MCP.Connection do
     %{state | phase: :ready, attempt: 0, tools: tools}
   end
 
-  # Replaced in Task 8, when calls are added.
-  defp call_outcome(_result), do: {:error, :malformed_response}
+  defp call_outcome(%{"content" => content} = result) when is_list(content) do
+    {:ok, %{content: content_text(content), is_error: Map.get(result, "isError") == true}}
+  end
+
+  defp call_outcome(_malformed), do: {:error, :malformed_response}
+
+  defp content_text(blocks) do
+    blocks
+    |> Enum.map(fn
+      %{"type" => "text", "text" => text} when is_binary(text) -> text
+      %{"type" => type} when is_binary(type) -> "[non-text content: #{type}]"
+      _unknown -> "[non-text content]"
+    end)
+    |> Enum.join("\n")
+    |> truncate()
+  end
+
+  defp truncate(text) do
+    if String.length(text) > @maximum_result_characters do
+      String.slice(text, 0, @maximum_result_characters) <>
+        "\n[truncated: the result was longer than #{@maximum_result_characters} characters]"
+    else
+      text
+    end
+  end
 end
