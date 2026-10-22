@@ -51,6 +51,18 @@ defmodule Mead.LedgerTest do
                 %{turns: 2, failures: 0, input_tokens: 15, output_tokens: 4, duration_ms: 14}}
     end
 
+    test "the tool_calls measurement is accepted and does not change the counts", %{
+      event: event,
+      ledger: ledger
+    } do
+      emit(event, %{}, %{tool_calls: 3})
+
+      assert {:ok, %{turns: 1, failures: 0, input_tokens: 5, output_tokens: 3}} =
+               Ledger.session_totals("session-a", ledger)
+
+      assert Ledger.totals(ledger).dropped == 0
+    end
+
     test "a failed turn counts as a failure with the tokens it reported", %{
       event: event,
       ledger: ledger
