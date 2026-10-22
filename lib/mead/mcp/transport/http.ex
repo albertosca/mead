@@ -28,6 +28,7 @@ defmodule Mead.MCP.Transport.Http do
   alias Mead.MCP.Protocol
 
   @default_receive_timeout 30_000
+  @maximum_body_bytes 4 * 1024 * 1024
 
   @impl Mead.MCP.Transport
   def start_link(options, owner) when is_list(options) and is_pid(owner) do
@@ -85,9 +86,24 @@ defmodule Mead.MCP.Transport.Http do
   # An exception inside the task would leave the request unanswered until the connection's own
   # timeout, so it is turned into the same kind of result a transport error produces.
   defp perform(request) do
-    Req.post(request)
+    case Req.post(request) do
+      {:ok, %Req.Response{private: %{too_large: true}}} -> {:error, :response_too_large}
+      other -> other
+    end
   rescue
     exception -> {:error, exception}
+  end
+
+  # Accumulates the body by hand so that a runaway response stops at the limit instead of filling
+  # memory first and being measured afterwards.
+  defp collect_body({:data, data}, {request, response}) do
+    body = response.body <> data
+
+    if byte_size(body) > @maximum_body_bytes do
+      {:halt, {request, Req.Response.put_private(response, :too_large, true)}}
+    else
+      {:cont, {request, %{response | body: body}}}
+    end
   end
 
   defp build_request(state, message) do
@@ -105,7 +121,8 @@ defmodule Mead.MCP.Transport.Http do
         headers: headers,
         receive_timeout: state.receive_timeout,
         decode_body: false,
-        retry: false
+        retry: false,
+        into: &collect_body/2
       ],
       state.req_options
     )
@@ -143,6 +160,11 @@ defmodule Mead.MCP.Transport.Http do
 
   def handle_info({:http_result, id, {:error, %Req.TransportError{reason: reason}}}, state) do
     fail(state, id, {:transport, reason})
+    {:noreply, state}
+  end
+
+  def handle_info({:http_result, id, {:error, :response_too_large}}, state) do
+    fail(state, id, :response_too_large)
     {:noreply, state}
   end
 

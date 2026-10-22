@@ -22,7 +22,13 @@ defmodule Mead.MCP.Configuration do
   Validation is strict on purpose: an unknown option is almost always a typo, and a typo in a
   permission list silently denies or, worse, mis-grants. Reasons name keys, never values, so a
   header carrying a credential cannot reach a log through an error.
+
+  A listed tool must also be one the model can be shown: `server__tool` may hold letters, digits,
+  underscores, and hyphens, and be at most 64 characters. A name outside that would be hidden
+  without a word, so it is refused here.
   """
+
+  alias Mead.MCP.Policy
 
   @type transport ::
           {:stdio, command: String.t(), arguments: [String.t()]}
@@ -170,6 +176,9 @@ defmodule Mead.MCP.Configuration do
         cond do
           class not in @classes ->
             {:halt, {:error, {:invalid_server, name, {:invalid_tool_class, tool}}}}
+
+          not Policy.model_name_valid?(name, Atom.to_string(tool)) ->
+            {:halt, {:error, {:invalid_server, name, {:invalid_tool_name, tool}}}}
 
           Map.has_key?(normalized, Atom.to_string(tool)) ->
             {:halt, {:error, {:invalid_server, name, {:duplicate_tool, tool}}}}

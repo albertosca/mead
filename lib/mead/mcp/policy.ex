@@ -39,6 +39,15 @@ defmodule Mead.MCP.Policy do
     end
   end
 
+  @doc """
+  Whether `server__tool` is a name the model can be shown. A tool whose name fails this is never
+  visible, so the configuration refuses it at boot instead of hiding it without a word.
+  """
+  @spec model_name_valid?(atom(), String.t()) :: boolean()
+  def model_name_valid?(server_name, tool) do
+    Regex.match?(@model_name, model_name(server_name, tool))
+  end
+
   @spec authorize(term(), [map()], [map()], keyword()) ::
           {:ok, %{server: atom(), tool: String.t(), class: class()}}
           | {:error, :unknown_tool | :not_allowed}

@@ -170,6 +170,40 @@ defmodule Mead.MCP.Transport.HttpTest do
     end
   end
 
+  describe "a response larger than the limit" do
+    test "is refused as a send failure, whether JSON or an event stream" do
+      oversized = String.duplicate("x", 4 * 1024 * 1024 + 1)
+
+      json_transport = start(&json(&1, oversized))
+      Http.send_message(json_transport, 21, "{}")
+      assert_receive {:mcp_send_failed, ^json_transport, 21, :response_too_large}, 5_000
+      refute_received {:mcp_message, ^json_transport, _message}
+
+      stream_transport = start(&event_stream(&1, "data: " <> oversized <> "\n\n"))
+      Http.send_message(stream_transport, 22, "{}")
+      assert_receive {:mcp_send_failed, ^stream_transport, 22, :response_too_large}, 5_000
+      refute_received {:mcp_message, ^stream_transport, _message}
+    end
+
+    test "leaves the transport able to carry the next request" do
+      {:ok, calls} = Agent.start_link(fn -> 0 end)
+
+      transport =
+        start(fn conn ->
+          case Agent.get_and_update(calls, &{&1, &1 + 1}) do
+            0 -> json(conn, String.duplicate("x", 4 * 1024 * 1024 + 1))
+            _later -> json(conn, @response)
+          end
+        end)
+
+      Http.send_message(transport, 1, "{}")
+      assert_receive {:mcp_send_failed, ^transport, 1, :response_too_large}, 5_000
+
+      Http.send_message(transport, 2, "{}")
+      assert_receive {:mcp_message, ^transport, @response}, 2_000
+    end
+  end
+
   describe "a 404" do
     test "after a session was assigned means the session expired and closes the transport" do
       test_pid = self()

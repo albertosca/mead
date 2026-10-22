@@ -124,14 +124,18 @@ defmodule Mead.MCP.Hub do
   # A hub that was killed brutally leaves its children to die from the exit signal, which can still
   # be in flight when the root supervisor starts the replacement. Without this wait the new hub
   # collides with the old registry's name, fails to start, and the root gives up after three tries.
+  # The catalog and the registry also own named ETS tables, so a name counts as taken until both the
+  # process and its table are gone.
   defp await_released(names, attempts \\ 100) do
-    if Enum.any?(names, &Process.whereis/1) and attempts > 0 do
+    if Enum.any?(names, &taken?/1) and attempts > 0 do
       Process.sleep(10)
       await_released(names, attempts - 1)
     else
       :ok
     end
   end
+
+  defp taken?(name), do: Process.whereis(name) != nil or :ets.whereis(name) != :undefined
 
   defp transports(options), do: Keyword.get(options, :transports, @default_transports)
 

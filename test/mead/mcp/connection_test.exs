@@ -142,6 +142,42 @@ defmodule Mead.MCP.ConnectionTest do
       assert dup.description == "first"
     end
 
+    test "clamps what a server says about a tool before it can reach the model", context do
+      start_connection(context)
+      transport = started_transport()
+
+      oversized_schema = %{
+        "type" => "object",
+        "properties" => %{"payload" => %{"description" => String.duplicate("x", 30_000)}}
+      }
+
+      FakeTransport.complete_handshake(transport, [
+        %{"name" => "wordy", "description" => String.duplicate("d", 5_000)},
+        %{
+          "name" => "untyped",
+          "inputSchema" => %{"properties" => %{"path" => %{"type" => "string"}}}
+        },
+        %{"name" => "scalar", "inputSchema" => %{"type" => "string"}},
+        %{"name" => "huge", "inputSchema" => oversized_schema}
+      ])
+
+      wait_until(fn -> entry_names(context.catalog) == ["huge", "scalar", "untyped", "wordy"] end)
+
+      {:ok, entries, _servers} = Catalog.snapshot(context.catalog)
+      by_name = Map.new(entries, &{&1.name, &1})
+      default_schema = %{"type" => "object", "properties" => %{}}
+
+      assert String.length(by_name["wordy"].description) == 2_000
+
+      assert by_name["untyped"].input_schema == %{
+               "type" => "object",
+               "properties" => %{"path" => %{"type" => "string"}}
+             }
+
+      assert by_name["scalar"].input_schema == default_schema
+      assert by_name["huge"].input_schema == default_schema
+    end
+
     test "a tool list that is not a list disconnects and reconnects", context do
       start_connection(context)
       first = started_transport()
@@ -328,6 +364,47 @@ defmodule Mead.MCP.ConnectionTest do
 
       _first_refresh = FakeTransport.next_request(transport)
       assert_raise RuntimeError, fn -> FakeTransport.next_request(transport, 100) end
+    end
+
+    test "a refresh the server never answers drops the stale tools and reconnects", context do
+      start_connection(context)
+      transport = started_transport()
+      FakeTransport.complete_handshake(transport, [raw_tool("a")])
+      wait_until(fn -> entry_names(context.catalog) == ["a"] end)
+
+      FakeTransport.deliver(
+        transport,
+        ~s({"jsonrpc":"2.0","method":"notifications/tools/list_changed"})
+      )
+
+      _unanswered = FakeTransport.next_request(transport)
+
+      replacement = started_transport()
+
+      assert replacement != transport
+      assert entry_names(context.catalog) == []
+    end
+
+    test "an answered refresh is not mistaken for a stuck one", context do
+      start_connection(context)
+      transport = started_transport()
+      FakeTransport.complete_handshake(transport, [raw_tool("a")])
+      wait_until(fn -> entry_names(context.catalog) == ["a"] end)
+
+      FakeTransport.deliver(
+        transport,
+        ~s({"jsonrpc":"2.0","method":"notifications/tools/list_changed"})
+      )
+
+      list = FakeTransport.next_request(transport)
+      FakeTransport.reply(transport, list, %{"tools" => [raw_tool("b")]})
+      wait_until(fn -> entry_names(context.catalog) == ["b"] end)
+
+      # Longer than the 200 ms handshake timeout the refresh was started under.
+      Process.sleep(300)
+
+      assert entry_names(context.catalog) == ["b"]
+      refute_received {:transport_started, _another}
     end
 
     test "answers a server ping with an empty result", context do

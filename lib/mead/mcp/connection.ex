@@ -28,6 +28,8 @@ defmodule Mead.MCP.Connection do
   @default_reconnect_delays [1_000, 2_000, 5_000, 15_000, 30_000]
   @maximum_tool_pages 20
   @maximum_result_characters 50_000
+  @maximum_description_characters 2_000
+  @maximum_schema_bytes 20_000
   @default_schema %{"type" => "object", "properties" => %{}}
 
   @spec start_link(keyword()) :: GenServer.on_start()
@@ -73,7 +75,8 @@ defmodule Mead.MCP.Connection do
       next_id: 1,
       pending: %{},
       tools: [],
-      handshake_reference: nil
+      handshake_reference: nil,
+      refresh_reference: nil
     }
 
     {:ok, state, {:continue, :connect}}
@@ -125,6 +128,9 @@ defmodule Mead.MCP.Connection do
       when state.phase in [:initializing, :listing] do
     {:noreply, disconnect(state, :handshake_timeout)}
   end
+
+  def handle_info({:refresh_timeout, reference}, %{refresh_reference: reference} = state),
+    do: {:noreply, disconnect(state, :tool_refresh_timeout)}
 
   def handle_info({:call_timeout, id}, state), do: {:noreply, fail_request(state, id, :timeout)}
 
@@ -206,7 +212,8 @@ defmodule Mead.MCP.Connection do
         phase: :disconnected,
         attempt: state.attempt + 1,
         tools: [],
-        handshake_reference: nil
+        handshake_reference: nil,
+        refresh_reference: nil
     }
   end
 
@@ -280,11 +287,21 @@ defmodule Mead.MCP.Connection do
     if Enum.any?(state.pending, fn {_id, step} -> match?({:list_tools, _page}, step) end) do
       state
     else
-      start_listing(%{state | tools: []}, nil, 1)
+      start_refresh(state)
     end
   end
 
   defp handle_decoded(_ignored, state), do: state
+
+  # The handshake has its own timeout; a refresh needs one too, because a server that never answers
+  # `tools/list` would otherwise leave the catalog stale until the transport happens to drop.
+  # Giving up reconnects, which lists the tools again from scratch.
+  defp start_refresh(state) do
+    reference = make_ref()
+    Process.send_after(self(), {:refresh_timeout, reference}, state.handshake_timeout)
+
+    start_listing(%{state | tools: [], refresh_reference: reference}, nil, 1)
+  end
 
   defp with_pending(state, id, function) do
     case Map.pop(state.pending, id) do
@@ -372,18 +389,34 @@ defmodule Mead.MCP.Connection do
 
   defp parse_tools(_not_a_list), do: :error
 
-  defp description(%{"description" => text}) when is_binary(text), do: text
+  # What a server says about a tool goes to the model unchanged, so it is bounded here: a long
+  # description is cut, and a schema the provider API would refuse (not an object, or too big) is
+  # replaced by the permissive default instead of failing every turn that offers the tool.
+  defp description(%{"description" => text}) when is_binary(text),
+    do: String.slice(text, 0, @maximum_description_characters)
+
   defp description(_tool), do: nil
 
-  defp input_schema(%{"inputSchema" => schema}) when is_map(schema), do: schema
+  defp input_schema(%{"inputSchema" => schema}) when is_map(schema) do
+    case Map.get(schema, "type") do
+      nil -> schema |> Map.put("type", "object") |> within_size_limit()
+      "object" -> within_size_limit(schema)
+      _other_type -> @default_schema
+    end
+  end
+
   defp input_schema(_tool), do: @default_schema
+
+  defp within_size_limit(schema) do
+    if byte_size(JSON.encode!(schema)) <= @maximum_schema_bytes, do: schema, else: @default_schema
+  end
 
   defp publish(state) do
     # The deduplication across pages keeps the first tool of a name, as within one page.
     tools = Enum.uniq_by(state.tools, & &1.name)
     :ok = Catalog.register(state.catalog, state.server, self(), tools)
 
-    %{state | phase: :ready, attempt: 0, tools: tools}
+    %{state | phase: :ready, attempt: 0, tools: tools, refresh_reference: nil}
   end
 
   defp call_outcome(%{"content" => content} = result) when is_list(content) do

@@ -137,6 +137,23 @@ defmodule Mead.MCP.ConfigurationTest do
       refute inspect(reason) =~ "SENTINEL"
     end
 
+    test "a tool name the model could never be shown is refused at boot" do
+      for tool <- [:"read.file", :"read file", :"lire\u00e9"] do
+        assert Configuration.validate(a: stdio(tools: [{tool, :read}])) ==
+                 {:error, {:invalid_server, :a, {:invalid_tool_name, tool}}}
+      end
+    end
+
+    test "a tool whose server__tool name passes 64 characters is refused, and 64 is allowed" do
+      longest = String.to_atom(String.duplicate("t", 61))
+      too_long = String.to_atom(String.duplicate("t", 62))
+
+      assert {:ok, [_server]} = Configuration.validate(a: stdio(tools: [{longest, :read}]))
+
+      assert Configuration.validate(a: stdio(tools: [{too_long, :read}])) ==
+               {:error, {:invalid_server, :a, {:invalid_tool_name, too_long}}}
+    end
+
     test "tools that are wrong" do
       assert Configuration.validate(a: stdio(tools: %{read_file: :read})) ==
                {:error, {:invalid_server, :a, :invalid_tools}}
