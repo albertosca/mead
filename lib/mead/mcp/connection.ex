@@ -145,10 +145,30 @@ defmodule Mead.MCP.Connection do
 
   @impl GenServer
   def terminate(_reason, state) do
+    stop_transport_and_wait(state.transport)
     Catalog.unregister(state.catalog, state.server)
     :ok
   catch
     :exit, _reason -> :ok
+  end
+
+  # The transport cleans up its operating-system child when its owner dies, but when the whole
+  # application stops the application master kills what is left without running that cleanup, so
+  # the transport is stopped here, while this process can still wait for it.
+  defp stop_transport_and_wait(nil), do: :ok
+
+  defp stop_transport_and_wait(transport) do
+    GenServer.stop(transport, :shutdown, 3_000)
+  catch
+    :exit, _reason -> :ok
+  end
+
+  # Crash reports and `:sys.get_status/1` print the state, and the transport options can carry an
+  # HTTP credential.
+  @impl GenServer
+  def format_status(%{state: state} = status) do
+    redacted = Keyword.replace(state.transport_options, :headers, "[redacted]")
+    %{status | state: %{state | transport_options: redacted}}
   end
 
   # -- connecting --------------------------------------------------------------------------------

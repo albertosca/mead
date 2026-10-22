@@ -374,4 +374,34 @@ defmodule Mead.MCP.ConnectionTest do
       assert entry_names(context.catalog) == ["a"]
     end
   end
+
+  describe "shutdown and crash reports" do
+    test "terminating the connection stops its transport before returning", context do
+      connection = start_connection(context)
+      transport = started_transport()
+      FakeTransport.complete_handshake(transport, [])
+      wait_until(fn -> :sys.get_state(connection).phase == :ready end)
+
+      monitor = Process.monitor(transport)
+      Connection.terminate(:shutdown, :sys.get_state(connection))
+
+      assert_received {:DOWN, ^monitor, :process, ^transport, _reason}
+    end
+
+    test "the state shown in crash reports never carries the configured headers", context do
+      connection =
+        start_connection(context,
+          transport:
+            {FakeTransport,
+             [test_pid: self(), headers: [{"authorization", "Bearer SECRET-0123456789"}]]}
+        )
+
+      started_transport()
+
+      status =
+        connection |> :sys.get_status() |> inspect(limit: :infinity, printable_limit: :infinity)
+
+      refute status =~ "SECRET-0123456789"
+    end
+  end
 end

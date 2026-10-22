@@ -170,11 +170,6 @@ defmodule Mead.Router do
     outcome(result, provider, progress.usage, progress.tool_calls)
   end
 
-  defp loop(_context, _messages, %{calls: calls} = progress)
-       when calls >= @maximum_provider_calls do
-    {{:error, :tool_loop_limit}, progress}
-  end
-
   defp loop(context, messages, progress) do
     case context.provider.converse(messages, context.tools, context.provider_options) do
       {:ok, %{content: content, stop_reason: :tool_use, usage: usage}} ->
@@ -183,6 +178,11 @@ defmodule Mead.Router do
         case for(%{type: :tool_use} = block <- content, do: block) do
           [] ->
             {{:error, :malformed_response}, progress}
+
+          _tool_uses when progress.calls >= @maximum_provider_calls ->
+            # The model would never see the results of these calls, and a tool with side effects
+            # would have run for nothing.
+            {{:error, :tool_loop_limit}, progress}
 
           tool_uses ->
             results = Enum.map(tool_uses, &run_tool(context, &1))

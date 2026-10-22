@@ -223,6 +223,28 @@ defmodule Mead.RouterToolsTest do
     refute_received {:provider_conversed, _messages, _tools}
   end
 
+  test "the last allowed provider call never has its tools run, since the model would not see the results" do
+    hub(%{"files__read_file" => {:ok, %{content: "again", is_error: false}}})
+    endless = List.duplicate(FakeProvider.tool_step([{"t", "files__read_file", %{}}]), 20)
+
+    assert route(endless) == {:error, :tool_loop_limit}
+
+    executed =
+      for _call <- 1..20, reduce: 0 do
+        count -> if_received_tool_call(count)
+      end
+
+    assert executed == 7
+  end
+
+  defp if_received_tool_call(count) do
+    receive do
+      {:tool_called, _name, _arguments, _options} -> count + 1
+    after
+      0 -> count
+    end
+  end
+
   test "usage is summed over every provider call, and the tool calls are counted" do
     hub(%{"files__read_file" => {:ok, %{content: "x", is_error: false}}})
     usage = fn input, output -> %{input_tokens: input, output_tokens: output} end

@@ -63,6 +63,12 @@ defmodule Mead.MCP.Transport.Http do
      }}
   end
 
+  # Crash reports and `:sys.get_status/1` print the state, and the headers can carry a credential.
+  @impl GenServer
+  def format_status(%{state: state} = status) do
+    %{status | state: %{state | headers: "[redacted]"}}
+  end
+
   @impl GenServer
   def handle_call({:send, id, message}, _from, state) do
     transport = self()

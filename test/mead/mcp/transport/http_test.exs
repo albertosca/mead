@@ -227,4 +227,14 @@ defmodule Mead.MCP.Transport.HttpTest do
 
     assert Http.send_message(transport, 1, "{}") == {:error, :closed}
   end
+
+  test "the state shown in crash reports never carries the configured headers" do
+    transport =
+      start(&json(&1, @response), headers: [{"authorization", @sentinel_header_value}])
+
+    status =
+      transport |> :sys.get_status() |> inspect(limit: :infinity, printable_limit: :infinity)
+
+    refute status =~ "SENTINEL-0123456789"
+  end
 end
