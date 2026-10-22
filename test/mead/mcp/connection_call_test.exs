@@ -22,7 +22,7 @@ defmodule Mead.MCP.ConnectionCallTest do
          registry: registry,
          catalog: catalog,
          transport: {FakeTransport, [test_pid: self()]},
-         reconnect_delays: [10],
+         reconnect_delays: [300],
          handshake_timeout: 500}
       )
 

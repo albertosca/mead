@@ -239,6 +239,9 @@ defmodule Mead.LedgerTest do
 
       second_pid = await_restart(name, first_pid)
 
+      # The name is registered before `init/1` attaches the new handler, so wait for `init/1`.
+      :sys.get_state(second_pid)
+
       assert second_pid != first_pid
       assert [_single] = Enum.filter(:telemetry.list_handlers(event), &(&1.id == {Ledger, name}))
 
