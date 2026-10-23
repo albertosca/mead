@@ -96,6 +96,8 @@ defmodule Mead do
     * `:route` - `:auto` (the default), `:local`, or `:cloud`; read by `Mead.Router` and ignored
       by other handlers. Any other value returns `{:error, :invalid_route}` before a turn is
       recorded.
+    * `:tools` - `:effect` also shows the model tools that have side effects; see
+      `Mead.MCP.Policy`. Handed to the handler unchanged and absent when not given.
 
   Returns `{:error, :not_found}` for an unknown session, `{:error, :session_stopped}` when the
   session was stopped with `stop_session/1` while the turn was running, and
@@ -114,7 +116,7 @@ defmodule Mead do
 
   defp validate_submit_options!(options) do
     if Keyword.keyword?(options) do
-      Keyword.validate!(options, route: :auto)
+      Keyword.validate!(options, [:tools, route: :auto])
     else
       raise ArgumentError, "options must be a keyword list, got: #{inspect(options)}"
     end

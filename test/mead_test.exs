@@ -92,6 +92,33 @@ defmodule Mead.MeadTest do
     end
   end
 
+  describe "submit_turn/3 with the tools option" do
+    test "hands tools: :effect to the handler" do
+      session_id = start_session!(handler: Mead.Test.ScriptedHandler)
+
+      assert {:ok, :reported} =
+               Mead.submit_turn(session_id, {:report_options, self()}, tools: :effect)
+
+      assert_receive {:handler_options, options}
+      assert options[:tools] == :effect
+    end
+
+    test "leaves the key out when the option is not given" do
+      session_id = start_session!(handler: Mead.Test.ScriptedHandler)
+
+      assert {:ok, :reported} = Mead.submit_turn(session_id, {:report_options, self()})
+
+      assert_receive {:handler_options, options}
+      refute Keyword.has_key?(options, :tools)
+    end
+
+    test "an unknown option is still refused" do
+      session_id = start_session!()
+
+      assert_raise ArgumentError, fn -> Mead.submit_turn(session_id, "hi", unknown: true) end
+    end
+  end
+
   describe "submit_turn/3 options" do
     test "the route reaches the handler" do
       {:ok, session_id} =
