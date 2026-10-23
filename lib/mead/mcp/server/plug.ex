@@ -139,9 +139,14 @@ defmodule Mead.MCP.Server.Plug do
   defp handle_message(%Plug.Conn{halted: true} = conn, _settings), do: conn
 
   defp handle_message(conn, settings) do
-    case read_body(conn, length: @maximum_body_bytes) do
-      {:ok, body, conn} ->
+    # One byte past the limit is read on purpose: the adapter reports `:more` when a chunked body
+    # reaches the budget exactly, so a body of exactly the limit would be refused otherwise.
+    case read_body(conn, length: @maximum_body_bytes + 1) do
+      {:ok, body, conn} when byte_size(body) <= @maximum_body_bytes ->
         decode_and_dispatch(conn, body, settings)
+
+      {:ok, _body, conn} ->
+        reject(conn, 413, @refused, "payload too large")
 
       {:more, _partial, conn} ->
         reject(conn, 413, @refused, "payload too large")
@@ -162,14 +167,21 @@ defmodule Mead.MCP.Server.Plug do
   defp dispatch(conn, message, %{configuration: configuration, dispatcher: dispatcher}) do
     context = %{allow_effect: configuration.allow_effect}
 
-    case dispatcher.dispatch(message, context) do
+    # Only the dispatcher is guarded: a failure to send the answer means the client is gone, which
+    # is not a server bug and must not be logged as one.
+    case safe_dispatch(dispatcher, message, context) do
       {:reply, body} -> send_json(conn, 200, body)
       :no_reply -> send_resp(conn, 202, "")
+      {:crashed, label} -> internal_error(conn, label)
     end
+  end
+
+  defp safe_dispatch(dispatcher, message, context) do
+    dispatcher.dispatch(message, context)
   rescue
-    exception -> internal_error(conn, inspect(exception.__struct__))
+    exception -> {:crashed, inspect(exception.__struct__)}
   catch
-    kind, _reason -> internal_error(conn, Atom.to_string(kind))
+    kind, _reason -> {:crashed, Atom.to_string(kind)}
   end
 
   defp internal_error(conn, label) do

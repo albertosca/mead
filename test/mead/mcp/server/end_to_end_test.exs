@@ -54,6 +54,19 @@ defmodule Mead.MCP.Server.EndToEndTest do
     )
   end
 
+  defp ping_of_size(size) do
+    envelope = fn padding ->
+      JSON.encode!(%{
+        "jsonrpc" => "2.0",
+        "id" => 1,
+        "method" => "ping",
+        "params" => %{"pad" => padding}
+      })
+    end
+
+    envelope.(String.duplicate("a", size - byte_size(envelope.(""))))
+  end
+
   @ping JSON.encode!(%{"jsonrpc" => "2.0", "id" => 1, "method" => "ping"})
   @json {"content-type", "application/json"}
 
@@ -128,6 +141,29 @@ defmodule Mead.MCP.Server.EndToEndTest do
       headers = [@json, {"authorization", "Bearer " <> @token}]
 
       assert raw_post(context.port, body, headers).status == 413
+    end
+
+    test "a chunked body of exactly 1 MiB is accepted and one byte more is 413", context do
+      headers = [@json, {"authorization", "Bearer " <> @token}]
+
+      for {size, status} <- [{1024 * 1024, 200}, {1024 * 1024 + 1, 413}] do
+        body = ping_of_size(size)
+
+        halves = [
+          binary_part(body, 0, 512 * 1024),
+          binary_part(body, 512 * 1024, size - 512 * 1024)
+        ]
+
+        response =
+          Req.post!("http://127.0.0.1:#{context.port}/mcp",
+            body: Stream.map(halves, & &1),
+            headers: headers,
+            retry: false,
+            decode_body: false
+          )
+
+        assert response.status == status, "expected #{status} for #{size} bytes"
+      end
     end
 
     test "a batch is refused and a notification is accepted", context do

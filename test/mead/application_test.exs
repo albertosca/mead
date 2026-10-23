@@ -10,6 +10,10 @@ defmodule Mead.ApplicationTest do
 
   import Mead.TestHelpers
 
+  # An earlier test may have killed the hub or an earlier child, and the server, restarted last,
+  # may not be registered yet.
+  defp running_server, do: wait_until(fn -> Process.whereis(Mead.MCP.Server) end)
+
   test "the root supervisor starts the ledger, the registry, the turn supervisor, the pool, the MCP hub, and the MCP server in that order" do
     child_ids =
       Mead.Supervisor
@@ -50,6 +54,7 @@ defmodule Mead.ApplicationTest do
 
   test "killing the hub restarts the hub and the server, and nothing before them" do
     hub_pid = Process.whereis(Mead.MCP.Hub)
+    server_pid = running_server()
     pool_pid = Process.whereis(Mead.Session.Pool)
     ledger_pid = Process.whereis(Mead.Ledger)
 
@@ -62,14 +67,16 @@ defmodule Mead.ApplicationTest do
       end)
 
     assert is_pid(new_hub_pid)
+
+    assert wait_until(fn ->
+             candidate = Process.whereis(Mead.MCP.Server)
+             candidate != server_pid and candidate
+           end)
+
     assert Process.whereis(Mead.Session.Pool) == pool_pid
     assert Process.whereis(Mead.Ledger) == ledger_pid
     assert Mead.MCP.Hub.tools_for([]) == []
   end
-
-  # An earlier test may have killed the hub or an earlier child, and the server, restarted last,
-  # may not be registered yet.
-  defp running_server, do: wait_until(fn -> Process.whereis(Mead.MCP.Server) end)
 
   test "without a token in the application environment the server holds no listener" do
     running_server()

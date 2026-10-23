@@ -247,11 +247,12 @@ defmodule Mead.MCP.Server.ToolsTest do
     test "a turn that failed shows its status and no internal reason" do
       session_id = start_session!()
       {:ok, _result} = submit(session_id, "raise")
+      {:ok, _result} = submit(session_id, "error")
 
       {:ok, result} = Tools.call("history", %{"session_id" => session_id}, @closed)
 
-      assert [%{"status" => "failed", "output" => output}] = JSON.decode!(text(result))
-      assert is_binary(output) or is_nil(output)
+      assert [%{"status" => "failed", "output" => nil}, %{"status" => "failed", "output" => nil}] =
+               JSON.decode!(text(result))
     end
 
     test "an unknown session is a tool error and a non-string id is invalid params" do

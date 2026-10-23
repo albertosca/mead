@@ -188,11 +188,16 @@ defmodule Mead.MCP.Server.Tools do
   defp turn_entry(turn) do
     %{
       "input" => text_of(turn.input),
-      "output" => if(is_nil(turn.output), do: nil, else: text_of(turn.output)),
+      "output" => visible_output(turn),
       "status" => Atom.to_string(turn.status),
       "started_at" => DateTime.to_iso8601(turn.started_at)
     }
   end
+
+  # A failed turn stores its internal reason (an exception and stacktrace, a provider error term)
+  # as its output; only the output of a turn that succeeded is the model's answer.
+  defp visible_output(%{status: :ok, output: output}) when not is_nil(output), do: text_of(output)
+  defp visible_output(_turn), do: nil
 
   defp stop_session(arguments) do
     with {:ok, session_id} <- fetch_session_id(arguments) do

@@ -4,6 +4,15 @@ defmodule Mead.MCP.Server.PlugTest.RaisingDispatcher do
   def dispatch(_message, _context), do: raise("boom with a secret detail")
 end
 
+defmodule Mead.MCP.Server.PlugTest.VanishedClientAdapter do
+  @moduledoc false
+
+  # The test adapter, except that sending the response fails as it does when the client is gone.
+  defdelegate read_req_body(state, options), to: Plug.Adapters.Test.Conn
+
+  def send_resp(_state, _status, _headers, _body), do: raise("client gone")
+end
+
 defmodule Mead.MCP.Server.PlugTest do
   use ExUnit.Case, async: true
 
@@ -296,6 +305,58 @@ defmodule Mead.MCP.Server.PlugTest do
       deep = String.duplicate("[", 100_000) <> String.duplicate("]", 100_000)
 
       assert (deep |> post() |> run()).status == 400
+    end
+  end
+
+  describe "the operator's allow_effect" do
+    defp effect_call(session_id) do
+      JSON.encode!(%{
+        "jsonrpc" => "2.0",
+        "id" => 1,
+        "method" => "tools/call",
+        "params" => %{
+          "name" => "submit_turn",
+          "arguments" => %{"session_id" => session_id, "input" => "options", "tools" => "effect"}
+        }
+      })
+    end
+
+    setup do
+      {:ok, session_id} = Mead.start_session(handler: Mead.Test.TextHandler)
+      on_exit(fn -> Mead.stop_session(session_id) end)
+      %{session_id: session_id}
+    end
+
+    test "is false by default: a turn asking for effect tools is refused and nothing runs",
+         %{session_id: session_id} do
+      conn = session_id |> effect_call() |> post() |> run()
+
+      assert %{"result" => %{"isError" => true}} = json_body(conn)
+      assert {:ok, []} = Mead.history(session_id)
+    end
+
+    test "reaches the turn when the operator set it", %{session_id: session_id} do
+      conn = session_id |> effect_call() |> post() |> run([], allow_effect: true)
+
+      assert %{"result" => %{"isError" => false, "content" => [%{"text" => text}]}} =
+               json_body(conn)
+
+      assert text =~ "tools: :effect"
+    end
+  end
+
+  describe "a client that vanished before the answer" do
+    test "is not logged as a server bug" do
+      conn = post(@ping)
+      {_adapter, state} = conn.adapter
+      conn = %{conn | adapter: {Mead.MCP.Server.PlugTest.VanishedClientAdapter, state}}
+
+      log =
+        capture_log(fn ->
+          assert_raise RuntimeError, "client gone", fn -> run(conn) end
+        end)
+
+      refute log =~ "MCP server request failed"
     end
   end
 
