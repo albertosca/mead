@@ -45,7 +45,9 @@ defmodule Mead.RouterToolsTest do
       handler_id,
       [:mead, :router, :route],
       fn _event, measurements, metadata, _config ->
-        send(test_pid, {:route_event, measurements, metadata})
+        # The handler is global and runs in the emitting process: ignore events from other
+        # tests' turns running concurrently.
+        if self() == test_pid, do: send(test_pid, {:route_event, measurements, metadata})
       end,
       nil
     )
