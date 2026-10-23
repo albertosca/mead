@@ -1,0 +1,128 @@
+defmodule Mead.MCP.Server.Configuration do
+  @moduledoc """
+  Reads and validates `config :mead, :mcp_server`.
+
+  Pure: it starts nothing and reads no application environment itself; `Mead.MCP.Server` hands
+  it the settings. Without a `:token` the server is `:disabled`. Any other problem is an error
+  whose message names the setting and never contains the token or any other value.
+
+  The struct keeps a SHA-256 digest of the token, not the token, and its `Inspect` omits even
+  the digest, so the listener options that carry the struct leak nothing into a crash report or
+  `:sys.get_status/1`. Hashing both sides before comparing also gives `secure_compare/2` two
+  binaries of equal length whatever the client sent.
+
+  ## Settings
+
+    * `:token` - the bearer token clients must present (a non-empty string; required to enable
+      the server).
+    * `:port` - `0..65535`; defaults to 4040. Tests use 0 and ask the listener for its port.
+    * `:address` - an IPv4 tuple; defaults to loopback `{127, 0, 0, 1}`.
+    * `:allow_effect` - whether `tools: "effect"` is honoured; defaults to `false`.
+    * `:allowed_origins` - exact `Origin` values accepted besides loopback; defaults to `[]`.
+  """
+
+  @allowed_keys [:token, :port, :address, :allow_effect, :allowed_origins]
+  @default_port 4040
+  @default_address {127, 0, 0, 1}
+
+  @derive {Inspect, except: [:token_digest]}
+  @enforce_keys [:token_digest, :port, :address, :allow_effect, :allowed_origins]
+  defstruct [:token_digest, :port, :address, :allow_effect, :allowed_origins]
+
+  @type t :: %__MODULE__{
+          token_digest: binary(),
+          port: 0..65_535,
+          address: :inet.ip4_address(),
+          allow_effect: boolean(),
+          allowed_origins: [String.t()]
+        }
+
+  @spec load(term()) :: :disabled | {:ok, t()} | {:error, String.t()}
+  def load(settings) do
+    with :ok <- check_shape(settings),
+         :ok <- check_keys(settings) do
+      case Keyword.get(settings, :token) do
+        nil -> :disabled
+        token -> build(token, settings)
+      end
+    end
+  end
+
+  @doc "Whether `presented` is the configured token, compared in constant time."
+  @spec token_matches?(t(), term()) :: boolean()
+  def token_matches?(%__MODULE__{token_digest: digest}, presented) when is_binary(presented) do
+    Plug.Crypto.secure_compare(:crypto.hash(:sha256, presented), digest)
+  end
+
+  def token_matches?(%__MODULE__{}, _presented), do: false
+
+  defp check_shape(settings) do
+    if Keyword.keyword?(settings), do: :ok, else: {:error, "settings must be a keyword list"}
+  end
+
+  defp check_keys(settings) do
+    case Keyword.keys(settings) -- @allowed_keys do
+      [] -> :ok
+      unknown -> {:error, "unknown setting(s): #{inspect(unknown)}"}
+    end
+  end
+
+  defp build(token, settings) do
+    with :ok <- check_token(token),
+         {:ok, port} <- fetch_port(settings),
+         {:ok, address} <- fetch_address(settings),
+         {:ok, allow_effect} <- fetch_allow_effect(settings),
+         {:ok, allowed_origins} <- fetch_allowed_origins(settings) do
+      {:ok,
+       %__MODULE__{
+         token_digest: :crypto.hash(:sha256, token),
+         port: port,
+         address: address,
+         allow_effect: allow_effect,
+         allowed_origins: allowed_origins
+       }}
+    end
+  end
+
+  defp check_token(token) when is_binary(token) and token != "", do: :ok
+  defp check_token(_token), do: {:error, "token must be a non-empty string"}
+
+  defp fetch_port(settings) do
+    case Keyword.get(settings, :port, @default_port) do
+      port when is_integer(port) and port >= 0 and port <= 65_535 -> {:ok, port}
+      _other -> {:error, "port must be an integer from 0 to 65535"}
+    end
+  end
+
+  defp fetch_address(settings) do
+    case Keyword.get(settings, :address, @default_address) do
+      {first, second, third, fourth} = address
+      when first in 0..255 and second in 0..255 and third in 0..255 and fourth in 0..255 ->
+        {:ok, address}
+
+      _other ->
+        {:error, "address must be an IPv4 tuple such as {127, 0, 0, 1}"}
+    end
+  end
+
+  defp fetch_allow_effect(settings) do
+    case Keyword.get(settings, :allow_effect, false) do
+      value when is_boolean(value) -> {:ok, value}
+      _other -> {:error, "allow_effect must be true or false"}
+    end
+  end
+
+  defp fetch_allowed_origins(settings) do
+    case Keyword.get(settings, :allowed_origins, []) do
+      origins when is_list(origins) ->
+        if Enum.all?(origins, &is_binary/1) do
+          {:ok, origins}
+        else
+          {:error, "allowed_origins must be a list of strings"}
+        end
+
+      _other ->
+        {:error, "allowed_origins must be a list of strings"}
+    end
+  end
+end

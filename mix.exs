@@ -18,9 +18,10 @@ defmodule Mead.MixProject do
 
   defp deps do
     [
+      {:bandit, "~> 1.13"},
       {:req, "~> 0.7.5"},
       {:telemetry, "~> 1.4"},
-      {:plug, "~> 1.20", only: :test}
+      {:plug, "~> 1.20"}
     ]
   end
 
