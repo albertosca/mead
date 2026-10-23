@@ -3,9 +3,14 @@ defmodule Mead.ApplicationTest do
   # with the asynchronous tests.
   use ExUnit.Case, async: false
 
+  # The root supervisor tolerates 3 restarts in 5 seconds, and the whole suite already spends
+  # them: this file kills the turn supervisor and the hub, and ledger_session_test.exs kills the
+  # turn supervisor. A fourth kill of a root child shuts the application down. That the server,
+  # the last child, restarts alone follows from rest_for_one and the order test below.
+
   import Mead.TestHelpers
 
-  test "the root supervisor starts the ledger, the registry, the turn supervisor, the pool, and the MCP hub in that order" do
+  test "the root supervisor starts the ledger, the registry, the turn supervisor, the pool, the MCP hub, and the MCP server in that order" do
     child_ids =
       Mead.Supervisor
       |> Supervisor.which_children()
@@ -17,7 +22,8 @@ defmodule Mead.ApplicationTest do
              Mead.Registry,
              Mead.TurnSupervisor,
              Mead.Session.Pool,
-             Mead.MCP.Hub
+             Mead.MCP.Hub,
+             Mead.MCP.Server
            ]
   end
 
@@ -59,5 +65,32 @@ defmodule Mead.ApplicationTest do
     assert Process.whereis(Mead.Session.Pool) == pool_pid
     assert Process.whereis(Mead.Ledger) == ledger_pid
     assert Mead.MCP.Hub.tools_for([]) == []
+  end
+
+  # An earlier test may have killed the hub or an earlier child, and the server, restarted last,
+  # may not be registered yet.
+  defp running_server, do: wait_until(fn -> Process.whereis(Mead.MCP.Server) end)
+
+  test "without a token in the application environment the server holds no listener" do
+    running_server()
+
+    assert Supervisor.which_children(Mead.MCP.Server) == []
+    assert Mead.MCP.Server.port() == :error
+  end
+
+  test "the token read from the application environment is in no process status" do
+    token = "application-env-sentinel-0123456789"
+    Application.put_env(:mead, :mcp_server, token: token, port: 0)
+    on_exit(fn -> Application.delete_env(:mead, :mcp_server) end)
+
+    start_supervised!({Mead.MCP.Server, name: :redaction_server})
+    [{_id, listener, :supervisor, _modules}] = Supervisor.which_children(:redaction_server)
+
+    for process <- [:redaction_server, listener] do
+      status =
+        process |> :sys.get_status() |> inspect(limit: :infinity, printable_limit: :infinity)
+
+      refute status =~ token
+    end
   end
 end

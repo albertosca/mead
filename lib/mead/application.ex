@@ -12,8 +12,10 @@ defmodule Mead.Application do
       {Registry, keys: :unique, name: Mead.Registry},
       {Task.Supervisor, name: Mead.TurnSupervisor},
       Mead.Session.Pool,
-      # Last, so that a crash of the hub restarts only the hub and never the session pool.
-      Mead.MCP.Hub
+      # After the pool, so that a crash of the hub restarts only the hub and never the pool.
+      Mead.MCP.Hub,
+      # Last, so that a crash of the listener restarts only the listener.
+      Mead.MCP.Server
     ]
 
     Supervisor.start_link(children, strategy: :rest_for_one, name: Mead.Supervisor)
