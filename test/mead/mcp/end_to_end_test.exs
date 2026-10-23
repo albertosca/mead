@@ -47,7 +47,7 @@ defmodule Mead.MCP.EndToEndTest do
 
   test "a real stdio server is connected, filtered by the policy, and called" do
     start_hub(stub_server())
-    wait_until(fn -> names() != [] end, 20_000)
+    wait_until(fn -> names() != [] end, 60_000)
 
     assert names() == ["stub__echo", "stub__fail"]
     assert names(tools: :effect) == ["stub__echo", "stub__fail", "stub__write_note"]
@@ -61,7 +61,7 @@ defmodule Mead.MCP.EndToEndTest do
 
   test "an effect tool needs the opt-in, and the server's own annotations grant nothing" do
     start_hub(stub_server())
-    wait_until(fn -> names() != [] end, 20_000)
+    wait_until(fn -> names() != [] end, 60_000)
 
     assert Hub.call_tool("stub__write_note", %{}, [], :end_to_end_hub) == {:error, :not_allowed}
 
@@ -84,7 +84,7 @@ defmodule Mead.MCP.EndToEndTest do
       ] ++ stub_server()
     )
 
-    wait_until(fn -> names() != [] end, 20_000)
+    wait_until(fn -> names() != [] end, 60_000)
 
     assert names() == ["stub__echo", "stub__fail"]
     assert Process.alive?(Process.whereis(:end_to_end_hub))
@@ -93,7 +93,7 @@ defmodule Mead.MCP.EndToEndTest do
 
   test "stopping the hub leaves no stub server behind" do
     start_hub(stub_server())
-    wait_until(fn -> names() != [] end, 20_000)
+    wait_until(fn -> names() != [] end, 60_000)
 
     assert os_pids() != []
 
@@ -104,7 +104,7 @@ defmodule Mead.MCP.EndToEndTest do
 
   test "the router runs a whole turn through the real hub" do
     start_hub(stub_server())
-    wait_until(fn -> names() != [] end, 20_000)
+    wait_until(fn -> names() != [] end, 60_000)
 
     {:ok, script} =
       Agent.start_link(fn ->

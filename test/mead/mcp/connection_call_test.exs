@@ -16,21 +16,23 @@ defmodule Mead.MCP.ConnectionCallTest do
     start_supervised!({Catalog, name: catalog, servers: []})
 
     connection =
-      start_supervised!(
-        {Connection,
-         server: :fake,
-         registry: registry,
-         catalog: catalog,
-         transport: {FakeTransport, [test_pid: self()]},
-         reconnect_delays: [300],
-         handshake_timeout: 500}
-      )
+      start_supervised!({
+        Connection,
+        # Far longer than a test runs: a reconnect in the middle of a test would put its own
+        # handshake request into `pending`.
+        server: :fake,
+        registry: registry,
+        catalog: catalog,
+        transport: {FakeTransport, [test_pid: self()]},
+        reconnect_delays: [60_000],
+        handshake_timeout: 10_000
+      })
 
     transport =
       receive do
         {:transport_started, transport} -> transport
       after
-        1_000 -> raise "no transport was started"
+        10_000 -> raise "no transport was started"
       end
 
     FakeTransport.complete_handshake(transport, [

@@ -184,10 +184,14 @@ defmodule Mead.MCP.PolicyTest do
     end
 
     test "never creates an atom from the name it is given" do
-      name = "filesystem__never_seen_#{System.unique_integer([:positive])}"
-      before_count = :erlang.system_info(:atom_count)
-      Policy.authorize(name, entries(), servers(), [])
-      assert :erlang.system_info(:atom_count) - before_count < 5
+      suffix = "never_seen_#{System.unique_integer([:positive])}"
+      Policy.authorize("filesystem__" <> suffix, entries(), servers(), [])
+
+      # The count of all atoms is shared with the tests running at the same time; asking about
+      # these two names is not.
+      for fragment <- ["filesystem__" <> suffix, suffix] do
+        assert_raise ArgumentError, fn -> String.to_existing_atom(fragment) end
+      end
     end
   end
 end

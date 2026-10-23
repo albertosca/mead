@@ -35,7 +35,7 @@ defmodule Mead.Test.FakeTransport do
   def fail_sends(transport, reason), do: GenServer.call(transport, {:fail_sends, reason})
 
   @doc "Waits for the next message the connection sent and returns it decoded."
-  def next_request(transport, timeout \\ 1_000) do
+  def next_request(transport, timeout \\ 10_000) do
     receive do
       {:transport_sent, ^transport, _id, message} -> JSON.decode!(message)
     after

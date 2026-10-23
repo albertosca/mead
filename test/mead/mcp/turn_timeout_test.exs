@@ -31,7 +31,7 @@ defmodule Mead.MCP.TurnTimeoutTest do
       servers: [slow: [transport: {:stdio, command: "unused"}, tools: [wait: :read]]],
       transports: %{stdio: {FakeTransport, [test_pid: self()]}},
       reconnect_delays: [10],
-      handshake_timeout: 500
+      handshake_timeout: 10_000
     ]
 
     start_supervised!(Supervisor.child_spec({Hub, options}, id: name))
@@ -40,7 +40,7 @@ defmodule Mead.MCP.TurnTimeoutTest do
       receive do
         {:transport_started, transport} -> transport
       after
-        1_000 -> raise "no transport was started"
+        10_000 -> raise "no transport was started"
       end
 
     FakeTransport.complete_handshake(transport, [
@@ -58,14 +58,14 @@ defmodule Mead.MCP.TurnTimeoutTest do
 
   test "a turn killed by its timeout mid tool call leaves nothing pending and the hub usable" do
     {hub, transport} = start_hub()
-    {:ok, session_id} = Mead.start_session(handler: ToolCallingHandler, turn_timeout: 200)
+    {:ok, session_id} = Mead.start_session(handler: ToolCallingHandler, turn_timeout: 1_000)
     on_exit(fn -> Mead.stop_session(session_id) end)
 
     turn = Task.async(fn -> Mead.submit_turn(session_id, {:call_tool, hub, "slow__wait"}) end)
 
     stuck_request = FakeTransport.next_request(transport)
     assert stuck_request["method"] == "tools/call"
-    assert pending_calls(hub) == 1
+    wait_until(fn -> pending_calls(hub) == 1 end)
 
     assert Task.await(turn) == {:error, :timeout}
 

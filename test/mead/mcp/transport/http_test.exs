@@ -26,7 +26,7 @@ defmodule Mead.MCP.Transport.HttpTest do
     transport = start(&json(&1, @response))
 
     assert :ok = Http.send_message(transport, 1, "{}")
-    assert_receive {:mcp_message, ^transport, @response}, 2_000
+    assert_receive {:mcp_message, ^transport, @response}, 10_000
   end
 
   test "delivers each event of an event stream, joining the data lines of one event" do
@@ -39,8 +39,8 @@ defmodule Mead.MCP.Transport.HttpTest do
 
     Http.send_message(transport, 1, "{}")
 
-    assert_receive {:mcp_message, ^transport, ~s({"id":1})}, 2_000
-    assert_receive {:mcp_message, ^transport, "{\"a\":\n2}"}, 2_000
+    assert_receive {:mcp_message, ^transport, ~s({"id":1})}, 10_000
+    assert_receive {:mcp_message, ^transport, "{\"a\":\n2}"}, 10_000
     refute_received {:mcp_message, ^transport, _other}
   end
 
@@ -65,7 +65,7 @@ defmodule Mead.MCP.Transport.HttpTest do
 
     Http.send_message(transport, 1, ~s({"jsonrpc":"2.0","id":1}))
 
-    assert_receive {:request, "POST", headers, ~s({"jsonrpc":"2.0","id":1})}, 2_000
+    assert_receive {:request, "POST", headers, ~s({"jsonrpc":"2.0","id":1})}, 10_000
     assert {"content-type", "application/json"} in headers
     assert {"accept", "application/json, text/event-stream"} in headers
     assert {"mcp-protocol-version", "2025-06-18"} in headers
@@ -85,7 +85,7 @@ defmodule Mead.MCP.Transport.HttpTest do
 
     Http.send_message(transport, 1, "{}")
 
-    assert_receive {:headers, headers}, 2_000
+    assert_receive {:headers, headers}, 10_000
     assert {"authorization", @sentinel_header_value} in headers
   end
 
@@ -102,11 +102,11 @@ defmodule Mead.MCP.Transport.HttpTest do
       end)
 
     Http.send_message(transport, 1, "{}")
-    assert_receive {:session_header, []}, 2_000
-    assert_receive {:mcp_message, ^transport, _message}, 2_000
+    assert_receive {:session_header, []}, 10_000
+    assert_receive {:mcp_message, ^transport, _message}, 10_000
 
     Http.send_message(transport, 2, "{}")
-    assert_receive {:session_header, ["session-1"]}, 2_000
+    assert_receive {:session_header, ["session-1"]}, 10_000
   end
 
   describe "failures reach the owner as a send failure for that request id" do
@@ -115,7 +115,7 @@ defmodule Mead.MCP.Transport.HttpTest do
 
       Http.send_message(transport, 5, "{}")
 
-      assert_receive {:mcp_send_failed, ^transport, 5, {:http_status, 500}}, 2_000
+      assert_receive {:mcp_send_failed, ^transport, 5, {:http_status, 500}}, 10_000
     end
 
     test "a refused connection" do
@@ -123,7 +123,7 @@ defmodule Mead.MCP.Transport.HttpTest do
 
       Http.send_message(transport, 6, "{}")
 
-      assert_receive {:mcp_send_failed, ^transport, 6, {:transport, :econnrefused}}, 2_000
+      assert_receive {:mcp_send_failed, ^transport, 6, {:transport, :econnrefused}}, 10_000
     end
 
     test "a timeout" do
@@ -131,7 +131,7 @@ defmodule Mead.MCP.Transport.HttpTest do
 
       Http.send_message(transport, 7, "{}")
 
-      assert_receive {:mcp_send_failed, ^transport, 7, :timeout}, 2_000
+      assert_receive {:mcp_send_failed, ^transport, 7, :timeout}, 10_000
     end
 
     test "an answer that is neither JSON nor an event stream" do
@@ -154,7 +154,7 @@ defmodule Mead.MCP.Transport.HttpTest do
 
       Http.send_message(transport, nil, "{}")
 
-      assert_receive {:mcp_send_failed, ^transport, nil, {:http_status, 503}}, 2_000
+      assert_receive {:mcp_send_failed, ^transport, nil, {:http_status, 503}}, 10_000
     end
 
     test "no reason contains a configured header value" do
@@ -165,7 +165,7 @@ defmodule Mead.MCP.Transport.HttpTest do
 
       Http.send_message(transport, 9, "{}")
 
-      assert_receive {:mcp_send_failed, ^transport, 9, reason}, 2_000
+      assert_receive {:mcp_send_failed, ^transport, 9, reason}, 10_000
       refute inspect(reason) =~ "SENTINEL"
     end
   end
@@ -200,7 +200,7 @@ defmodule Mead.MCP.Transport.HttpTest do
       assert_receive {:mcp_send_failed, ^transport, 1, :response_too_large}, 5_000
 
       Http.send_message(transport, 2, "{}")
-      assert_receive {:mcp_message, ^transport, @response}, 2_000
+      assert_receive {:mcp_message, ^transport, @response}, 10_000
     end
   end
 
@@ -222,12 +222,12 @@ defmodule Mead.MCP.Transport.HttpTest do
         end)
 
       Http.send_message(transport, 1, "{}")
-      assert_receive {:mcp_message, ^transport, _message}, 2_000
+      assert_receive {:mcp_message, ^transport, _message}, 10_000
 
       Http.send_message(transport, 2, "{}")
 
-      assert_receive :second_request_made, 2_000
-      assert_receive {:mcp_closed, ^transport, :session_expired}, 2_000
+      assert_receive :second_request_made, 10_000
+      assert_receive {:mcp_closed, ^transport, :session_expired}, 10_000
     end
 
     test "without a session is an ordinary status failure" do
@@ -235,7 +235,7 @@ defmodule Mead.MCP.Transport.HttpTest do
 
       Http.send_message(transport, 3, "{}")
 
-      assert_receive {:mcp_send_failed, ^transport, 3, {:http_status, 404}}, 2_000
+      assert_receive {:mcp_send_failed, ^transport, 3, {:http_status, 404}}, 10_000
       refute_received {:mcp_closed, ^transport, _reason}
     end
   end
@@ -257,7 +257,7 @@ defmodule Mead.MCP.Transport.HttpTest do
     Process.unlink(transport)
     monitor = Process.monitor(transport)
     Process.exit(transport, :kill)
-    assert_receive {:DOWN, ^monitor, :process, ^transport, _reason}, 2_000
+    assert_receive {:DOWN, ^monitor, :process, ^transport, _reason}, 10_000
 
     assert Http.send_message(transport, 1, "{}") == {:error, :closed}
   end

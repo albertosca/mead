@@ -8,7 +8,7 @@ defmodule Mead.TestHelpers do
   instead of passing on a condition that never held.
   """
   @spec wait_until((-> term()), non_neg_integer()) :: term()
-  def wait_until(condition, timeout \\ 1_000) do
+  def wait_until(condition, timeout \\ 10_000) do
     deadline = System.monotonic_time(:millisecond) + timeout
     poll(condition, deadline)
   end

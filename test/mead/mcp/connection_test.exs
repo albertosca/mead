@@ -8,6 +8,12 @@ defmodule Mead.MCP.ConnectionTest do
 
   @moduletag :capture_log
 
+  # A handshake normally takes milliseconds, but a loaded machine can stall a process for hundreds
+  # of them, so a test that expects the handshake to succeed must not race a short deadline. The
+  # tests that are about the deadline itself ask for `@short_timeout`.
+  @patient_timeout 10_000
+  @short_timeout 300
+
   setup do
     suffix = System.unique_integer([:positive])
     registry = :"connection_registry_#{suffix}"
@@ -26,7 +32,7 @@ defmodule Mead.MCP.ConnectionTest do
         catalog: context.catalog,
         transport: {FakeTransport, [test_pid: self()]},
         reconnect_delays: [10],
-        handshake_timeout: 200
+        handshake_timeout: @patient_timeout
       ]
       |> Keyword.merge(overrides)
 
@@ -37,7 +43,7 @@ defmodule Mead.MCP.ConnectionTest do
     receive do
       {:transport_started, transport} -> transport
     after
-      1_000 -> raise "no transport was started"
+      10_000 -> raise "no transport was started"
     end
   end
 
@@ -217,7 +223,7 @@ defmodule Mead.MCP.ConnectionTest do
     end
 
     test "a server that never answers is abandoned after the handshake timeout", context do
-      start_connection(context)
+      start_connection(context, handshake_timeout: @short_timeout)
       first = started_transport()
       _initialize = FakeTransport.next_request(first)
 
@@ -367,7 +373,7 @@ defmodule Mead.MCP.ConnectionTest do
     end
 
     test "a refresh the server never answers drops the stale tools and reconnects", context do
-      start_connection(context)
+      start_connection(context, handshake_timeout: @short_timeout)
       transport = started_transport()
       FakeTransport.complete_handshake(transport, [raw_tool("a")])
       wait_until(fn -> entry_names(context.catalog) == ["a"] end)
@@ -386,7 +392,7 @@ defmodule Mead.MCP.ConnectionTest do
     end
 
     test "an answered refresh is not mistaken for a stuck one", context do
-      start_connection(context)
+      start_connection(context, handshake_timeout: @short_timeout)
       transport = started_transport()
       FakeTransport.complete_handshake(transport, [raw_tool("a")])
       wait_until(fn -> entry_names(context.catalog) == ["a"] end)
@@ -400,8 +406,8 @@ defmodule Mead.MCP.ConnectionTest do
       FakeTransport.reply(transport, list, %{"tools" => [raw_tool("b")]})
       wait_until(fn -> entry_names(context.catalog) == ["b"] end)
 
-      # Longer than the 200 ms handshake timeout the refresh was started under.
-      Process.sleep(300)
+      # Longer than the handshake timeout the refresh was started under.
+      Process.sleep(@short_timeout + 100)
 
       assert entry_names(context.catalog) == ["b"]
       refute_received {:transport_started, _another}

@@ -21,7 +21,7 @@ defmodule Mead.MCP.HubTest do
         servers: servers,
         transports: %{stdio: {FakeTransport, [test_pid: self()]}},
         reconnect_delays: [10],
-        handshake_timeout: 500
+        handshake_timeout: 10_000
       ] ++ extra
 
     start_supervised!(Supervisor.child_spec({Hub, options}, id: name))
@@ -41,7 +41,7 @@ defmodule Mead.MCP.HubTest do
         FakeTransport.complete_handshake(transport, tools)
         transport
     after
-      1_000 -> raise "no transport was started"
+      10_000 -> raise "no transport was started"
     end
   end
 

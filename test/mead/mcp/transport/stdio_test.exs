@@ -19,16 +19,16 @@ defmodule Mead.MCP.Transport.StdioTest do
   test "delivers each line the child prints as one message, in order" do
     transport = start(shell("echo first; echo second"))
 
-    assert_receive {:mcp_message, ^transport, "first"}, 2_000
-    assert_receive {:mcp_message, ^transport, "second"}, 2_000
-    assert_receive {:mcp_closed, ^transport, {:exit_status, 0}}, 2_000
+    assert_receive {:mcp_message, ^transport, "first"}, 10_000
+    assert_receive {:mcp_message, ^transport, "second"}, 10_000
+    assert_receive {:mcp_closed, ^transport, {:exit_status, 0}}, 10_000
   end
 
   test "skips blank lines" do
     transport = start(shell("printf 'one\\n\\ntwo\\n'"))
 
-    assert_receive {:mcp_message, ^transport, "one"}, 2_000
-    assert_receive {:mcp_message, ^transport, "two"}, 2_000
+    assert_receive {:mcp_message, ^transport, "one"}, 10_000
+    assert_receive {:mcp_message, ^transport, "two"}, 10_000
     refute_received {:mcp_message, ^transport, ""}
   end
 
@@ -36,7 +36,7 @@ defmodule Mead.MCP.Transport.StdioTest do
     transport = start(command: "cat")
 
     assert :ok = Stdio.send_message(transport, 1, ~s({"jsonrpc":"2.0","id":1}))
-    assert_receive {:mcp_message, ^transport, ~s({"jsonrpc":"2.0","id":1})}, 2_000
+    assert_receive {:mcp_message, ^transport, ~s({"jsonrpc":"2.0","id":1})}, 10_000
   end
 
   test "reassembles a line longer than the port buffer into one message" do
@@ -57,7 +57,7 @@ defmodule Mead.MCP.Transport.StdioTest do
   test "reports the exit status when the child leaves" do
     transport = start(shell("exit 3"))
 
-    assert_receive {:mcp_closed, ^transport, {:exit_status, 3}}, 2_000
+    assert_receive {:mcp_closed, ^transport, {:exit_status, 3}}, 10_000
   end
 
   test "a command that does not exist is an error, not a crash" do
@@ -73,7 +73,7 @@ defmodule Mead.MCP.Transport.StdioTest do
 
   test "sending after the child is gone is an error, not a crash" do
     transport = start(shell("exit 0"))
-    assert_receive {:mcp_closed, ^transport, {:exit_status, 0}}, 2_000
+    assert_receive {:mcp_closed, ^transport, {:exit_status, 0}}, 10_000
 
     wait_until(fn -> not Process.alive?(transport) end)
 
@@ -85,7 +85,7 @@ defmodule Mead.MCP.Transport.StdioTest do
     # the first line it prints.
     test "stopping the transport ends a child that ignores stdin closing" do
       transport = start(shell("echo $$; exec sleep 30", exit_grace_milliseconds: 50))
-      assert_receive {:mcp_message, ^transport, os_pid}, 2_000
+      assert_receive {:mcp_message, ^transport, os_pid}, 10_000
       assert alive?(os_pid)
 
       GenServer.stop(transport)
@@ -108,7 +108,7 @@ defmodule Mead.MCP.Transport.StdioTest do
           Process.sleep(:infinity)
         end)
 
-      assert_receive {:child, os_pid}, 2_000
+      assert_receive {:child, os_pid}, 10_000
       assert alive?(os_pid)
 
       Process.exit(owner, :kill)
@@ -119,7 +119,7 @@ defmodule Mead.MCP.Transport.StdioTest do
     test "a child that closes when stdin closes is not signalled" do
       transport = start(command: "cat")
       Stdio.send_message(transport, 1, "ping")
-      assert_receive {:mcp_message, ^transport, "ping"}, 2_000
+      assert_receive {:mcp_message, ^transport, "ping"}, 10_000
 
       started = System.monotonic_time(:millisecond)
       GenServer.stop(transport)
