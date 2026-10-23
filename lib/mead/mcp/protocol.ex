@@ -55,7 +55,7 @@ defmodule Mead.MCP.Protocol do
     JSON.encode!(%{"jsonrpc" => "2.0", "id" => id, "result" => result})
   end
 
-  @spec error_response(request_id(), integer(), String.t()) :: binary()
+  @spec error_response(request_id() | nil, integer(), String.t()) :: binary()
   def error_response(id, code, message) do
     JSON.encode!(%{
       "jsonrpc" => "2.0",
