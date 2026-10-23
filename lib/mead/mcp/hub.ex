@@ -5,8 +5,9 @@ defmodule Mead.MCP.Hub do
 
   The hub is not a process every call goes through. It starts a `Registry` and a
   `Mead.MCP.Catalog`, then the connections, under `:rest_for_one`; a call looks up the connection
-  and talks to it directly, so sessions never queue behind each other. It is the last child of
-  `Mead.Supervisor`, so a crash here restarts the hub and nothing before it.
+  and talks to it directly, so sessions never queue behind each other. It comes after the
+  session pool in `Mead.Supervisor`, so a crash here restarts the hub and the MCP server after it,
+  and nothing before it.
 
   Configuration is read from `config :mead, :mcp, servers: [...]` (see
   `Mead.MCP.Configuration`) and validated when the hub starts: an invalid one stops the

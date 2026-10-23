@@ -12,7 +12,7 @@ defmodule Mead.Application do
       {Registry, keys: :unique, name: Mead.Registry},
       {Task.Supervisor, name: Mead.TurnSupervisor},
       Mead.Session.Pool,
-      # After the pool, so that a crash of the hub restarts only the hub and never the pool.
+      # After the pool, so that a crash of the hub never restarts the pool.
       Mead.MCP.Hub,
       # Last, so that a crash of the listener restarts only the listener.
       Mead.MCP.Server

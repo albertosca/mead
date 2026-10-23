@@ -48,7 +48,7 @@ defmodule Mead.ApplicationTest do
     assert Process.whereis(Mead.TurnSupervisor) != turn_supervisor_pid
   end
 
-  test "killing the hub restarts only the hub" do
+  test "killing the hub restarts the hub and the server, and nothing before them" do
     hub_pid = Process.whereis(Mead.MCP.Hub)
     pool_pid = Process.whereis(Mead.Session.Pool)
     ledger_pid = Process.whereis(Mead.Ledger)
