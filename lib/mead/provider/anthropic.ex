@@ -169,7 +169,7 @@ defmodule Mead.Provider.Anthropic do
   defp parse(%Req.Response{body: %{"content" => content, "usage" => usage} = body})
        when is_list(content) do
     blocks = parse_blocks(content)
-    stop_reason = if Map.get(body, "stop_reason") == "tool_use", do: :tool_use, else: :end_turn
+    stop_reason = stop_reason(Map.get(body, "stop_reason"))
 
     with [_ | _] <- blocks,
          true <- stop_reason != :tool_use or Enum.any?(blocks, &(&1.type == :tool_use)),
@@ -187,6 +187,10 @@ defmodule Mead.Provider.Anthropic do
   end
 
   defp parse(_response), do: {:error, :malformed_response}
+
+  defp stop_reason("tool_use"), do: :tool_use
+  defp stop_reason("max_tokens"), do: :max_tokens
+  defp stop_reason(_other), do: :end_turn
 
   # Blocks of any other type (thinking, for one) are not requested and are left out.
   defp parse_blocks(content) do

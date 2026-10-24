@@ -447,5 +447,22 @@ defmodule Mead.Provider.OllamaTest do
       assert_received {:request, _method, _path, body}
       assert List.last(body["messages"]) == %{"role" => "tool", "content" => "stale"}
     end
+
+    test "an answer cut off by the token limit reports :max_tokens, not :end_turn" do
+      reply = Map.put(success_body("half an ans"), "done_reason", "length")
+      Req.Test.stub(__MODULE__, fn conn -> Req.Test.json(conn, reply) end)
+
+      assert {:ok, %{stop_reason: :max_tokens, content: [%{type: :text, text: "half an ans"}]}} =
+               Ollama.converse(@messages, [], options())
+    end
+
+    test "a finished answer and an unknown done_reason stay :end_turn" do
+      for done_reason <- ["stop", "load", nil] do
+        reply = Map.put(success_body("whole"), "done_reason", done_reason)
+        Req.Test.stub(__MODULE__, fn conn -> Req.Test.json(conn, reply) end)
+
+        assert {:ok, %{stop_reason: :end_turn}} = Ollama.converse(@messages, [], options())
+      end
+    end
   end
 end

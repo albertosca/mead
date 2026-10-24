@@ -21,7 +21,7 @@ O `mead` forma o núcleo de execução de uma plataforma desacoplada em três re
 ## Pilares Principais
 
 1. **Supervisão por Modelo de Atores:** Cada sessão de usuário ativa é supervisionada dinamicamente (`DynamicSupervisor`). Erros de timeout ou falhas em ferramentas externas são isolados naquele turno específico sem derrubar o restante do sistema.
-2. **Agendador Híbrido de Custo e Modelos:** Um classificador de baixa latência (<200ms) avalia a intenção da entrada, roteando tarefas mecânicas e simples para modelos locais (Ollama: Gemma 2 / Llama 3) com custo zero e total privacidade, reservando modelos de nuvem (Claude / Gemini) para síntese e raciocínio deliberado.
+2. **Agendador Híbrido de Custo e Modelos:** Um classificador de baixa latência (<200ms) avalia a intenção da entrada, roteando tarefas mecânicas e simples para modelos locais (Ollama, com o modelo que o operador escolher; o uso de tools exige um modelo que as suporte, como o Llama 3.1) com custo zero e total privacidade, reservando modelos de nuvem (Claude / Gemini) para síntese e raciocínio deliberado.
 3. **Hub MCP Concorrente:** Atua simultaneamente como cliente MCP (agregando ferramentas externas via stdio/HTTP) e servidor MCP (permitindo que agentes de terminal se conectem ao `mead`).
 4. **Telemetria e Livro-Razão de Tokens:** Contabilidade rigorosa de tokens de entrada e saída, latência e custo financeiro por sessão.
 

@@ -194,7 +194,7 @@ defmodule Mead.Provider.Ollama do
       {:ok,
        %{
          content: blocks,
-         stop_reason: if(tool_uses == [], do: :end_turn, else: :tool_use),
+         stop_reason: stop_reason(tool_uses, Map.get(body, "done_reason")),
          usage: %{input_tokens: input_tokens, output_tokens: output_tokens}
        }}
     else
@@ -203,6 +203,10 @@ defmodule Mead.Provider.Ollama do
   end
 
   defp parse(_response), do: {:error, :malformed_response}
+
+  defp stop_reason([], "length"), do: :max_tokens
+  defp stop_reason([], _done_reason), do: :end_turn
+  defp stop_reason(_tool_uses, _done_reason), do: :tool_use
 
   defp parse_tool_calls(nil), do: {:ok, []}
 

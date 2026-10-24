@@ -21,7 +21,7 @@
 ## Key Pillars
 
 1. **Actor-Model Process Supervision:** Every active user session is dynamically supervised (`DynamicSupervisor`). A timeout, rate-limit error, or crashed external tool is contained within that specific turn without affecting adjacent conversations.
-2. **Hybrid Cost & Model Scheduler:** A sub-200ms intent classifier evaluates incoming prompts, routing low-cost mechanical tasks (formatting, categorization, simple queries) to local models (Ollama: Gemma 2 / Llama 3) while delegating deep multi-step reasoning to cloud models (Claude / Gemini).
+2. **Hybrid Cost & Model Scheduler:** A sub-200ms intent classifier evaluates incoming prompts, routing low-cost mechanical tasks (formatting, categorization, simple queries) to local models (Ollama, with a model the operator chooses; tool use needs one that supports tools, such as Llama 3.1) while delegating deep multi-step reasoning to cloud models (Claude / Gemini).
 3. **Concurrent MCP Hub:** Acts as both an MCP Client (aggregating external tools over stdio/HTTP) and an MCP Server (allowing external CLI agents to tap into `mead`).
 4. **Real-Time Telemetry & Token Ledger:** Fine-grained accounting of token consumption, latency metrics, and financial expenditure per session.
 

@@ -40,10 +40,16 @@ defmodule Mead.Provider do
   @doc """
   Like `complete/2`, but the model may ask for tools. It returns the blocks of the answer and why
   the model stopped: `:tool_use` means the blocks include `tool_use` blocks whose results the
-  caller must send back in a following call. Optional: a provider without it is never given tools.
+  caller must send back in a following call, and `:max_tokens` means the token limit cut the answer
+  off. Optional: a provider without it is never given tools.
   """
   @callback converse(messages :: [message()], tools :: [tool()], options :: keyword()) ::
-              {:ok, %{content: [block()], stop_reason: :end_turn | :tool_use, usage: usage()}}
+              {:ok,
+               %{
+                 content: [block()],
+                 stop_reason: :end_turn | :tool_use | :max_tokens,
+                 usage: usage()
+               }}
               | {:error, reason()}
 
   @optional_callbacks converse: 3

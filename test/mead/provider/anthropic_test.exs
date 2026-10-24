@@ -40,6 +40,13 @@ defmodule Mead.Provider.AnthropicTest do
              {:ok, %{text: "hi there", usage: %{input_tokens: 11, output_tokens: 7}}}
   end
 
+  test "a reply cut off by the token limit reports :max_tokens through converse" do
+    reply = Map.put(success_body("half an ans"), "stop_reason", "max_tokens")
+    Req.Test.stub(__MODULE__, fn conn -> Req.Test.json(conn, reply) end)
+
+    assert {:ok, %{stop_reason: :max_tokens}} = Anthropic.converse(@messages, [], options())
+  end
+
   test "sends the model, the token limit, and the messages" do
     test_pid = self()
 
