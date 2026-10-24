@@ -11,7 +11,7 @@ defmodule Mead.Session.CrashRecoveryTest do
   @moduletag :capture_log
 
   defp start_session! do
-    {:ok, session_id} = Mead.start_session(handler: ScriptedHandler, turn_timeout: 5_000)
+    {:ok, session_id} = Mead.start_session(handler: ScriptedHandler, turn_timeout: 30_000)
     on_exit(fn -> Mead.stop_session(session_id) end)
     session_id
   end

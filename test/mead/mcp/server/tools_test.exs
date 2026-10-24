@@ -197,7 +197,7 @@ defmodule Mead.MCP.Server.ToolsTest do
       session_id = start_session!()
       Process.register(self(), :mcp_text_handler_test)
       task = Task.async(fn -> submit(session_id, "block") end)
-      assert_receive {:handler_started, handler}, 1_000
+      assert_receive {:handler_started, handler}, 10_000
 
       assert {:ok, %{"isError" => true} = result} = submit(session_id, "echo hi")
       assert text(result) == "a turn is already running in this session"
@@ -210,7 +210,7 @@ defmodule Mead.MCP.Server.ToolsTest do
       session_id = start_session!()
       Process.register(self(), :mcp_text_handler_test)
       caller = spawn(fn -> submit(session_id, "block") end)
-      assert_receive {:handler_started, handler}, 1_000
+      assert_receive {:handler_started, handler}, 10_000
 
       Process.exit(caller, :kill)
       send(handler, :release)

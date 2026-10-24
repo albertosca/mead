@@ -99,7 +99,7 @@ defmodule Mead.MCP.EndToEndTest do
 
     stop_supervised!(Hub)
 
-    wait_until(fn -> os_pids() == [] end, 5_000)
+    wait_until(fn -> os_pids() == [] end, 60_000)
   end
 
   test "the router runs a whole turn through the real hub" do

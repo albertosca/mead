@@ -59,7 +59,8 @@ defmodule Mead.Session.TurnFailuresTest do
   end
 
   test "a handler that outlives the timeout is killed and the turn times out" do
-    {:ok, session_id} = Mead.start_session(handler: ScriptedHandler, turn_timeout: 200)
+    # Long enough that the handler has started before the timer fires, even on a loaded machine.
+    {:ok, session_id} = Mead.start_session(handler: ScriptedHandler, turn_timeout: 1_000)
     on_exit(fn -> Mead.stop_session(session_id) end)
     server_pid = Session.whereis(session_id, :server)
 

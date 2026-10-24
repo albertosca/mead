@@ -188,6 +188,14 @@ defmodule Mead.RouterTest do
       assert metadata.session_id == "session-1"
     end
 
+    test "ignores a route event emitted by another process" do
+      Task.await(
+        Task.async(fn -> Router.route([], "list my tasks", [session_id: "other"], slots()) end)
+      )
+
+      refute_received {:route_event, _measurements, _metadata}
+    end
+
     test "reports a forced route and zero tokens on failure" do
       failing = slots(cloud: {FakeProvider, test_pid: self(), result: {:error, :timeout}})
 

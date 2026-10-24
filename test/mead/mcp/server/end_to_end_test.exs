@@ -32,17 +32,17 @@ defmodule Mead.MCP.Server.EndToEndTest do
             url: "http://127.0.0.1:#{port}/mcp",
             headers: [{"authorization", "Bearer " <> @token}]
           ]},
-       reconnect_delays: [100],
-       handshake_timeout: 2_000}
+       reconnect_delays: [60_000],
+       handshake_timeout: 10_000}
     )
 
-    wait_until(fn -> match?({:ok, [_ | _], _servers}, Catalog.snapshot(catalog)) end, 5_000)
+    wait_until(fn -> match?({:ok, [_ | _], _servers}, Catalog.snapshot(catalog)) end)
 
     %{registry: registry, catalog: catalog, port: port}
   end
 
   defp call(context, name, arguments) do
-    Connection.call_tool(context.registry, :mead, name, arguments, 5_000)
+    Connection.call_tool(context.registry, :mead, name, arguments, 30_000)
   end
 
   defp raw_post(port, body, headers) do

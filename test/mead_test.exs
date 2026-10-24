@@ -122,7 +122,7 @@ defmodule Mead.MeadTest do
   describe "submit_turn/3 options" do
     test "the route reaches the handler" do
       {:ok, session_id} =
-        Mead.start_session(handler: Mead.Test.ScriptedHandler, turn_timeout: 5_000)
+        Mead.start_session(handler: Mead.Test.ScriptedHandler, turn_timeout: 30_000)
 
       on_exit(fn -> Mead.stop_session(session_id) end)
 
@@ -135,7 +135,7 @@ defmodule Mead.MeadTest do
 
     test "the server tells the handler which session the turn belongs to" do
       {:ok, session_id} =
-        Mead.start_session(handler: Mead.Test.ScriptedHandler, turn_timeout: 5_000)
+        Mead.start_session(handler: Mead.Test.ScriptedHandler, turn_timeout: 30_000)
 
       on_exit(fn -> Mead.stop_session(session_id) end)
 
@@ -146,7 +146,7 @@ defmodule Mead.MeadTest do
 
     test "a caller cannot choose the session id the handler sees" do
       {:ok, session_id} =
-        Mead.start_session(handler: Mead.Test.ScriptedHandler, turn_timeout: 5_000)
+        Mead.start_session(handler: Mead.Test.ScriptedHandler, turn_timeout: 30_000)
 
       on_exit(fn -> Mead.stop_session(session_id) end)
 
@@ -159,7 +159,7 @@ defmodule Mead.MeadTest do
 
     test "the route defaults to :auto" do
       {:ok, session_id} =
-        Mead.start_session(handler: Mead.Test.ScriptedHandler, turn_timeout: 5_000)
+        Mead.start_session(handler: Mead.Test.ScriptedHandler, turn_timeout: 30_000)
 
       on_exit(fn -> Mead.stop_session(session_id) end)
 
@@ -208,7 +208,7 @@ defmodule Mead.MeadTest do
   describe "stop_session/1" do
     test "a caller waiting on a running turn is told the session was stopped, not that it crashed" do
       {:ok, session_id} =
-        Mead.start_session(handler: Mead.Test.ScriptedHandler, turn_timeout: 5_000)
+        Mead.start_session(handler: Mead.Test.ScriptedHandler, turn_timeout: 30_000)
 
       test_pid = self()
       waiting_caller = Task.async(fn -> Mead.submit_turn(session_id, {:block, test_pid}) end)

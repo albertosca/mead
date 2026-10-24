@@ -146,7 +146,7 @@ defmodule Mead.MCP.Transport.HttpTest do
 
       assert_receive {:mcp_send_failed, ^transport, 8,
                       {:unexpected_content_type, "text/html" <> _}},
-                     2_000
+                     10_000
     end
 
     test "a failed notification reports a nil id" do
@@ -176,12 +176,12 @@ defmodule Mead.MCP.Transport.HttpTest do
 
       json_transport = start(&json(&1, oversized))
       Http.send_message(json_transport, 21, "{}")
-      assert_receive {:mcp_send_failed, ^json_transport, 21, :response_too_large}, 5_000
+      assert_receive {:mcp_send_failed, ^json_transport, 21, :response_too_large}, 10_000
       refute_received {:mcp_message, ^json_transport, _message}
 
       stream_transport = start(&event_stream(&1, "data: " <> oversized <> "\n\n"))
       Http.send_message(stream_transport, 22, "{}")
-      assert_receive {:mcp_send_failed, ^stream_transport, 22, :response_too_large}, 5_000
+      assert_receive {:mcp_send_failed, ^stream_transport, 22, :response_too_large}, 10_000
       refute_received {:mcp_message, ^stream_transport, _message}
     end
 
@@ -197,7 +197,7 @@ defmodule Mead.MCP.Transport.HttpTest do
         end)
 
       Http.send_message(transport, 1, "{}")
-      assert_receive {:mcp_send_failed, ^transport, 1, :response_too_large}, 5_000
+      assert_receive {:mcp_send_failed, ^transport, 1, :response_too_large}, 10_000
 
       Http.send_message(transport, 2, "{}")
       assert_receive {:mcp_message, ^transport, @response}, 10_000

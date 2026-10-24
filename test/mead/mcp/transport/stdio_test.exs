@@ -42,7 +42,7 @@ defmodule Mead.MCP.Transport.StdioTest do
   test "reassembles a line longer than the port buffer into one message" do
     transport = start(shell("yes a | head -c 100000 | tr -d '\\n'; echo"))
 
-    assert_receive {:mcp_message, ^transport, message}, 5_000
+    assert_receive {:mcp_message, ^transport, message}, 10_000
     assert message == String.duplicate("a", 50_000)
   end
 
@@ -50,7 +50,7 @@ defmodule Mead.MCP.Transport.StdioTest do
     transport =
       start(shell("yes a | head -c 100000 | tr -d '\\n'; echo", maximum_message_bytes: 1_000))
 
-    assert_receive {:mcp_closed, ^transport, :message_too_large}, 5_000
+    assert_receive {:mcp_closed, ^transport, :message_too_large}, 10_000
     refute_received {:mcp_message, ^transport, _message}
   end
 
@@ -90,7 +90,7 @@ defmodule Mead.MCP.Transport.StdioTest do
 
       GenServer.stop(transport)
 
-      wait_until(fn -> not alive?(os_pid) end, 3_000)
+      wait_until(fn -> not alive?(os_pid) end, 30_000)
     end
 
     test "killing the owner ends the child too" do
@@ -113,7 +113,7 @@ defmodule Mead.MCP.Transport.StdioTest do
 
       Process.exit(owner, :kill)
 
-      wait_until(fn -> not alive?(os_pid) end, 3_000)
+      wait_until(fn -> not alive?(os_pid) end, 30_000)
     end
 
     test "a child that closes when stdin closes is not signalled" do

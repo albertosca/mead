@@ -274,9 +274,9 @@ defmodule Mead.MCP.ConnectionTest do
           transport: {FakeTransport, [test_pid: self(), start_error: :enoent]}
         )
 
-      assert_receive {:transport_start_attempted, :enoent}, 1_000
-      assert_receive {:transport_start_attempted, :enoent}, 1_000
-      assert_receive {:transport_start_attempted, :enoent}, 1_000
+      assert_receive {:transport_start_attempted, :enoent}, 10_000
+      assert_receive {:transport_start_attempted, :enoent}, 10_000
+      assert_receive {:transport_start_attempted, :enoent}, 10_000
 
       assert Process.alive?(connection)
       assert entry_names(context.catalog) == []

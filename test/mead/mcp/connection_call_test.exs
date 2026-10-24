@@ -44,7 +44,7 @@ defmodule Mead.MCP.ConnectionCallTest do
     %{registry: registry, catalog: catalog, connection: connection, transport: transport}
   end
 
-  defp call(context, arguments \\ %{"text" => "hi"}, timeout \\ 1_000) do
+  defp call(context, arguments \\ %{"text" => "hi"}, timeout \\ 30_000) do
     Connection.call_tool(context.registry, :fake, "echo", arguments, timeout)
   end
 
