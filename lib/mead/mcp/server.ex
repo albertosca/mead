@@ -19,6 +19,8 @@ defmodule Mead.MCP.Server do
 
   alias Mead.MCP.Server.Configuration
 
+  @acceptors 10
+
   @spec start_link(keyword()) :: Supervisor.on_start()
   def start_link(options \\ []) do
     Supervisor.start_link(__MODULE__, options, name: Keyword.get(options, :name, __MODULE__))
@@ -65,6 +67,21 @@ defmodule Mead.MCP.Server do
      scheme: :http,
      ip: configuration.address,
      port: configuration.port,
+     thousand_island_options: connection_limits(configuration.maximum_connections),
      startup_log: false}
+  end
+
+  # Thousand Island limits connections per acceptor, so the total is acceptors times the limit of
+  # each; a limit that is not a multiple of the acceptors is rounded up to one. A connection over
+  # the limit is closed after a short wait for room, not queued without bound.
+  defp connection_limits(maximum_connections) do
+    acceptors = min(maximum_connections, @acceptors)
+
+    [
+      num_acceptors: acceptors,
+      num_connections: div(maximum_connections + acceptors - 1, acceptors),
+      max_connections_retry_wait: 200,
+      max_connections_retry_count: 5
+    ]
   end
 end

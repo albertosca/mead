@@ -1,26 +1,39 @@
 defmodule Mead.Session.Pool do
   @moduledoc """
   Dynamically starts and stops the per-conversation supervisors.
+
+  The number of live sessions is bounded by `:maximum_sessions` (the option of `start_link/1`,
+  then `config :mead, :maximum_sessions`, then #{1_000}); a session beyond it is refused with
+  `{:error, :max_children}` instead of growing the node without limit.
   """
 
   use DynamicSupervisor
 
   alias Mead.Session
 
-  @spec start_link(term()) :: Supervisor.on_start()
-  def start_link(arguments) do
-    DynamicSupervisor.start_link(__MODULE__, arguments, name: __MODULE__)
+  @default_maximum_sessions 1_000
+
+  @spec start_link(keyword()) :: Supervisor.on_start()
+  def start_link(options \\ []) do
+    DynamicSupervisor.start_link(__MODULE__, options,
+      name: Keyword.get(options, :name, __MODULE__)
+    )
   end
 
   @impl true
-  def init(_arguments) do
-    DynamicSupervisor.init(strategy: :one_for_one)
+  def init(options) do
+    maximum_sessions =
+      Keyword.get_lazy(options, :maximum_sessions, fn ->
+        Application.get_env(:mead, :maximum_sessions, @default_maximum_sessions)
+      end)
+
+    DynamicSupervisor.init(strategy: :one_for_one, max_children: maximum_sessions)
   end
 
   @doc "Starts the supervisor pair for the conversation described by `options`."
-  @spec start_session(keyword()) :: DynamicSupervisor.on_start_child()
-  def start_session(options) do
-    DynamicSupervisor.start_child(__MODULE__, {Session.Supervisor, options})
+  @spec start_session(keyword(), Supervisor.supervisor()) :: DynamicSupervisor.on_start_child()
+  def start_session(options, pool \\ __MODULE__) do
+    DynamicSupervisor.start_child(pool, {Session.Supervisor, options})
   end
 
   @doc "Stops a conversation's supervisor pair, discarding its history."

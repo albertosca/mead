@@ -18,6 +18,15 @@ defmodule Mead.Application do
       Mead.MCP.Server
     ]
 
-    Supervisor.start_link(children, strategy: :rest_for_one, name: Mead.Supervisor)
+    Supervisor.start_link(children, supervisor_options())
+  end
+
+  # Killing a root child restarts everything after it, which counts as one restart. OTP's default
+  # of 3 restarts in 5 seconds leaves no room for a test, or a short burst of real failures, to
+  # kill a child without taking the whole application down; a crash loop still escalates.
+  @doc false
+  @spec supervisor_options() :: keyword()
+  def supervisor_options do
+    [strategy: :rest_for_one, name: Mead.Supervisor, max_restarts: 10, max_seconds: 5]
   end
 end

@@ -19,22 +19,41 @@ defmodule Mead.MCP.Server.Configuration do
     * `:address` - an IPv4 tuple; defaults to loopback `{127, 0, 0, 1}`.
     * `:allow_effect` - whether `tools: "effect"` is honoured; defaults to `false`.
     * `:allowed_origins` - exact `Origin` values accepted besides loopback; defaults to `[]`.
+    * `:maximum_connections` - how many connections the listener serves at once, rounded up to a
+      multiple of 10 from 10 on; a connection over the limit is closed after about a second
+      without room. A positive integer; defaults to 250.
   """
 
-  @allowed_keys [:token, :port, :address, :allow_effect, :allowed_origins]
+  @allowed_keys [:token, :port, :address, :allow_effect, :allowed_origins, :maximum_connections]
   @default_port 4040
   @default_address {127, 0, 0, 1}
+  @default_maximum_connections 250
 
   @derive {Inspect, except: [:token_digest]}
-  @enforce_keys [:token_digest, :port, :address, :allow_effect, :allowed_origins]
-  defstruct [:token_digest, :port, :address, :allow_effect, :allowed_origins]
+  @enforce_keys [
+    :token_digest,
+    :port,
+    :address,
+    :allow_effect,
+    :allowed_origins,
+    :maximum_connections
+  ]
+  defstruct [
+    :token_digest,
+    :port,
+    :address,
+    :allow_effect,
+    :allowed_origins,
+    :maximum_connections
+  ]
 
   @type t :: %__MODULE__{
           token_digest: binary(),
           port: 0..65_535,
           address: :inet.ip4_address(),
           allow_effect: boolean(),
-          allowed_origins: [String.t()]
+          allowed_origins: [String.t()],
+          maximum_connections: pos_integer()
         }
 
   @spec load(term()) :: :disabled | {:ok, t()} | {:error, String.t()}
@@ -72,14 +91,16 @@ defmodule Mead.MCP.Server.Configuration do
          {:ok, port} <- fetch_port(settings),
          {:ok, address} <- fetch_address(settings),
          {:ok, allow_effect} <- fetch_allow_effect(settings),
-         {:ok, allowed_origins} <- fetch_allowed_origins(settings) do
+         {:ok, allowed_origins} <- fetch_allowed_origins(settings),
+         {:ok, maximum_connections} <- fetch_maximum_connections(settings) do
       {:ok,
        %__MODULE__{
          token_digest: :crypto.hash(:sha256, token),
          port: port,
          address: address,
          allow_effect: allow_effect,
-         allowed_origins: allowed_origins
+         allowed_origins: allowed_origins,
+         maximum_connections: maximum_connections
        }}
     end
   end
@@ -109,6 +130,13 @@ defmodule Mead.MCP.Server.Configuration do
     case Keyword.get(settings, :allow_effect, false) do
       value when is_boolean(value) -> {:ok, value}
       _other -> {:error, "allow_effect must be true or false"}
+    end
+  end
+
+  defp fetch_maximum_connections(settings) do
+    case Keyword.get(settings, :maximum_connections, @default_maximum_connections) do
+      value when is_integer(value) and value > 0 -> {:ok, value}
+      _other -> {:error, "maximum_connections must be a positive integer"}
     end
   end
 

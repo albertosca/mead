@@ -12,8 +12,10 @@ defmodule Mead.MCP.Server.Tools do
   """
 
   @maximum_input_characters 100_000
-  # The longest delay `Process.send_after/3` accepts on every platform; the same bound as `Mead`.
-  @maximum_turn_timeout 4_294_967_295
+  # A client picks its own turn timeout, and a turn holds a process and an HTTP request for that
+  # long; one hour is far beyond any real turn. The runtime itself accepts up to the longest delay
+  # `Process.send_after/3` allows, for an operator who needs more.
+  @maximum_turn_timeout 3_600_000
   @routes %{"auto" => :auto, "local" => :local, "cloud" => :cloud}
   @inspect_options [limit: 50, printable_limit: 1_000]
 
@@ -31,6 +33,7 @@ defmodule Mead.MCP.Server.Tools do
             "turn_timeout" => %{
               "type" => "integer",
               "minimum" => 1,
+              "maximum" => @maximum_turn_timeout,
               "description" => "Milliseconds a single turn of this session may run."
             }
           }
@@ -112,7 +115,9 @@ defmodule Mead.MCP.Server.Tools do
         {:ok, [turn_timeout: turn_timeout]}
 
       {:ok, _other} ->
-        invalid("turn_timeout must be a positive integer number of milliseconds")
+        invalid(
+          "turn_timeout must be a positive integer number of milliseconds, at most #{@maximum_turn_timeout}"
+        )
     end
   end
 

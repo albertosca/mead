@@ -19,6 +19,24 @@ defmodule Mead.MCP.ServerTest do
     )
   end
 
+  defp served?(port) do
+    with {:ok, socket} <- :gen_tcp.connect({127, 0, 0, 1}, port, [:binary, active: false]) do
+      body = JSON.encode!(%{"jsonrpc" => "2.0", "id" => 1, "method" => "ping"})
+
+      :ok =
+        :gen_tcp.send(
+          socket,
+          "POST /mcp HTTP/1.1\r\nhost: localhost\r\nauthorization: Bearer #{@token}\r\n" <>
+            "content-type: application/json\r\ncontent-length: #{byte_size(body)}\r\n\r\n" <>
+            body
+        )
+
+      match?({:ok, "HTTP/1.1 200" <> _rest}, :gen_tcp.recv(socket, 0, 5_000))
+    else
+      _refused -> false
+    end
+  end
+
   test "without a token it starts nothing, says so once, and has no port" do
     name = unique_name()
 
@@ -109,6 +127,27 @@ defmodule Mead.MCP.ServerTest do
              end)
 
     assert post_ping(port, [{"authorization", "Bearer " <> @token}]).status == 200
+  end
+
+  test "a connection beyond maximum_connections is closed, and one is served again once room is free" do
+    name = unique_name()
+
+    start_supervised!(
+      {Server, name: name, settings: [token: @token, port: 0, maximum_connections: 1]}
+    )
+
+    {:ok, port} = Server.port(name)
+    options = [:binary, active: false]
+    {:ok, holder} = :gen_tcp.connect({127, 0, 0, 1}, port, options)
+    on_exit(fn -> :gen_tcp.close(holder) end)
+    {:ok, refused} = :gen_tcp.connect({127, 0, 0, 1}, port, options)
+
+    # The one allowed connection stays open, so there is never room for the second.
+    assert {:error, :closed} = :gen_tcp.recv(refused, 0, 10_000)
+
+    :gen_tcp.close(holder)
+
+    assert wait_until(fn -> served?(port) end)
   end
 
   test "port/1 of a server that is not running is :error, not a crash" do

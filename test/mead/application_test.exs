@@ -3,10 +3,11 @@ defmodule Mead.ApplicationTest do
   # with the asynchronous tests.
   use ExUnit.Case, async: false
 
-  # The root supervisor tolerates 3 restarts in 5 seconds, and the whole suite already spends
-  # them: this file kills the turn supervisor and the hub, and ledger_session_test.exs kills the
-  # turn supervisor. A fourth kill of a root child shuts the application down. That the server,
-  # the last child, restarts alone follows from rest_for_one and the order test below.
+  # The root supervisor tolerates 10 restarts in 5 seconds, well above the 3 of OTP's default,
+  # so a test may kill a root child without the suite's earlier kills (this file kills the turn
+  # supervisor and the hub, and ledger_session_test.exs kills the turn supervisor) having spent
+  # the budget. That the server, the last child, restarts alone follows from rest_for_one and
+  # the order test below.
 
   import Mead.TestHelpers
 
@@ -29,6 +30,38 @@ defmodule Mead.ApplicationTest do
              Mead.MCP.Hub,
              Mead.MCP.Server
            ]
+  end
+
+  test "the root supervisor tolerates a burst of restarts that OTP's default budget would not" do
+    options = Mead.Application.supervisor_options()
+    assert options[:strategy] == :rest_for_one
+    assert options[:max_restarts] == 10
+    assert options[:max_seconds] == 5
+
+    # What the budget means: a child killed five times in a row does not take the supervisor down.
+    {:ok, supervisor} =
+      Supervisor.start_link(
+        [%{id: :worker, start: {Agent, :start_link, [fn -> :ok end]}}],
+        Keyword.delete(options, :name)
+      )
+
+    for _kill <- 1..5 do
+      worker = wait_until(fn -> restarted_worker(supervisor) end)
+      Process.exit(worker, :kill)
+
+      wait_until(fn ->
+        restarted_worker(supervisor) != worker and restarted_worker(supervisor)
+      end)
+    end
+
+    assert Process.alive?(supervisor)
+  end
+
+  defp restarted_worker(supervisor) do
+    case Supervisor.which_children(supervisor) do
+      [{:worker, worker, :worker, _modules}] when is_pid(worker) -> worker
+      _restarting -> false
+    end
   end
 
   test "the root supervisor restarts later children when an earlier one dies (rest_for_one)" do

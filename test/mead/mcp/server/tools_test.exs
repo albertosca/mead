@@ -76,12 +76,29 @@ defmodule Mead.MCP.Server.ToolsTest do
     end
 
     test "refuses a turn_timeout that is not a positive integer within the limit" do
-      for value <- [0, -1, "30", 1.5, nil, [], 4_294_967_296] do
+      for value <- [0, -1, "30", 1.5, nil, [], 3_600_001, 4_294_967_296] do
         assert {:error, {:invalid_params, message}} =
                  Tools.call("start_session", %{"turn_timeout" => value}, @closed)
 
         assert message =~ "turn_timeout"
       end
+    end
+  end
+
+  describe "start_session timeout limit" do
+    test "accepts a turn_timeout of exactly one hour" do
+      {:ok, result} = Tools.call("start_session", %{"turn_timeout" => 3_600_000}, @closed)
+      session_id = text(result)
+      on_exit(fn -> Mead.stop_session(session_id) end)
+
+      state = session_id |> Mead.Session.whereis(:server) |> :sys.get_state()
+      assert state.turn_timeout == 3_600_000
+    end
+
+    test "advertises the limit in the tool schema" do
+      start_session = Enum.find(Tools.definitions(), &(&1["name"] == "start_session"))
+
+      assert start_session["inputSchema"]["properties"]["turn_timeout"]["maximum"] == 3_600_000
     end
   end
 

@@ -19,6 +19,7 @@ defmodule Mead.MCP.Server.ConfigurationTest do
       assert configuration.address == {127, 0, 0, 1}
       assert configuration.allow_effect == false
       assert configuration.allowed_origins == []
+      assert configuration.maximum_connections == 250
     end
 
     test "every setting can be overridden" do
@@ -28,13 +29,22 @@ defmodule Mead.MCP.Server.ConfigurationTest do
                  port: 0,
                  address: {10, 0, 0, 7},
                  allow_effect: true,
-                 allowed_origins: ["https://deck.example"]
+                 allowed_origins: ["https://deck.example"],
+                 maximum_connections: 8
                )
 
       assert configuration.port == 0
       assert configuration.address == {10, 0, 0, 7}
       assert configuration.allow_effect == true
       assert configuration.allowed_origins == ["https://deck.example"]
+      assert configuration.maximum_connections == 8
+    end
+
+    test "an invalid maximum_connections is refused" do
+      for value <- [0, -1, "8", 1.5, nil, :infinity] do
+        assert {:error, message} = Configuration.load(token: @token, maximum_connections: value)
+        assert message =~ "maximum_connections must be a positive integer"
+      end
     end
 
     test "the struct keeps a digest of the token and never the token" do
