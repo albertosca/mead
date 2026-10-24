@@ -30,6 +30,7 @@ defmodule Mead.Provider do
           | :timeout
           | :malformed_response
           | :invalid_options
+          | :tools_unsupported
           | {:http_status, pos_integer()}
           | {:transport, term()}
 
