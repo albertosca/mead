@@ -29,6 +29,13 @@ defmodule Mead.RouterToolsTest do
     ]
   end
 
+  defp local_slots(steps) do
+    [
+      cloud: {FakeProvider, test_pid: self(), script: script([])},
+      local: {FakeProvider, test_pid: self(), script: script(steps)}
+    ]
+  end
+
   defp hub(results \\ %{}, tools \\ [@tool]) do
     FakeHub.configure(test_pid: self(), tools: tools, results: results)
   end
@@ -75,14 +82,66 @@ defmodule Mead.RouterToolsTest do
     assert_received :complete_called
   end
 
-  test "the local route never gets tools" do
+  test "a local provider that cannot converse is never given tools" do
+    hub()
+    slots = [local: {CompleteOnlyProvider, test_pid: self()}]
+
+    assert Router.route([], "list tasks", [route: :local], slots, FakeHub) ==
+             {:ok, "plain reply"}
+
+    assert_received :complete_called
+    refute_received {:tools_requested, _options}
+  end
+
+  test "the local route is offered tools through a provider that can converse, and runs the loop" do
+    hub(%{"files__read_file" => {:ok, %{content: "file contents", is_error: false}}})
+
+    steps = [
+      FakeProvider.tool_step([{"call_1", "files__read_file", %{"path" => "/a"}}]),
+      FakeProvider.text_step("The file says: file contents")
+    ]
+
+    assert Router.route([], "read /a", [route: :local], local_slots(steps), FakeHub) ==
+             {:ok, "The file says: file contents"}
+
+    assert_received {:provider_conversed, _first_messages, [@tool]}
+    assert_received {:tool_called, "files__read_file", %{"path" => "/a"}, _options}
+    assert_received {:provider_conversed, _second_messages, [@tool]}
+  end
+
+  test "the local route gets effect tools only when the turn opts in, through the same hub call" do
     hub()
 
-    assert Router.route([], "list tasks", [route: :local], slots([]), FakeHub) ==
-             {:ok, "fake reply"}
+    Router.route(
+      [],
+      "read /a",
+      [route: :local, tools: :effect, session_id: "session-1"],
+      local_slots([FakeProvider.text_step("done")]),
+      FakeHub
+    )
 
-    refute_received {:provider_conversed, _messages, _tools}
-    refute_received {:tools_requested, _options}
+    assert_received {:tools_requested, options}
+    assert Keyword.get(options, :tools) == :effect
+    assert Keyword.get(options, :session_id) == "session-1"
+  end
+
+  test "a local turn that uses tools reports the local route and the tool calls" do
+    hub(%{"files__read_file" => {:ok, %{content: "x", is_error: false}}})
+
+    steps = [
+      FakeProvider.tool_step([{"call_1", "files__read_file", %{}}]),
+      FakeProvider.text_step("done")
+    ]
+
+    capture_event(fn ->
+      assert Router.route([], "read", [route: :local], local_slots(steps), FakeHub) ==
+               {:ok, "done"}
+    end)
+
+    assert_received {:route_event, measurements, metadata}
+    assert measurements.tool_calls == 1
+    assert metadata.route == :local
+    assert metadata.status == :ok
   end
 
   test "the hub is asked for the tools with the turn options, including the session id and the opt-in" do

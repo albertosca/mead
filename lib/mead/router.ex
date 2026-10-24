@@ -9,7 +9,7 @@ defmodule Mead.Router do
 
       config :mead, :router,
         slots: [
-          local: nil,
+          local: {Mead.Provider.Ollama, model: "llama3.1"},
           cloud: {Mead.Provider.Anthropic, model: "claude-sonnet-5-5"}
         ]
 
@@ -19,15 +19,9 @@ defmodule Mead.Router do
 
   ## Tools
 
-  When the route is `:cloud`, the provider exports `converse/3`, and `Mead.MCP.Hub.tools_for/1`
-  shows at least one tool for the turn, the turn becomes a loop: the model answers or asks for
-  tools, each requested call goes to `Mead.MCP.Hub.call_tool/3`, and the results are sent back,
-  until the model answers with text. The loop stops after eight provider calls with
-  `:tool_loop_limit`. A tool that fails, is not allowed, or does not exist is reported to the
-  model as an error result and is never retried; the turn does not fail for it. The turn option
-  `tools: :effect` also shows tools that have side effects; see `Mead.MCP.Policy`. The whole loop
-  runs inside the turn timeout, so a conversation that uses tools may need a larger
-  `:turn_timeout` than the default of 30 seconds.
+  When the provider of the chosen slot exports `converse/3`, whichever the route, and `Mead.MCP.Hub.tools_for/1` shows at least one tool for the turn, the turn becomes a loop: the model answers or asks for tools, each requested call goes to `Mead.MCP.Hub.call_tool/3`, and the results are sent back, until the model answers with text. The loop stops after eight provider calls with `:tool_loop_limit`. A tool that fails, is not allowed, or does not exist is reported to the model as an error result and is never retried; the turn does not fail for it. The turn option `tools: :effect` also shows tools that have side effects; see `Mead.MCP.Policy`. The whole loop runs inside the turn timeout, so a conversation that uses tools may need a larger `:turn_timeout` than the default of 30 seconds.
+
+  A tool result goes back to the model of the route that asked for it. A local turn therefore reaches every MCP server the cloud route reaches, including servers that talk to the network, and the result is seen only by the local model. A local model that does not support tools fails the turn with `:tools_unsupported` as soon as any tool is visible; the way out is `route: :cloud`, another model, or no tools configured.
 
   The router keeps no state, so every conversation stays independent of the others. Each turn
   emits `[:mead, :router, :route]` with the measurements `duration` (in native time units),
@@ -114,9 +108,9 @@ defmodule Mead.Router do
 
   # A slot of any other shape would crash inside the provider with its content in the stacktrace,
   # which the session stores and replies; refuse it by shape instead.
-  defp call_slot({provider, provider_options} = slot, route, history, input, options, hub) do
+  defp call_slot({provider, provider_options} = slot, _route, history, input, options, hub) do
     if is_atom(provider) and Keyword.keyword?(provider_options) do
-      call_provider(slot, route, history, input, options, hub)
+      call_provider(slot, history, input, options, hub)
     else
       outcome({:error, :invalid_slot}, nil)
     end
@@ -126,11 +120,11 @@ defmodule Mead.Router do
     outcome({:error, :invalid_slot}, nil)
   end
 
-  defp call_provider({provider, provider_options}, route, history, input, options, hub) do
+  defp call_provider({provider, provider_options}, history, input, options, hub) do
     if is_binary(input) and String.valid?(input) do
       messages = build_messages(history, input)
 
-      case tools_for_turn(provider, route, options, hub) do
+      case tools_for_turn(provider, options, hub) do
         [] -> complete_once(provider, provider_options, messages)
         tools -> converse_loop(provider, provider_options, messages, tools, options, hub)
       end
@@ -146,16 +140,14 @@ defmodule Mead.Router do
     end
   end
 
-  # Only the cloud route is offered tools, and only through a provider that can carry them.
-  defp tools_for_turn(provider, :cloud, options, hub) do
+  # Tools are offered on either route, and only through a provider that can carry them.
+  defp tools_for_turn(provider, options, hub) do
     if Code.ensure_loaded?(provider) and function_exported?(provider, :converse, 3) do
       hub.tools_for(options)
     else
       []
     end
   end
-
-  defp tools_for_turn(_provider, _route, _options, _hub), do: []
 
   defp converse_loop(provider, provider_options, messages, tools, options, hub) do
     context = %{

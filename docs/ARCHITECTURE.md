@@ -45,7 +45,7 @@ graph TD
 6. **`Mead.Ledger`:** An in-memory ledger of what the router sends to providers, the first child of the root supervisor. It keeps usage aggregates per session and per route and a ring of the last 100 turns, written by a telemetry handler in the process that emitted the event. Budgets, prices, and disk persistence are not part of it.
 7. **`Mead.MCP.Server`:** The server side of MCP. A supervisor, the last child of the root, that starts a `Bandit` listener running `Mead.MCP.Server.Plug` only when `config :mead, :mcp_server` has a token. Clients such as the deck use it to start sessions, submit turns, read the history, and stop sessions as four MCP tools.
 
-Implemented so far: the registry, the turn supervisor, the session pool, the router core with the Anthropic provider, the ledger, and both sides of MCP: the hub (client) and the HTTP server. The Ollama provider is specified here and arrives in a later slice.
+Implemented so far: the registry, the turn supervisor, the session pool, the router core with the Anthropic provider, the ledger, and both sides of MCP: the hub (client) and the HTTP server. The Ollama provider fills the local slot with text and tools.
 
 ---
 
@@ -54,14 +54,14 @@ Implemented so far: the registry, the turn supervisor, the session pool, the rou
 ```mermaid
 flowchart LR
     Msg["User Input"] --> Classifier{"Fast Classifier - Heuristic / Small Model"}
-    Classifier -->|"Routine, Triage, Formatting"| LocalExec["Local Executor - Ollama (Gemma 2)"]
+    Classifier -->|"Routine, Triage, Formatting"| LocalExec["Local Executor - Ollama"]
     Classifier -->|"Complex Reasoning, Synthesis"| CloudExec["Cloud Executor - Claude / Gemini"]
     LocalExec --> TurnHandler["Response Formatter & Action Cards"]
     CloudExec --> TurnHandler
     TurnHandler --> Ledger["Mead.Ledger - Token Usage"]
 ```
 
-* **Local Executor:** Handles zero-cost tasks with full privacy (command parsing, email categorization, status checks).
+* **Local Executor:** Handles zero-cost tasks with full privacy (command parsing, email categorization, status checks). It is an Ollama model, chosen by the operator with the required `:model` option, and it may call MCP tools under the same policy as the cloud executor; a model without tool support fails the turn with `:tools_unsupported`.
 * **Cloud Executor:** Handles complex multi-step reasoning, ambiguous disambiguation, and creative synthesis.
 * **Turn Handler:** Packages raw model outputs into streaming Markdown text paired with structured `ActionCard` JSON specifications for client consumption.
 
