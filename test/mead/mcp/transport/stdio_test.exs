@@ -117,14 +117,16 @@ defmodule Mead.MCP.Transport.StdioTest do
     end
 
     test "a child that closes when stdin closes is not signalled" do
-      transport = start(command: "cat")
+      # With a grace this long, a child that needed the signal would keep the stop waiting far past
+      # the bound below.
+      transport = start(command: "cat", exit_grace_milliseconds: 60_000)
       Stdio.send_message(transport, 1, "ping")
       assert_receive {:mcp_message, ^transport, "ping"}, 10_000
 
       started = System.monotonic_time(:millisecond)
       GenServer.stop(transport)
 
-      assert System.monotonic_time(:millisecond) - started < 900
+      assert System.monotonic_time(:millisecond) - started < 30_000
     end
   end
 end

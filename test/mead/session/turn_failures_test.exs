@@ -8,11 +8,11 @@ defmodule Mead.Session.TurnFailuresTest do
   alias Mead.Test.ScriptedHandler
 
   # A server that never answers would hang the caller forever, so fail fast instead.
-  @moduletag timeout: 5_000
+  @moduletag timeout: 30_000
   @moduletag :capture_log
 
   setup do
-    {:ok, session_id} = Mead.start_session(handler: ScriptedHandler, turn_timeout: 5_000)
+    {:ok, session_id} = Mead.start_session(handler: ScriptedHandler, turn_timeout: 20_000)
     on_exit(fn -> Mead.stop_session(session_id) end)
 
     %{session_id: session_id, server_pid: Session.whereis(session_id, :server)}

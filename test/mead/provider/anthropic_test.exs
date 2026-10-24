@@ -149,7 +149,7 @@ defmodule Mead.Provider.AnthropicTest do
       Agent.update(counter, &(&1 + 1))
 
       conn
-      |> Plug.Conn.put_resp_header("retry-after", "1")
+      |> Plug.Conn.put_resp_header("retry-after", "3600")
       |> Plug.Conn.send_resp(429, "slow down")
     end)
 
@@ -161,7 +161,7 @@ defmodule Mead.Provider.AnthropicTest do
            ) ==
              {:error, {:http_status, 429}}
 
-    assert System.monotonic_time(:millisecond) - started_at < 1_000
+    assert System.monotonic_time(:millisecond) - started_at < 30_000
     assert Agent.get(counter, & &1) == 3
   end
 
