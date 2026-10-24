@@ -50,18 +50,28 @@ defmodule Mead.Provider.Ollama do
          extra_options = Keyword.get(options, :req_options, []),
          true <- Keyword.keyword?(extra_options),
          model when is_binary(model) and model != "" <- Keyword.get(options, :model),
-         base_url when is_binary(base_url) and base_url != "" <-
-           Keyword.get(options, :base_url, @default_base_url) do
+         base_url when is_binary(base_url) <- Keyword.get(options, :base_url, @default_base_url),
+         true <- http_url?(base_url),
+         receive_timeout when is_integer(receive_timeout) and receive_timeout > 0 <-
+           Keyword.get(options, :receive_timeout, @default_receive_timeout) do
       {:ok,
        %{
          model: model,
          base_url: base_url,
-         receive_timeout: Keyword.get(options, :receive_timeout, @default_receive_timeout),
+         receive_timeout: receive_timeout,
          extra_options: extra_options
        }}
     else
       _invalid -> {:error, :invalid_options}
     end
+  end
+
+  # Ollama's own `OLLAMA_HOST` convention is a bare `127.0.0.1:11434`, which Req refuses by raising.
+  defp http_url?(url) do
+    match?(
+      %URI{scheme: scheme, host: host} when scheme in ["http", "https"] and host not in [nil, ""],
+      URI.parse(url)
+    )
   end
 
   defp request(messages, tools, settings) do
@@ -91,6 +101,9 @@ defmodule Mead.Provider.Ollama do
       {:error, %Req.TransportError{reason: reason}} ->
         {:error, {:transport, reason}}
 
+      {:error, %{__struct__: Jason.DecodeError}} ->
+        {:error, :malformed_response}
+
       {:error, exception} ->
         {:error, {:transport, exception.__struct__}}
     end
@@ -111,6 +124,10 @@ defmodule Mead.Provider.Ollama do
   defp encode_messages(messages) do
     {encoded, _names} = Enum.flat_map_reduce(messages, %{}, &encode_message/2)
     encoded
+  end
+
+  defp encode_message(%{role: :assistant, content: content}, _names) when is_binary(content) do
+    {[%{role: "assistant", content: content}], %{}}
   end
 
   defp encode_message(%{role: role, content: content}, names) when is_binary(content) do
@@ -172,7 +189,8 @@ defmodule Mead.Provider.Ollama do
          blocks = text_blocks ++ tool_uses,
          [_ | _] <- blocks,
          %{"prompt_eval_count" => input_tokens, "eval_count" => output_tokens}
-         when is_integer(input_tokens) and is_integer(output_tokens) <- body do
+         when is_integer(input_tokens) and input_tokens >= 0 and is_integer(output_tokens) and
+                output_tokens >= 0 <- body do
       {:ok,
        %{
          content: blocks,

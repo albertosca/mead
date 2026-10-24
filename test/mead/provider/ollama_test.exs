@@ -394,4 +394,58 @@ defmodule Mead.Provider.OllamaTest do
       assert Ollama.converse(@messages, [@tool], options()) == {:error, {:http_status, 400}}
     end
   end
+
+  describe "review findings" do
+    test "a base_url without an http or https scheme is :invalid_options, not a raise" do
+      for base_url <- ["127.0.0.1:11434", "ftp://localhost:11434", "   ", "http://"] do
+        assert Ollama.complete(@messages, options(base_url: base_url)) ==
+                 {:error, :invalid_options}
+      end
+    end
+
+    test "a receive_timeout that is not a positive integer is :invalid_options" do
+      for receive_timeout <- ["abc", -1, 0, 1.5, nil] do
+        assert Ollama.complete(@messages, options(receive_timeout: receive_timeout)) ==
+                 {:error, :invalid_options}
+      end
+    end
+
+    test "negative token counters are malformed" do
+      for counters <- [%{"prompt_eval_count" => -3}, %{"eval_count" => -1}] do
+        reply = Map.merge(success_body("hi"), counters)
+        Req.Test.stub(__MODULE__, fn conn -> Req.Test.json(conn, reply) end)
+
+        assert Ollama.complete(@messages, options()) == {:error, :malformed_response}
+      end
+    end
+
+    test "a body labeled JSON that is not JSON is malformed, on 200 and on 400" do
+      for status <- [200, 400] do
+        Req.Test.stub(__MODULE__, fn conn ->
+          conn
+          |> Plug.Conn.put_resp_content_type("application/json")
+          |> Plug.Conn.send_resp(status, "{not json")
+        end)
+
+        assert Ollama.converse(@messages, [@tool], options()) == {:error, :malformed_response}
+      end
+    end
+
+    test "a plain assistant message between rounds forgets the earlier tool names" do
+      stub_capturing()
+
+      messages = [
+        %{role: :user, content: "go"},
+        %{role: :assistant, content: [use_call("call_1", "old__tool", %{})]},
+        %{role: :user, content: [result("call_1", "one")]},
+        %{role: :assistant, content: "plain answer"},
+        %{role: :user, content: [result("call_1", "stale")]}
+      ]
+
+      assert {:ok, _result} = Ollama.converse(messages, [@tool], options())
+
+      assert_received {:request, _method, _path, body}
+      assert List.last(body["messages"]) == %{"role" => "tool", "content" => "stale"}
+    end
+  end
 end
