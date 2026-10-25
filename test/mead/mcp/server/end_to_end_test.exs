@@ -70,9 +70,9 @@ defmodule Mead.MCP.Server.EndToEndTest do
   @ping JSON.encode!(%{"jsonrpc" => "2.0", "id" => 1, "method" => "ping"})
   @json {"content-type", "application/json"}
 
-  test "the handshake publishes the seven tools", context do
+  test "the handshake publishes the eight tools", context do
     assert {:ok, tools, _servers} = Catalog.snapshot(context.catalog)
-    assert length(tools) == 7
+    assert length(tools) == 8
   end
 
   test "a full cycle: start, submit, read the history, stop", context do

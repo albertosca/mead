@@ -35,7 +35,7 @@ defmodule Mead.MCP.Server.ToolsPersistenceTest do
     session_id
   end
 
-  test "the server offers seven tools, the new ones last" do
+  test "the server offers eight tools, the new ones last" do
     assert Enum.map(Tools.definitions(), & &1["name"]) ==
              [
                "start_session",
@@ -44,7 +44,8 @@ defmodule Mead.MCP.Server.ToolsPersistenceTest do
                "stop_session",
                "resume_session",
                "delete_session",
-               "list_sessions"
+               "list_sessions",
+               "compact_session"
              ]
 
     resume = Enum.find(Tools.definitions(), &(&1["name"] == "resume_session"))
@@ -150,6 +151,45 @@ defmodule Mead.MCP.Server.ToolsPersistenceTest do
   test "list_sessions is an empty list when nothing is stored" do
     assert {:ok, %{"isError" => false} = listed} = call("list_sessions", %{})
     assert JSON.decode!(text(listed)) == []
+  end
+
+  test "compact_session shrinks a stored conversation and reports the sizes", %{
+    directory: directory
+  } do
+    session_id = start_and_stop_a_session()
+    path = Path.join(directory, session_id <> ".log")
+    size = File.stat!(path).size
+
+    assert {:ok, %{"isError" => false} = compacted} =
+             call("compact_session", %{"session_id" => session_id})
+
+    assert %{"bytes_before" => ^size, "bytes_after" => after_size} = JSON.decode!(text(compacted))
+    assert after_size < size
+    assert File.stat!(path).size == after_size
+  end
+
+  test "compact_session of an unknown or invalid id is a tool error" do
+    for session_id <- [Mead.UUID.generate(), "../x", ""] do
+      assert {:ok, %{"isError" => true} = failed} =
+               call("compact_session", %{"session_id" => session_id})
+
+      assert text(failed) == "unknown session"
+    end
+  end
+
+  test "compact_session validates its arguments as protocol errors" do
+    assert {:error, {:invalid_params, "session_id must be a string"}} =
+             call("compact_session", %{"session_id" => 7})
+
+    assert {:error, {:invalid_params, _message}} = call("compact_session", %{})
+  end
+
+  test "list_sessions ignores a leftover temporary compaction file", %{directory: directory} do
+    session_id = start_and_stop_a_session()
+    File.write!(Path.join(directory, session_id <> ".log.tmp"), "leftover")
+
+    assert {:ok, listed} = call("list_sessions", %{})
+    assert [%{"session_id" => ^session_id}] = JSON.decode!(text(listed))
   end
 
   test "list_sessions reports an unreadable store with a fixed message", %{directory: directory} do

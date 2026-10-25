@@ -6,7 +6,9 @@ defmodule Mead do
   the output of a turn is a `Mead.Session.TurnHandler`, chosen per session.
 
   With `config :mead, :storage, directory: ...` the turns of every session are also written to
-  disk, and `resume_session/2` brings a stopped session back with the same id and turns.
+  disk, and `resume_session/2` brings a stopped session back with the same id and turns. A stored
+  file is compacted at resume, when a live one grows past `compact_after_bytes`, and on request
+  with `compact_session/1`.
   """
 
   require Logger

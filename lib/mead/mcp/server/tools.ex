@@ -1,8 +1,9 @@
 defmodule Mead.MCP.Server.Tools do
   @moduledoc """
-  The seven tools the MCP server offers: `start_session`, `submit_turn`, `history`,
-  `stop_session`, `resume_session`, `delete_session`, and `list_sessions`. They are the only code of the server that touches the
-  runtime, and they do it only through the public `Mead` API.
+  The eight tools the MCP server offers: `start_session`, `submit_turn`, `history`,
+  `stop_session`, `resume_session`, `delete_session`, `list_sessions`, and `compact_session`.
+  They are the only code of the server that touches the runtime, and they do it only through the
+  public `Mead` API.
 
   A tool never raises for what a client can send. Arguments of the wrong type come back as
   `{:error, {:invalid_params, message}}`, which the dispatcher turns into a JSON-RPC error.
@@ -96,6 +97,12 @@ defmodule Mead.MCP.Server.Tools do
         "description" =>
           "Lists the stored conversations, newest first, with the time each was last written and whether its session runs.",
         "inputSchema" => %{"type" => "object", "properties" => %{}}
+      },
+      %{
+        "name" => "compact_session",
+        "description" =>
+          "Rewrites a stored conversation in its shortest form, without losing a turn, and returns the bytes before and after.",
+        "inputSchema" => session_schema()
       }
     ]
   end
@@ -126,6 +133,7 @@ defmodule Mead.MCP.Server.Tools do
   def call("resume_session", arguments, _context), do: resume_session(arguments)
   def call("delete_session", arguments, _context), do: delete_session(arguments)
   def call("list_sessions", _arguments, _context), do: list_sessions()
+  def call("compact_session", arguments, _context), do: compact_session(arguments)
   def call(_name, _arguments, _context), do: {:error, :unknown_tool}
 
   defp start_session(arguments) do
@@ -287,6 +295,28 @@ defmodule Mead.MCP.Server.Tools do
         {:ok, failure("the stored conversations could not be listed")}
     end
   end
+
+  defp compact_session(arguments) do
+    with {:ok, session_id} <- fetch_session_id(arguments) do
+      case Mead.compact_session(session_id) do
+        {:ok, sizes} ->
+          {:ok,
+           success(
+             JSON.encode!(%{
+               "bytes_before" => sizes.bytes_before,
+               "bytes_after" => sizes.bytes_after
+             })
+           )}
+
+        {:error, reason} ->
+          {:ok, failure(compact_failure(reason))}
+      end
+    end
+  end
+
+  defp compact_failure(:not_found), do: "unknown session"
+  defp compact_failure(:corrupt_history), do: "the stored conversation is damaged"
+  defp compact_failure(_other), do: "the conversation could not be compacted"
 
   defp session_entry(entry) do
     %{

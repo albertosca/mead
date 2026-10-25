@@ -16,6 +16,10 @@ defmodule Mead.Session.Store do
   write that fails is rolled back to the size the file had before it, for the same reason. The
   directory is single-writer.
 
+  `compact/3` rewrites a file as one `{:append, turn}` per turn, through a synced `<id>.log.tmp`
+  renamed over the log, so a crash leaves the old file or the new one and `load/2` answers the
+  same turns before and after.
+
   Payloads are decoded without `:safe`. A failed turn keeps its reason as output, and that reason
   can hold an exception or an atom from a module a freshly booted node has not loaded yet, which
   safe decoding refuses: a conversation with a failure in it could not be resumed. The files are
