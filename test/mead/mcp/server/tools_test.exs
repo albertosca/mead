@@ -34,7 +34,7 @@ defmodule Mead.MCP.Server.ToolsTest do
 
   defp text(%{"content" => [%{"type" => "text", "text" => text}]}), do: text
 
-  test "definitions list the six tools, each with an object schema" do
+  test "definitions list the seven tools, each with an object schema" do
     definitions = Tools.definitions()
 
     assert Enum.map(definitions, & &1["name"]) ==
@@ -44,7 +44,8 @@ defmodule Mead.MCP.Server.ToolsTest do
                "history",
                "stop_session",
                "resume_session",
-               "delete_session"
+               "delete_session",
+               "list_sessions"
              ]
 
     for definition <- definitions do

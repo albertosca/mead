@@ -35,7 +35,7 @@ defmodule Mead.MCP.Server.ToolsPersistenceTest do
     session_id
   end
 
-  test "the server offers six tools, the new ones last" do
+  test "the server offers seven tools, the new ones last" do
     assert Enum.map(Tools.definitions(), & &1["name"]) ==
              [
                "start_session",
@@ -43,7 +43,8 @@ defmodule Mead.MCP.Server.ToolsPersistenceTest do
                "history",
                "stop_session",
                "resume_session",
-               "delete_session"
+               "delete_session",
+               "list_sessions"
              ]
 
     resume = Enum.find(Tools.definitions(), &(&1["name"] == "resume_session"))
@@ -133,5 +134,29 @@ defmodule Mead.MCP.Server.ToolsPersistenceTest do
              call("submit_turn", %{"session_id" => blocked, "input" => "hello"})
 
     assert text(failure) == "the conversation could not be saved"
+  end
+
+  test "list_sessions lists stored conversations as JSON" do
+    session_id = start_and_stop_a_session()
+
+    assert {:ok, %{"isError" => false} = listed} = call("list_sessions", %{})
+
+    assert [%{"session_id" => ^session_id, "running" => false, "updated_at" => updated_at}] =
+             JSON.decode!(text(listed))
+
+    assert {:ok, %DateTime{}, 0} = DateTime.from_iso8601(updated_at)
+  end
+
+  test "list_sessions is an empty list when nothing is stored" do
+    assert {:ok, %{"isError" => false} = listed} = call("list_sessions", %{})
+    assert JSON.decode!(text(listed)) == []
+  end
+
+  test "list_sessions reports an unreadable store with a fixed message", %{directory: directory} do
+    File.rm_rf!(directory)
+    File.write!(directory, "not a directory")
+
+    assert {:ok, %{"isError" => true} = failed} = call("list_sessions", %{})
+    assert text(failed) == "the stored conversations could not be listed"
   end
 end

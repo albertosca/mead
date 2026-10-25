@@ -224,6 +224,42 @@ defmodule Mead.Session.Store do
   defp apply_event(:interrupt, turns), do: {:ok, Enum.map(turns, &Turn.interrupt/1)}
   defp apply_event(_other, _turns), do: {:error, :corrupt_history}
 
+  @doc """
+  Lists the stored sessions, newest first, as maps with the `:session_id` and the `:updated_at` of
+  its file.
+
+  Only names and file times are read, never the content, so the cost does not grow with the
+  length of the conversations. Anything in the directory that is not a session file is ignored,
+  and a damaged file is listed like any other: only `recover/2` reads it. A directory that does
+  not exist yet holds no sessions.
+  """
+  @spec list(String.t()) ::
+          {:ok, [%{session_id: String.t(), updated_at: DateTime.t()}]}
+          | {:error, {:persistence, term()}}
+  def list(directory) do
+    case File.ls(directory) do
+      {:ok, names} -> {:ok, names |> Enum.flat_map(&list_entry(directory, &1)) |> newest_first()}
+      {:error, :enoent} -> {:ok, []}
+      {:error, reason} -> {:error, {:persistence, reason}}
+    end
+  end
+
+  defp list_entry(directory, name) do
+    with ".log" <- Path.extname(name),
+         session_id = Path.rootname(name),
+         true <- valid_session_id?(session_id),
+         {:ok, %File.Stat{type: :regular, mtime: mtime}} <-
+           File.stat(Path.join(directory, name), time: :posix) do
+      [%{session_id: session_id, updated_at: DateTime.from_unix!(mtime)}]
+    else
+      _not_a_session_file -> []
+    end
+  end
+
+  defp newest_first(entries) do
+    Enum.sort_by(entries, &{DateTime.to_unix(&1.updated_at), &1.session_id}, :desc)
+  end
+
   @doc "Returns true when a file exists for the session."
   @spec exists?(String.t(), String.t()) :: boolean()
   def exists?(directory, session_id) do

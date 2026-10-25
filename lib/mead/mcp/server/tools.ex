@@ -1,7 +1,7 @@
 defmodule Mead.MCP.Server.Tools do
   @moduledoc """
-  The six tools the MCP server offers: `start_session`, `submit_turn`, `history`, `stop_session`,
-  `resume_session`, and `delete_session`. They are the only code of the server that touches the
+  The seven tools the MCP server offers: `start_session`, `submit_turn`, `history`,
+  `stop_session`, `resume_session`, `delete_session`, and `list_sessions`. They are the only code of the server that touches the
   runtime, and they do it only through the public `Mead` API.
 
   A tool never raises for what a client can send. Arguments of the wrong type come back as
@@ -90,6 +90,12 @@ defmodule Mead.MCP.Server.Tools do
         "description" =>
           "Stops a session if it runs and removes its stored conversation for good.",
         "inputSchema" => session_schema()
+      },
+      %{
+        "name" => "list_sessions",
+        "description" =>
+          "Lists the stored conversations, newest first, with the time each was last written and whether its session runs.",
+        "inputSchema" => %{"type" => "object", "properties" => %{}}
       }
     ]
   end
@@ -119,6 +125,7 @@ defmodule Mead.MCP.Server.Tools do
   def call("stop_session", arguments, _context), do: stop_session(arguments)
   def call("resume_session", arguments, _context), do: resume_session(arguments)
   def call("delete_session", arguments, _context), do: delete_session(arguments)
+  def call("list_sessions", _arguments, _context), do: list_sessions()
   def call(_name, _arguments, _context), do: {:error, :unknown_tool}
 
   defp start_session(arguments) do
@@ -269,6 +276,24 @@ defmodule Mead.MCP.Server.Tools do
           {:ok, failure("the conversation could not be deleted")}
       end
     end
+  end
+
+  defp list_sessions do
+    case Mead.list_sessions() do
+      {:ok, entries} ->
+        {:ok, success(entries |> Enum.map(&session_entry/1) |> JSON.encode!())}
+
+      {:error, {:persistence, _reason}} ->
+        {:ok, failure("the stored conversations could not be listed")}
+    end
+  end
+
+  defp session_entry(entry) do
+    %{
+      "session_id" => entry.session_id,
+      "updated_at" => DateTime.to_iso8601(entry.updated_at),
+      "running" => entry.running
+    }
   end
 
   defp fetch_session_id(arguments) do

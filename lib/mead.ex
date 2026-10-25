@@ -200,6 +200,32 @@ defmodule Mead do
   end
 
   @doc """
+  Lists the stored conversations, newest first.
+
+  Each entry has the `:session_id`, the `:updated_at` of its file, and whether the session
+  `:running` now. Only file times are read, so a damaged conversation is listed too and fails at
+  `resume_session/2`. Without `config :mead, :storage, directory: ...` nothing is stored and the
+  list is empty.
+  """
+  @spec list_sessions() ::
+          {:ok, [%{session_id: String.t(), updated_at: DateTime.t(), running: boolean()}]}
+          | {:error, {:persistence, term()}}
+  def list_sessions do
+    case Store.directory() do
+      nil ->
+        {:ok, []}
+
+      directory ->
+        with {:ok, entries} <- Store.list(directory) do
+          {:ok,
+           Enum.map(entries, fn entry ->
+             Map.put(entry, :running, Session.whereis(entry.session_id, :supervisor) != nil)
+           end)}
+        end
+    end
+  end
+
+  @doc """
   Stops a session and forgets its ledger aggregate.
 
   The conversation stays on disk when a storage directory is configured, so
