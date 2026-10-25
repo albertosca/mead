@@ -222,6 +222,50 @@ defmodule Mead.LedgerJournalTest do
       assert journaled_turns(context.directory) == 2
     end
 
+    test "a forget with an id that is not a string never damages the journal", context do
+      start_ledger(context)
+      emit(context)
+      Ledger.forget(nil, context.name)
+      Ledger.forget(123, context.name)
+      assert Ledger.flush(context.name) == :ok
+
+      stop_ledger(context)
+      start_ledger(context)
+
+      assert {:ok, %{turns: 1}} = Ledger.session_totals("session-a", context.name)
+      refute File.exists?(JournalFile.path(context.directory) <> ".corrupt")
+    end
+
+    test "a journal that cannot be written keeps at most 10 000 pending events", context do
+      File.mkdir_p!(JournalFile.path(context.directory))
+      pid = capture_log(fn -> start_ledger(context) end) && Process.whereis(context.name)
+      :sys.suspend(pid)
+      for _index <- 1..10_050, do: emit(context)
+      :sys.resume(pid)
+      capture_log(fn -> assert {:error, :eisdir} = Ledger.flush(context.name) end)
+
+      assert length(:sys.get_state(pid).pending) == 10_000
+      assert Ledger.totals(context.name).turns == 10_050
+
+      File.rm_rf!(JournalFile.path(context.directory))
+      assert Ledger.flush(context.name) == :ok
+      assert journaled_turns(context.directory) == 10_000
+    end
+
+    test "a journal size limit that is not a positive integer is refused", context do
+      for invalid <- [0, -1, 1.5, "1"] do
+        assert {:error, _reason} =
+                 start_supervised(
+                   {Ledger,
+                    name: context.name,
+                    event: context.event,
+                    directory: context.directory,
+                    journal_max_bytes: invalid},
+                   id: {:invalid, invalid}
+                 )
+      end
+    end
+
     test "events still pending when the ledger stops are written", context do
       start_ledger(context)
       emit(context)

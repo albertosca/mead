@@ -111,7 +111,8 @@ defmodule Mead.Ledger do
   def forget(session_id, ledger \\ __MODULE__) do
     %{counters: counters} = configuration = tables(ledger)
     :ets.delete(counters, {:session, session_id})
-    journal(configuration, {:forget, session_id})
+    # Replay refuses a forget of anything but a string and would then set the whole journal aside.
+    if is_binary(session_id), do: journal(configuration, {:forget, session_id})
     :ok
   end
 
@@ -132,7 +133,9 @@ defmodule Mead.Ledger do
     directory = Keyword.get_lazy(options, :directory, &Store.directory/0)
 
     maximum_bytes =
-      Keyword.get_lazy(options, :journal_max_bytes, &Store.ledger_journal_max_bytes/0)
+      options
+      |> Keyword.get_lazy(:journal_max_bytes, &Store.ledger_journal_max_bytes/0)
+      |> validate_maximum_bytes!()
 
     handler_id = {__MODULE__, name}
 
@@ -215,6 +218,15 @@ defmodule Mead.Ledger do
     :ok
   end
 
+  defp validate_maximum_bytes!(maximum_bytes)
+       when is_integer(maximum_bytes) and maximum_bytes > 0,
+       do: maximum_bytes
+
+  defp validate_maximum_bytes!(maximum_bytes) do
+    raise ArgumentError,
+          "journal_max_bytes must be a positive integer, got: #{inspect(maximum_bytes)}"
+  end
+
   # The newest event is first. Past the limit the oldest are dropped, so a dead disk cannot grow
   # the state of the ledger without bound.
   defp enqueue(state, event) do
@@ -285,16 +297,21 @@ defmodule Mead.Ledger do
   @doc false
   # The telemetry handler. It runs in the process that emitted the event and must never raise,
   # because `:telemetry` would detach it for good.
-  def handle_event(_event, measurements, metadata, %{counters: counters, ring: ring} = config) do
+  def handle_event(
+        _event,
+        measurements,
+        metadata,
+        %{counters: counters, ring: ring} = configuration
+      ) do
     case normalize(measurements, metadata) do
       {:ok, entry} ->
         entry = Map.put(entry, :at, System.system_time(:millisecond))
         record(counters, ring, entry)
-        journal(config, {:turn, entry})
+        journal(configuration, {:turn, entry})
 
       :error ->
         :ets.update_counter(counters, :dropped, 1, {:dropped, 0})
-        journal(config, :dropped)
+        journal(configuration, :dropped)
     end
 
     :ok
