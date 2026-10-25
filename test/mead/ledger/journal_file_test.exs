@@ -100,4 +100,38 @@ defmodule Mead.Ledger.JournalFileTest do
 
     assert {:error, :eisdir} = JournalFile.append(directory, [{:turn, entry(2)}])
   end
+
+  describe "rewrite/2" do
+    test "replaces the journal with one checkpoint that replays to the same model", %{
+      tmp_dir: directory
+    } do
+      events = for index <- 1..40, do: {:turn, entry(index)}
+      :ok = JournalFile.append(directory, events)
+      size_before = JournalFile.size(directory)
+      {:ok, model, _size, _tail} = JournalFile.read(directory)
+
+      assert JournalFile.rewrite(directory, model) == :ok
+
+      assert JournalFile.size(directory) < size_before
+      assert {:ok, restored, _size, :clean} = JournalFile.read(directory)
+      assert Enum.sort(Journal.rows(restored)) == Enum.sort(Journal.rows(model))
+      assert Journal.ring_oldest_first(restored) == Journal.ring_oldest_first(model)
+
+      assert {:ok, [{:checkpoint, _rows, _ring}], _size, :clean} =
+               directory |> JournalFile.path() |> File.read!() |> Mead.Session.Record.scan()
+
+      assert Bitwise.band(File.stat!(JournalFile.path(directory)).mode, 0o777) == 0o600
+      refute File.exists?(JournalFile.path(directory) <> ".tmp")
+    end
+
+    test "a failure leaves the journal as it was", %{tmp_dir: directory} do
+      :ok = JournalFile.append(directory, [{:turn, entry(1)}, {:turn, entry(2)}])
+      before_bytes = File.read!(JournalFile.path(directory))
+      {:ok, model, _size, _tail} = JournalFile.read(directory)
+      File.mkdir_p!(Path.join(JournalFile.path(directory) <> ".tmp", "inside"))
+
+      assert {:error, _reason} = JournalFile.rewrite(directory, model)
+      assert File.read!(JournalFile.path(directory)) == before_bytes
+    end
+  end
 end

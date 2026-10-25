@@ -117,4 +117,27 @@ defmodule Mead.Ledger.JournalFile do
       {:error, _reason} -> 0
     end
   end
+
+  @doc """
+  Replaces the journal with one checkpoint record of `model`, written to `ledger.journal.tmp`,
+  synced and renamed over the journal, so a crash leaves the old file or the new one. A failure
+  leaves the journal as it was and removes the temporary file.
+  """
+  @spec rewrite(String.t(), Journal.t()) :: :ok | {:error, term()}
+  def rewrite(directory, %Journal{} = model) do
+    journal = path(directory)
+    temporary = journal <> ".tmp"
+    checkpoint = model |> Journal.checkpoint() |> Record.encode()
+
+    result =
+      with :ok <- Record.remove_leftover(temporary),
+           :ok <- Record.create_private(temporary),
+           :ok <- Record.write_synced(temporary, checkpoint),
+           :ok <- File.rename(temporary, journal) do
+        Record.sync_directory(directory)
+      end
+
+    File.rm(temporary)
+    result
+  end
 end

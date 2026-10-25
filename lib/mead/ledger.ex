@@ -41,6 +41,8 @@ defmodule Mead.Ledger do
       give each ledger its own event so they do not see each other's turns.
     * `:directory` - where the journal lives, or `nil` for a ledger that is memory only; defaults
       to `Mead.Session.Store.directory/0`.
+    * `:journal_max_bytes` - the journal size from which it is rewritten as a checkpoint; defaults
+      to `Mead.Session.Store.ledger_journal_max_bytes/0`.
   """
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(options \\ []) do
@@ -128,6 +130,10 @@ defmodule Mead.Ledger do
     event = Keyword.get(options, :event, @default_event)
     name = Keyword.get(options, :name, __MODULE__)
     directory = Keyword.get_lazy(options, :directory, &Store.directory/0)
+
+    maximum_bytes =
+      Keyword.get_lazy(options, :journal_max_bytes, &Store.ledger_journal_max_bytes/0)
+
     handler_id = {__MODULE__, name}
 
     counters = :ets.new(:mead_ledger_counters, [:set, :public, write_concurrency: true])
@@ -145,6 +151,8 @@ defmodule Mead.Ledger do
        tables: configuration,
        handler_id: handler_id,
        directory: directory,
+       maximum_bytes: maximum_bytes,
+       floor: 0,
        pending: [],
        pending_count: 0,
        timer: nil,
@@ -236,7 +244,8 @@ defmodule Mead.Ledger do
 
     case JournalFile.append(state.directory, Enum.reverse(state.pending)) do
       :ok ->
-        {:ok, %{state | pending: [], pending_count: 0, failing: false}}
+        state = %{state | pending: [], pending_count: 0, failing: false}
+        {:ok, checkpoint_if_due(state)}
 
       {:error, reason} ->
         unless state.failing do
@@ -244,6 +253,32 @@ defmodule Mead.Ledger do
         end
 
         {{:error, reason}, ensure_timer(%{state | failing: true})}
+    end
+  end
+
+  # Rewrites the journal once it passes the limit and is half again as large as it was right after
+  # the last rewrite. Without the second condition a checkpoint that is itself over the limit
+  # would be rewritten on every flush.
+  defp checkpoint_if_due(state) do
+    size = JournalFile.size(state.directory)
+
+    if size > state.maximum_bytes and size * 2 >= state.floor * 3 do
+      checkpoint(state, size)
+    else
+      state
+    end
+  end
+
+  # Built from the journal and not from the ETS tables: the tables may already hold an event whose
+  # record the ledger has not written yet, and the checkpoint would then count it twice.
+  defp checkpoint(state, size) do
+    with {:ok, model, _valid_size, :clean} <- JournalFile.read(state.directory),
+         :ok <- JournalFile.rewrite(state.directory, model) do
+      %{state | floor: JournalFile.size(state.directory)}
+    else
+      problem ->
+        Logger.warning("could not rewrite the ledger journal: #{inspect(problem)}")
+        %{state | floor: size}
     end
   end
 

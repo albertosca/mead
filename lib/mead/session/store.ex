@@ -36,6 +36,7 @@ defmodule Mead.Session.Store do
   @session_id_shape ~r/\A[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\z/
 
   @default_compact_after_bytes 1_048_576
+  @default_ledger_journal_max_bytes 1_048_576
 
   @type event :: {:append, Turn.t()} | {:replace_last, Turn.t()} | :interrupt
 
@@ -91,6 +92,36 @@ defmodule Mead.Session.Store do
   defp validate_compact_after(other) do
     raise ArgumentError,
           "config :mead, :storage, compact_after_bytes must be a positive integer, got: #{inspect(other)}"
+  end
+
+  @doc """
+  Returns the size in bytes the ledger journal may reach before it is rewritten as a checkpoint.
+
+  Defaults to one mebibyte; `config :mead, :storage, ledger_journal_max_bytes:` sets it, and `nil` means the default. Anything but a positive integer raises `ArgumentError`.
+  """
+  @spec ledger_journal_max_bytes() :: pos_integer()
+  def ledger_journal_max_bytes do
+    case Application.get_env(:mead, :storage) do
+      nil ->
+        @default_ledger_journal_max_bytes
+
+      storage when is_list(storage) ->
+        case Keyword.get(storage, :ledger_journal_max_bytes) do
+          nil -> @default_ledger_journal_max_bytes
+          bytes -> validate_ledger_journal_max_bytes(bytes)
+        end
+
+      other ->
+        raise ArgumentError,
+              "config :mead, :storage must be a keyword list, got: #{inspect(other)}"
+    end
+  end
+
+  defp validate_ledger_journal_max_bytes(bytes) when is_integer(bytes) and bytes > 0, do: bytes
+
+  defp validate_ledger_journal_max_bytes(other) do
+    raise ArgumentError,
+          "config :mead, :storage, ledger_journal_max_bytes must be a positive integer, got: #{inspect(other)}"
   end
 
   @doc "Appends one event to the file of a session, creating the directory and file on first use."

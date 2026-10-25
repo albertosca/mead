@@ -68,4 +68,45 @@ defmodule Mead.Session.StoreDirectoryTest do
     Application.put_env(:mead, :storage, :on)
     assert_raise ArgumentError, fn -> Store.compact_after_bytes() end
   end
+
+  test "ledger_journal_max_bytes/0 defaults to one mebibyte" do
+    Application.delete_env(:mead, :storage)
+    assert Store.ledger_journal_max_bytes() == 1_048_576
+
+    Application.put_env(:mead, :storage, directory: "/var/lib/mead")
+    assert Store.ledger_journal_max_bytes() == 1_048_576
+
+    Application.put_env(:mead, :storage,
+      directory: "/var/lib/mead",
+      ledger_journal_max_bytes: nil
+    )
+
+    assert Store.ledger_journal_max_bytes() == 1_048_576
+
+    Application.put_env(:mead, :storage, nil)
+    assert Store.ledger_journal_max_bytes() == 1_048_576
+  end
+
+  test "ledger_journal_max_bytes/0 returns the configured number" do
+    Application.put_env(:mead, :storage,
+      directory: "/var/lib/mead",
+      ledger_journal_max_bytes: 4_096
+    )
+
+    assert Store.ledger_journal_max_bytes() == 4_096
+  end
+
+  test "ledger_journal_max_bytes/0 refuses anything but a positive integer" do
+    for invalid <- [0, -1, 1.5, "1000", :never] do
+      Application.put_env(:mead, :storage,
+        directory: "/var/lib/mead",
+        ledger_journal_max_bytes: invalid
+      )
+
+      assert_raise ArgumentError, fn -> Store.ledger_journal_max_bytes() end
+    end
+
+    Application.put_env(:mead, :storage, :on)
+    assert_raise ArgumentError, fn -> Store.ledger_journal_max_bytes() end
+  end
 end

@@ -244,4 +244,94 @@ defmodule Mead.LedgerJournalTest do
       assert Ledger.totals(context.name).turns == 2
     end
   end
+
+  describe "the checkpoint" do
+    defp checkpoint_records(directory) do
+      {:ok, records, _size, _tail} =
+        directory |> JournalFile.path() |> File.read!() |> Mead.Session.Record.scan()
+
+      records
+    end
+
+    test "shrinks the file, changes no total, and a restart equals it", context do
+      start_ledger(context, journal_max_bytes: 1_000_000_000)
+      for index <- 1..60, do: emit(context, %{session_id: "session-#{rem(index, 2)}"})
+      stop_ledger(context)
+      size_before = JournalFile.size(context.directory)
+
+      start_ledger(context, journal_max_bytes: 600)
+      emit(context, %{session_id: "session-a"})
+      assert Ledger.flush(context.name) == :ok
+
+      assert JournalFile.size(context.directory) < size_before
+      assert [{:checkpoint, _rows, _ring}] = checkpoint_records(context.directory)
+      assert Ledger.totals(context.name).turns == 61
+      live = snapshot(context)
+
+      stop_ledger(context)
+      start_ledger(context, journal_max_bytes: 600)
+
+      assert snapshot(context) == live
+    end
+
+    test "an event cast but not yet written is not counted twice", context do
+      pid = start_ledger(context, journal_max_bytes: 1)
+      emit(context)
+      assert Ledger.flush(context.name) == :ok
+
+      emit(context)
+      :sys.get_state(context.name)
+      :sys.suspend(context.name)
+
+      flushing = Task.async(fn -> Ledger.flush(context.name) end)
+      wait_until(fn -> Process.info(pid, :message_queue_len) == {:message_queue_len, 1} end)
+
+      # The tables take this turn at once, but its journal record queues behind the flush that is
+      # about to rewrite the file.
+      emit(context)
+      :sys.resume(context.name)
+      assert Task.await(flushing, 5_000) == :ok
+      assert Ledger.flush(context.name) == :ok
+
+      assert Ledger.totals(context.name).turns == 3
+
+      stop_ledger(context)
+      start_ledger(context, journal_max_bytes: 1)
+
+      assert {:ok, %{turns: 3}} = Ledger.session_totals("session-a", context.name)
+      assert Ledger.totals(context.name).turns == 3
+    end
+
+    test "does not rewrite on every flush when the checkpoint itself is over the limit",
+         context do
+      start_ledger(context, journal_max_bytes: 1)
+
+      inodes =
+        for _index <- 1..40 do
+          emit(context)
+          assert Ledger.flush(context.name) == :ok
+          File.stat!(JournalFile.path(context.directory)).inode
+        end
+
+      rewrites = inodes |> Enum.dedup() |> length()
+      assert rewrites > 1
+      assert rewrites < 30
+      assert Ledger.totals(context.name).turns == 40
+    end
+
+    test "a failed rewrite leaves the journal readable and counts on", context do
+      start_ledger(context, journal_max_bytes: 1)
+      File.mkdir_p!(Path.join(JournalFile.path(context.directory) <> ".tmp", "inside"))
+
+      log =
+        capture_log(fn ->
+          emit(context)
+          assert Ledger.flush(context.name) == :ok
+        end)
+
+      assert log =~ "could not rewrite the ledger journal"
+      assert journaled_turns(context.directory) == 1
+      assert Ledger.totals(context.name).turns == 1
+    end
+  end
 end
