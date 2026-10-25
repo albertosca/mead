@@ -1,7 +1,7 @@
 defmodule Mead.MCP.Server.Tools do
   @moduledoc """
-  The four tools the MCP server offers: `start_session`, `submit_turn`, `history`, and
-  `stop_session`. They are the only code of the server that touches the runtime, and they do it
+  The six tools the MCP server offers: `start_session`, `submit_turn`, `history`,
+  `stop_session`, `resume_session`, and `delete_session`. They are the only code of the server that touches the runtime, and they do it
   only through the public `Mead` API.
 
   A tool never raises for what a client can send. Arguments of the wrong type come back as
@@ -30,12 +30,7 @@ defmodule Mead.MCP.Server.Tools do
         "inputSchema" => %{
           "type" => "object",
           "properties" => %{
-            "turn_timeout" => %{
-              "type" => "integer",
-              "minimum" => 1,
-              "maximum" => @maximum_turn_timeout,
-              "description" => "Milliseconds a single turn of this session may run."
-            }
+            "turn_timeout" => turn_timeout_schema()
           }
         }
       },
@@ -73,10 +68,39 @@ defmodule Mead.MCP.Server.Tools do
       },
       %{
         "name" => "stop_session",
-        "description" => "Stops a session and discards its history.",
+        "description" =>
+          "Stops a session. Its conversation stays stored when the operator enabled storage, and resume_session brings it back.",
+        "inputSchema" => session_schema()
+      },
+      %{
+        "name" => "resume_session",
+        "description" =>
+          "Starts a stopped session again from its stored conversation, keeping its id.",
+        "inputSchema" => %{
+          "type" => "object",
+          "properties" => %{
+            "session_id" => %{"type" => "string", "description" => "The id of a stored session."},
+            "turn_timeout" => turn_timeout_schema()
+          },
+          "required" => ["session_id"]
+        }
+      },
+      %{
+        "name" => "delete_session",
+        "description" =>
+          "Stops a session if it runs and removes its stored conversation for good.",
         "inputSchema" => session_schema()
       }
     ]
+  end
+
+  defp turn_timeout_schema do
+    %{
+      "type" => "integer",
+      "minimum" => 1,
+      "maximum" => @maximum_turn_timeout,
+      "description" => "Milliseconds a single turn of this session may run."
+    }
   end
 
   defp session_schema do
@@ -93,6 +117,8 @@ defmodule Mead.MCP.Server.Tools do
   def call("submit_turn", arguments, context), do: submit_turn(arguments, context)
   def call("history", arguments, _context), do: history(arguments)
   def call("stop_session", arguments, _context), do: stop_session(arguments)
+  def call("resume_session", arguments, _context), do: resume_session(arguments)
+  def call("delete_session", arguments, _context), do: delete_session(arguments)
   def call(_name, _arguments, _context), do: {:error, :unknown_tool}
 
   defp start_session(arguments) do
@@ -178,6 +204,7 @@ defmodule Mead.MCP.Server.Tools do
   defp turn_failure(:session_crashed), do: "the session crashed during the turn"
   defp turn_failure(:turn_in_progress), do: "a turn is already running in this session"
   defp turn_failure(:timeout), do: "the turn timed out"
+  defp turn_failure({:persistence, _reason}), do: "the conversation could not be saved"
   defp turn_failure({:failed, _reason}), do: "the turn failed"
   defp turn_failure(_other), do: "the turn did not complete"
 
@@ -209,6 +236,37 @@ defmodule Mead.MCP.Server.Tools do
       case Mead.stop_session(session_id) do
         :ok -> {:ok, success("stopped")}
         {:error, :not_found} -> {:ok, failure("unknown session")}
+      end
+    end
+  end
+
+  defp resume_session(arguments) do
+    with {:ok, session_id} <- fetch_session_id(arguments),
+         {:ok, options} <- session_options(arguments) do
+      case Mead.resume_session(session_id, options) do
+        {:ok, ^session_id} -> {:ok, success(session_id)}
+        {:error, reason} -> {:ok, failure(resume_failure(reason))}
+      end
+    end
+  end
+
+  defp resume_failure(:not_found), do: "unknown session"
+  defp resume_failure(:already_running), do: "the session is already running"
+  defp resume_failure(:corrupt_history), do: "the stored conversation is damaged"
+  defp resume_failure({:persistence, _reason}), do: "the stored conversation could not be read"
+  defp resume_failure(_other), do: "the session could not be resumed"
+
+  defp delete_session(arguments) do
+    with {:ok, session_id} <- fetch_session_id(arguments) do
+      case Mead.delete_session(session_id) do
+        :ok ->
+          {:ok, success("deleted")}
+
+        {:error, :not_found} ->
+          {:ok, failure("unknown session")}
+
+        {:error, {:persistence, _reason}} ->
+          {:ok, failure("the conversation could not be deleted")}
       end
     end
   end

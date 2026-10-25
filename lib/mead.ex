@@ -4,12 +4,16 @@ defmodule Mead do
 
   Each session keeps its history across crashes of its server process. The code that produces
   the output of a turn is a `Mead.Session.TurnHandler`, chosen per session.
+
+  With `config :mead, :storage, directory: ...` the turns of every session are also written to
+  disk, and `resume_session/2` brings a stopped session back with the same id and turns.
   """
 
   alias Mead.Session
   alias Mead.Session.EchoHandler
   alias Mead.Session.History
   alias Mead.Session.Pool
+  alias Mead.Session.Store
   alias Mead.Session.Turn
 
   @default_turn_timeout 30_000
@@ -30,26 +34,61 @@ defmodule Mead do
   @spec start_session(keyword()) :: {:ok, String.t()} | {:error, term()}
   def start_session(options \\ []) do
     options = validate_options!(options)
-    session_id = Mead.UUID.generate()
+    launch(Mead.UUID.generate(), options, [])
+  end
 
-    session_options = [
-      session_id: session_id,
-      handler:
-        options
-        |> Keyword.get_lazy(:handler, fn ->
-          Application.get_env(:mead, :turn_handler, EchoHandler)
-        end)
-        |> validate_handler!(),
-      turn_timeout:
-        options
-        |> Keyword.get_lazy(:turn_timeout, fn ->
-          Application.get_env(:mead, :turn_timeout, @default_turn_timeout)
-        end)
-        |> validate_turn_timeout!()
-    ]
+  @doc """
+  Starts a session again from the conversation stored under `session_id`.
+
+  It takes the options of `start_session/1`, because the handler and the timeout are not stored.
+  Turns that were still running when the session ended come back as `:interrupted`. Needs
+  `config :mead, :storage, directory: ...`; without it nothing is stored and the answer is
+  `{:error, :not_found}`, which is also the answer for an id with no file or one that is not a
+  session id. A running session is `{:error, :already_running}`, and a file damaged anywhere but
+  its last record is `{:error, :corrupt_history}`.
+  """
+  @spec resume_session(String.t(), keyword()) :: {:ok, String.t()} | {:error, term()}
+  def resume_session(session_id, options \\ []) do
+    options = validate_options!(options)
+
+    case Store.directory() do
+      nil -> {:error, :not_found}
+      directory -> resume_from(directory, session_id, options)
+    end
+  end
+
+  defp resume_from(directory, session_id, options) do
+    if Session.whereis(session_id, :supervisor) do
+      {:error, :already_running}
+    else
+      with {:ok, turns} <- Store.load(directory, session_id) do
+        launch(session_id, options, resume: turns)
+      end
+    end
+  end
+
+  defp launch(session_id, options, extra) do
+    session_options =
+      [
+        session_id: session_id,
+        handler:
+          options
+          |> Keyword.get_lazy(:handler, fn ->
+            Application.get_env(:mead, :turn_handler, EchoHandler)
+          end)
+          |> validate_handler!(),
+        turn_timeout:
+          options
+          |> Keyword.get_lazy(:turn_timeout, fn ->
+            Application.get_env(:mead, :turn_timeout, @default_turn_timeout)
+          end)
+          |> validate_turn_timeout!(),
+        directory: Store.directory()
+      ] ++ extra
 
     case Pool.start_session(session_options) do
       {:ok, _pid} -> {:ok, session_id}
+      {:error, {:already_started, _pid}} -> {:error, :already_running}
       {:error, reason} -> {:error, reason}
     end
   end
@@ -149,11 +188,42 @@ defmodule Mead do
     :exit, _reason -> {:error, :not_found}
   end
 
-  @doc "Stops a session, discarding its history and its ledger aggregate."
+  @doc """
+  Stops a session and forgets its ledger aggregate.
+
+  The conversation stays on disk when a storage directory is configured, so
+  `resume_session/2` can bring it back; `delete_session/1` removes it.
+  """
   @spec stop_session(String.t()) :: :ok | {:error, :not_found}
   def stop_session(session_id) do
     with :ok <- Pool.stop_session(session_id) do
       Mead.Ledger.forget(session_id)
+    end
+  end
+
+  @doc """
+  Stops a session if it runs, removes its stored conversation and forgets its ledger aggregate.
+
+  Returns `{:error, :not_found}` when there was neither a running session nor a file.
+  """
+  @spec delete_session(String.t()) :: :ok | {:error, :not_found | {:persistence, term()}}
+  def delete_session(session_id) do
+    stopped = Pool.stop_session(session_id) == :ok
+    directory = Store.directory()
+    stored = directory != nil and Store.exists?(directory, session_id)
+
+    with :ok <- delete_file(directory, session_id) do
+      Mead.Ledger.forget(session_id)
+      if stopped or stored, do: :ok, else: {:error, :not_found}
+    end
+  end
+
+  defp delete_file(nil, _session_id), do: :ok
+
+  defp delete_file(directory, session_id) do
+    case Store.delete(directory, session_id) do
+      :ok -> :ok
+      {:error, reason} -> {:error, {:persistence, reason}}
     end
   end
 end

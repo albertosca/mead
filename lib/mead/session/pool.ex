@@ -36,7 +36,7 @@ defmodule Mead.Session.Pool do
     DynamicSupervisor.start_child(pool, {Session.Supervisor, options})
   end
 
-  @doc "Stops a conversation's supervisor pair, discarding its history."
+  @doc "Stops a conversation's supervisor pair; a stored conversation stays on disk."
   @spec stop_session(String.t()) :: :ok | {:error, :not_found}
   def stop_session(session_id) do
     case Session.whereis(session_id, :supervisor) do

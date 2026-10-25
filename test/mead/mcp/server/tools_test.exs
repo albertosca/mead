@@ -34,11 +34,18 @@ defmodule Mead.MCP.Server.ToolsTest do
 
   defp text(%{"content" => [%{"type" => "text", "text" => text}]}), do: text
 
-  test "definitions list the four tools, each with an object schema" do
+  test "definitions list the six tools, each with an object schema" do
     definitions = Tools.definitions()
 
     assert Enum.map(definitions, & &1["name"]) ==
-             ["start_session", "submit_turn", "history", "stop_session"]
+             [
+               "start_session",
+               "submit_turn",
+               "history",
+               "stop_session",
+               "resume_session",
+               "delete_session"
+             ]
 
     for definition <- definitions do
       assert is_binary(definition["description"])

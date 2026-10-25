@@ -40,9 +40,10 @@ Welcome! This document provides complete operational guidelines and technical co
 * Session Pool: `Mead.Session.Pool` (`DynamicSupervisor`) starting one `Mead.Session.Supervisor` per conversation, which holds a `Mead.Session.History` agent and a `Mead.Session.Server`.
 * Process Registry: Elixir `Registry` mapping UUIDs to running GenServer PIDs.
 * Router: `Mead.Router`, a stateless turn handler (no process) that classifies each turn as local or cloud, calls the provider in that slot (`Mead.Provider`; Anthropic and Ollama implemented), and emits `[:mead, :router, :route]` events for the ledger.
+* Persistence: `Mead.Session.Store`, one append-only file per session under `config :mead, :storage, directory:`; `Mead.Session.History` writes through it and `Mead.resume_session/2` rebuilds a stopped session. `stop_session` keeps the file, `delete_session` removes it.
 * Ledger: `Mead.Ledger`, the first root child, aggregating those events per session and per route in ETS plus a ring of the last 100 turns; in memory only.
 * MCP Hub: `Mead.MCP.Hub`, the client side of MCP: one `Mead.MCP.Connection` per configured server, a deny-by-default `Mead.MCP.Policy`, and the tool loop of the router.
-* MCP Server: `Mead.MCP.Server`, the last root child; a `Bandit` listener on `POST /mcp` guarded by a bearer token, exposing sessions as four tools. It starts only when `config :mead, :mcp_server` has a `token`.
+* MCP Server: `Mead.MCP.Server`, the last root child; a `Bandit` listener on `POST /mcp` guarded by a bearer token, exposing sessions as six tools (start, submit, history, stop, resume, delete). It starts only when `config :mead, :mcp_server` has a `token`.
 * Verification gates: `mix test`, `mix format --check-formatted`, and `mix compile --warnings-as-errors`.
 
 For full architectural diagrams and specifications, see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
