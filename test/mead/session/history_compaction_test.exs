@@ -80,7 +80,7 @@ defmodule Mead.Session.HistoryCompactionTest do
     |> Enum.map(fn index ->
       Task.async(fn -> History.append(session_id, Turn.start("question #{index}")) end)
     end)
-    |> Task.await_many()
+    |> Task.await_many(30_000)
 
     memory = History.all(context.session_id)
     assert length(memory) == 60

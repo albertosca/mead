@@ -389,14 +389,17 @@ defmodule Mead.Session.Store do
     :ok
   end
 
-  @doc "Removes the file of a session; a missing file or an invalid id is not an error."
+  @doc """
+  Removes the file of a session, and the temporary file a crashed compaction may have left beside
+  it; a missing file or an invalid id is not an error.
+  """
   @spec delete(String.t(), String.t()) :: :ok | {:error, term()}
   def delete(directory, session_id) do
     if valid_session_id?(session_id) do
-      case File.rm(path(directory, session_id)) do
-        :ok -> :ok
-        {:error, :enoent} -> :ok
-        {:error, reason} -> {:error, reason}
+      log = path(directory, session_id)
+
+      with :ok <- remove_leftover(log <> ".tmp") do
+        remove_leftover(log)
       end
     else
       :ok

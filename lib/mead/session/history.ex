@@ -149,7 +149,11 @@ defmodule Mead.Session.History do
           {:ok, %{bytes_before: non_neg_integer(), bytes_after: non_neg_integer()}}
           | {:error, :not_found | :corrupt_history | {:persistence, term()}}
   def compact(session_id) do
-    Agent.get_and_update(Session.via(session_id, :history), &compact_now(&1, session_id))
+    Agent.get_and_update(
+      Session.via(session_id, :history),
+      &compact_now(&1, session_id),
+      :infinity
+    )
   end
 
   defp compact_now(%{directory: nil} = state, _session_id), do: {{:error, :not_found}, state}
@@ -161,6 +165,9 @@ defmodule Mead.Session.History do
     case Store.compact(state.directory, session_id, Enum.reverse(state.turns)) do
       {:ok, %{bytes_after: bytes_after}} = result ->
         {result, %{state | floor: bytes_after}}
+
+      {:error, :not_found} = error ->
+        {error, state}
 
       {:error, reason} = error ->
         Logger.warning(

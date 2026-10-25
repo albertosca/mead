@@ -138,4 +138,61 @@ defmodule Mead.CompactionTest do
     assert Mead.compact_session(session_id) == {:error, :corrupt_history}
     assert File.read!(path) == flipped
   end
+
+  test "delete_session/1 also removes a temporary file left by a crashed compaction", %{
+    directory: directory
+  } do
+    session_id = session_with_turns(2)
+    :ok = Mead.stop_session(session_id)
+    File.write!(file_of(directory, session_id) <> ".tmp", "leftover")
+
+    assert Mead.delete_session(session_id) == :ok
+    assert File.ls!(directory) == []
+  end
+
+  test "an explicit compaction without a file does not log a warning" do
+    {:ok, session_id} = Mead.start_session()
+    on_exit(fn -> Mead.stop_session(session_id) end)
+
+    log = capture_log(fn -> assert Mead.compact_session(session_id) == {:error, :not_found} end)
+
+    refute log =~ "could not compact"
+  end
+
+  test "compact_session/1 waits for a slow compaction instead of reporting an unknown session" do
+    session_id = session_with_turns(4)
+    history = Mead.Session.whereis(session_id, :history)
+    :ok = :sys.suspend(history)
+    task = Task.async(fn -> Mead.compact_session(session_id) end)
+    Process.sleep(5_300)
+    :ok = :sys.resume(history)
+
+    assert {:ok, %{bytes_before: before_size, bytes_after: after_size}} = Task.await(task)
+    assert after_size < before_size
+  end
+
+  test "turns submitted while explicit compactions run are all kept, in memory and on disk", %{
+    directory: directory
+  } do
+    {:ok, session_id} = Mead.start_session()
+    on_exit(fn -> Mead.stop_session(session_id) end)
+
+    submitters =
+      for index <- 1..30 do
+        Task.async(fn -> Mead.submit_turn(session_id, "question #{index}") end)
+      end
+
+    compactors = for _round <- 1..10, do: Task.async(fn -> Mead.compact_session(session_id) end)
+
+    accepted = submitters |> Task.await_many() |> Enum.count(&match?({:ok, _output}, &1))
+
+    for result <- Task.await_many(compactors) do
+      assert match?({:ok, _sizes}, result) or result == {:error, :not_found}
+    end
+
+    {:ok, memory} = Mead.history(session_id)
+    assert accepted > 0
+    assert length(memory) == accepted
+    assert Store.load(directory, session_id) == {:ok, memory}
+  end
 end
