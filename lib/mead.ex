@@ -281,17 +281,14 @@ defmodule Mead do
   end
 
   @doc """
-  Stops a session and forgets its ledger aggregate.
+  Stops a session. Its ledger aggregate stays, so a conversation brought back with
+  `resume_session/2` returns with what it already spent.
 
-  The conversation stays on disk when a storage directory is configured, so
-  `resume_session/2` can bring it back; `delete_session/1` removes it.
+  The conversation stays on disk when a storage directory is configured; `delete_session/1`
+  removes it and forgets its ledger aggregate.
   """
   @spec stop_session(String.t()) :: :ok | {:error, :not_found}
-  def stop_session(session_id) do
-    with :ok <- Pool.stop_session(session_id) do
-      Mead.Ledger.forget(session_id)
-    end
-  end
+  def stop_session(session_id), do: Pool.stop_session(session_id)
 
   @doc """
   Stops a session if it runs, removes its stored conversation and forgets its ledger aggregate.

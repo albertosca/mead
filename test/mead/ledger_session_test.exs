@@ -44,16 +44,26 @@ defmodule Mead.LedgerSessionTest do
     assert {:ok, %{turns: 1, failures: 1}} = Ledger.session_totals(session_id)
   end
 
-  test "stopping a session forgets its aggregate but not the route totals", %{
-    session_id: session_id
-  } do
+  test "stopping a session keeps its aggregate and the route totals", %{session_id: session_id} do
     Mead.submit_turn(session_id, "explain this")
     before_stop = Ledger.route_totals()[{:cloud, FakeProvider}].turns
 
     assert :ok = Mead.stop_session(session_id)
 
-    assert Ledger.session_totals(session_id) == {:error, :not_found}
+    assert {:ok, %{turns: 1}} = Ledger.session_totals(session_id)
     assert Ledger.route_totals()[{:cloud, FakeProvider}].turns >= before_stop
+  end
+
+  test "deleting a session forgets its aggregate but not the route totals", %{
+    session_id: session_id
+  } do
+    Mead.submit_turn(session_id, "explain this")
+    before_delete = Ledger.route_totals()[{:cloud, FakeProvider}].turns
+
+    assert :ok = Mead.delete_session(session_id)
+
+    assert Ledger.session_totals(session_id) == {:error, :not_found}
+    assert Ledger.route_totals()[{:cloud, FakeProvider}].turns >= before_delete
   end
 
   test "the ledger survives a crash of the turn supervisor", %{session_id: session_id} do

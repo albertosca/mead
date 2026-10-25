@@ -284,7 +284,11 @@ defmodule Mead.LedgerJournalTest do
       :sys.suspend(context.name)
 
       flushing = Task.async(fn -> Ledger.flush(context.name) end)
-      wait_until(fn -> Process.info(pid, :message_queue_len) == {:message_queue_len, 1} end)
+      # The batch timer may also have queued a message, so wait for the flush call itself.
+      wait_until(fn ->
+        {:messages, messages} = Process.info(pid, :messages)
+        Enum.any?(messages, &match?({:"$gen_call", _from, _request}, &1))
+      end)
 
       # The tables take this turn at once, but its journal record queues behind the flush that is
       # about to rewrite the file.
