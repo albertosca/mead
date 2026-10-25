@@ -30,6 +30,9 @@ defmodule Mead do
       `:turn_handler` application setting, then to `Mead.Session.EchoHandler`.
     * `:turn_timeout` - milliseconds a single turn may run; defaults to the `:turn_timeout`
       application setting, then to 30 seconds.
+
+  Raises `ArgumentError` when `config :mead, :storage` is malformed, rather than quietly running
+  without the persistence the operator asked for.
   """
   @spec start_session(keyword()) :: {:ok, String.t()} | {:error, term()}
   def start_session(options \\ []) do
@@ -58,13 +61,21 @@ defmodule Mead do
   end
 
   defp resume_from(directory, session_id, options) do
-    if Session.whereis(session_id, :supervisor) do
-      {:error, :already_running}
-    else
-      with {:ok, turns} <- Store.load(directory, session_id) do
-        launch(session_id, options, resume: turns)
+    exclusive(session_id, fn ->
+      if Session.whereis(session_id, :supervisor) do
+        {:error, :already_running}
+      else
+        with {:ok, turns} <- Store.recover(directory, session_id) do
+          launch(session_id, options, resume: turns)
+        end
       end
-    end
+    end)
+  end
+
+  # Resuming and deleting the same conversation must not interleave: a resume that loaded the file
+  # just before a delete removed it would leave a running session with no file behind it.
+  defp exclusive(session_id, function) do
+    :global.trans({{__MODULE__, session_id}, self()}, function)
   end
 
   defp launch(session_id, options, extra) do
@@ -208,14 +219,16 @@ defmodule Mead do
   """
   @spec delete_session(String.t()) :: :ok | {:error, :not_found | {:persistence, term()}}
   def delete_session(session_id) do
-    stopped = Pool.stop_session(session_id) == :ok
-    directory = Store.directory()
-    stored = directory != nil and Store.exists?(directory, session_id)
-
-    with :ok <- delete_file(directory, session_id) do
+    exclusive(session_id, fn ->
+      stopped = Pool.stop_session(session_id) == :ok
       Mead.Ledger.forget(session_id)
-      if stopped or stored, do: :ok, else: {:error, :not_found}
-    end
+      directory = Store.directory()
+      stored = directory != nil and Store.exists?(directory, session_id)
+
+      with :ok <- delete_file(directory, session_id) do
+        if stopped or stored, do: :ok, else: {:error, :not_found}
+      end
+    end)
   end
 
   defp delete_file(nil, _session_id), do: :ok

@@ -2,14 +2,19 @@ defmodule Mead.Session.Store do
   @moduledoc """
   Keeps the turns of each conversation in one append-only file per session.
 
-  A file is a sequence of records, `[4-byte length][4-byte CRC32][term_to_binary payload]`, each
-  the encoding of one event: `{:append, turn}` when a turn starts, `{:replace_last, turn}` when
+  A file is a sequence of records, `[4-byte length][4-byte CRC32 of the length][4-byte CRC32 of
+  the payload][term_to_binary payload]`, each the encoding of one event: `{:append, turn}` when a turn starts, `{:replace_last, turn}` when
   the newest turn is closed, and `:interrupt` when every turn still in progress became
   interrupted. Replaying the events in order rebuilds the list the history agent held.
 
-  A last record that is cut short or fails its checksum is what a crash during a write leaves,
-  so it is dropped with a warning. Damage anywhere else is `:corrupt_history`: a conversation
-  with a hole in the middle is worse than no conversation. The directory is single-writer.
+  A last record that is cut short or fails its payload checksum is what a crash during a write
+  leaves, so it is dropped with a warning. The length has a checksum of its own, so a flipped bit
+  in a header cannot pass for a cut write: damage anywhere else is `:corrupt_history`, because a
+  conversation with a hole in the middle is worse than no conversation. `load/2` only reads;
+  `recover/2` also cuts the dropped tail off the file, which a session must do before it writes
+  again, or its next record would land behind the garbage and make the whole file unreadable. A
+  write that fails is rolled back to the size the file had before it, for the same reason. The
+  directory is single-writer.
 
   Payloads are decoded without `:safe`. A failed turn keeps its reason as output, and that reason
   can hold an exception or an atom from a module a freshly booted node has not loaded yet, which
@@ -27,6 +32,8 @@ defmodule Mead.Session.Store do
   alias Mead.Session.Turn
 
   @session_id_shape ~r/\A[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\z/
+
+  @header_size 12
 
   @type event :: {:append, Turn.t()} | {:replace_last, Turn.t()} | :interrupt
 
@@ -58,16 +65,37 @@ defmodule Mead.Session.Store do
   @spec append(String.t(), String.t(), event()) :: :ok | {:error, term()}
   def append(directory, session_id, event) do
     with :ok <- check_session_id(session_id),
-         :ok <- File.mkdir_p(directory) do
-      path = path(directory, session_id)
-      created = not File.exists?(path)
+         :ok <- File.mkdir_p(directory),
+         path = path(directory, session_id),
+         :ok <- create_private(path),
+         {:ok, %File.Stat{size: size_before}} <- File.stat(path),
+         {:ok, device} <- File.open(path, [:append, :binary]) do
+      outcome = write_record(device, event)
+      File.close(device)
+      if outcome != :ok, do: rollback(path, size_before)
+      outcome
+    end
+  end
 
-      with {:ok, device} <- File.open(path, [:append, :binary]) do
-        outcome = write_record(device, event)
-        File.close(device)
-        if created, do: File.chmod(path, 0o600)
-        outcome
-      end
+  # The file exists, empty and private, before any record is written to it, so the content is
+  # never readable by anyone else, not even for the moment between a write and a later chmod.
+  defp create_private(path) do
+    if File.exists?(path) do
+      :ok
+    else
+      with :ok <- File.touch(path), do: File.chmod(path, 0o600)
+    end
+  end
+
+  @doc false
+  @spec rollback(Path.t(), non_neg_integer()) :: :ok | {:error, term()}
+  def rollback(path, size) do
+    with {:ok, device} <- :file.open(path, [:read, :write, :binary]) do
+      result =
+        with {:ok, _position} <- :file.position(device, size), do: :file.truncate(device)
+
+      :file.close(device)
+      result
     end
   end
 
@@ -77,16 +105,43 @@ defmodule Mead.Session.Store do
 
   defp encode(event) do
     payload = :erlang.term_to_binary(event)
-    <<byte_size(payload)::32, :erlang.crc32(payload)::32, payload::binary>>
+    size = byte_size(payload)
+    <<size::32, :erlang.crc32(<<size::32>>)::32, :erlang.crc32(payload)::32, payload::binary>>
   end
 
-  @doc "Returns the turns of a session in chronological order."
+  @doc "Returns the turns of a session in chronological order, without touching the file."
   @spec load(String.t(), String.t()) ::
           {:ok, [Turn.t()]} | {:error, :not_found | :corrupt_history | {:persistence, term()}}
   def load(directory, session_id) do
     with :ok <- valid_or_missing(session_id),
-         {:ok, binary} <- read(path(directory, session_id)) do
-      replay(binary, [], session_id)
+         {:ok, binary} <- read(path(directory, session_id)),
+         {:ok, turns, _valid_size} <- replay(binary, 0, [], session_id) do
+      {:ok, turns}
+    end
+  end
+
+  @doc """
+  Like `load/2`, and cuts a torn last record off the file so that later appends follow the last
+  complete record.
+  """
+  @spec recover(String.t(), String.t()) ::
+          {:ok, [Turn.t()]} | {:error, :not_found | :corrupt_history | {:persistence, term()}}
+  def recover(directory, session_id) do
+    with :ok <- valid_or_missing(session_id),
+         path = path(directory, session_id),
+         {:ok, binary} <- read(path),
+         {:ok, turns, valid_size} <- replay(binary, 0, [], session_id),
+         :ok <- cut_tail(path, valid_size, byte_size(binary)) do
+      {:ok, turns}
+    end
+  end
+
+  defp cut_tail(_path, size, size), do: :ok
+
+  defp cut_tail(path, valid_size, _file_size) do
+    case rollback(path, valid_size) do
+      :ok -> :ok
+      {:error, reason} -> {:error, {:persistence, reason}}
     end
   end
 
@@ -102,33 +157,57 @@ defmodule Mead.Session.Store do
     end
   end
 
-  defp replay(<<>>, turns, _session_id), do: {:ok, Enum.reverse(turns)}
+  defp replay(<<>>, offset, turns, _session_id), do: {:ok, Enum.reverse(turns), offset}
 
   defp replay(
-         <<size::32, checksum::32, payload::binary-size(size), remaining::binary>>,
+         <<size::32, header_checksum::32, checksum::32, rest::binary>>,
+         offset,
          turns,
          session_id
        ) do
     cond do
+      :erlang.crc32(<<size::32>>) != header_checksum ->
+        {:error, :corrupt_history}
+
+      byte_size(rest) < size ->
+        torn_tail(turns, offset, session_id)
+
+      true ->
+        <<payload::binary-size(^size), remaining::binary>> = rest
+
+        replay_record(
+          payload,
+          checksum,
+          remaining,
+          offset + @header_size + size,
+          turns,
+          session_id
+        )
+    end
+  end
+
+  defp replay(_incomplete_header, offset, turns, session_id),
+    do: torn_tail(turns, offset, session_id)
+
+  defp replay_record(payload, checksum, remaining, next_offset, turns, session_id) do
+    cond do
       :erlang.crc32(payload) == checksum ->
         with {:ok, event} <- decode(payload),
              {:ok, turns} <- apply_event(event, turns) do
-          replay(remaining, turns, session_id)
+          replay(remaining, next_offset, turns, session_id)
         end
 
       remaining == <<>> ->
-        torn_tail(turns, session_id)
+        torn_tail(turns, next_offset - @header_size - byte_size(payload), session_id)
 
       true ->
         {:error, :corrupt_history}
     end
   end
 
-  defp replay(_incomplete, turns, session_id), do: torn_tail(turns, session_id)
-
-  defp torn_tail(turns, session_id) do
+  defp torn_tail(turns, valid_size, session_id) do
     Logger.warning("dropped an incomplete last record of the history of session #{session_id}")
-    {:ok, Enum.reverse(turns)}
+    {:ok, Enum.reverse(turns), valid_size}
   end
 
   defp decode(payload) do

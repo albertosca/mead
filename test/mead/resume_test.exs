@@ -36,6 +36,14 @@ defmodule Mead.ResumeTest do
   defp restore(key, {:ok, value}), do: Application.put_env(:mead, key, value)
   defp restore(key, :error), do: Application.delete_env(:mead, key)
 
+  defp eventually(check, attempts \\ 50) do
+    cond do
+      check.() -> true
+      attempts == 0 -> false
+      true -> Process.sleep(20) && eventually(check, attempts - 1)
+    end
+  end
+
   defp file_of(directory, session_id), do: Path.join(directory, session_id <> ".log")
 
   defp start_text_session do
@@ -110,16 +118,53 @@ defmodule Mead.ResumeTest do
 
     test "a damaged file is :corrupt_history and starts no process", %{directory: directory} do
       session_id = Mead.UUID.generate()
-      payload = :erlang.term_to_binary({:append, Turn.start("a")})
+      :ok = Store.append(directory, session_id, {:append, Turn.start("a")})
+      :ok = Store.append(directory, session_id, {:append, Turn.start("b")})
+      <<head::binary-size(20), byte, tail::binary>> = File.read!(file_of(directory, session_id))
 
-      bad =
-        <<byte_size(payload)::32, :erlang.crc32(payload) + 1::32, payload::binary>> <>
-          <<byte_size(payload)::32, :erlang.crc32(payload)::32, payload::binary>>
-
-      File.write!(file_of(directory, session_id), bad)
+      File.write!(
+        file_of(directory, session_id),
+        <<head::binary, Bitwise.bxor(byte, 0xFF), tail::binary>>
+      )
 
       assert Mead.resume_session(session_id) == {:error, :corrupt_history}
       assert Session.whereis(session_id, :supervisor) == nil
+    end
+
+    test "a torn tail is cut off, so a turn after the resume survives another resume",
+         %{directory: directory} do
+      session_id = start_text_session()
+      assert Mead.submit_turn(session_id, "echo one") == {:ok, "one"}
+      Mead.stop_session(session_id)
+      File.write!(file_of(directory, session_id), <<0, 0, 0, 9, 1>>, [:append])
+
+      ExUnit.CaptureLog.capture_log(fn ->
+        assert Mead.resume_session(session_id, handler: Mead.Test.TextHandler) ==
+                 {:ok, session_id}
+      end)
+
+      assert Mead.submit_turn(session_id, "echo two") == {:ok, "two"}
+      Mead.stop_session(session_id)
+
+      assert Mead.resume_session(session_id, handler: Mead.Test.TextHandler) == {:ok, session_id}
+
+      assert {:ok, [%Turn{input: "echo one"}, %Turn{input: "echo two"}]} =
+               Mead.history(session_id)
+    end
+
+    test "a history that restarts after a crash reloads what is on disk, not the resume snapshot" do
+      session_id = start_text_session()
+      Mead.submit_turn(session_id, "echo one")
+      Mead.stop_session(session_id)
+      {:ok, ^session_id} = Mead.resume_session(session_id, handler: Mead.Test.TextHandler)
+      assert Mead.submit_turn(session_id, "echo two") == {:ok, "two"}
+
+      history = Session.whereis(session_id, :history)
+      Process.exit(history, :kill)
+
+      assert eventually(fn ->
+               match?({:ok, [%Turn{}, %Turn{input: "echo two"}]}, Mead.history(session_id))
+             end)
     end
 
     test "without a storage directory nothing can be resumed" do
@@ -130,6 +175,27 @@ defmodule Mead.ResumeTest do
 
     test "rejects options the way start_session/1 does" do
       assert_raise ArgumentError, fn -> Mead.resume_session(Mead.UUID.generate(), bogus: 1) end
+    end
+  end
+
+  describe "resume and delete at the same time" do
+    test "never leave a running session without its file", %{directory: directory} do
+      for _round <- 1..40 do
+        session_id = start_text_session()
+        Mead.submit_turn(session_id, "echo hi")
+        Mead.stop_session(session_id)
+
+        tasks = [
+          Task.async(fn -> Mead.resume_session(session_id, handler: Mead.Test.TextHandler) end),
+          Task.async(fn -> Mead.delete_session(session_id) end)
+        ]
+
+        Task.await_many(tasks)
+
+        running = Session.whereis(session_id, :supervisor) != nil
+        refute running and not Store.exists?(directory, session_id)
+        Mead.stop_session(session_id)
+      end
     end
   end
 
@@ -164,6 +230,28 @@ defmodule Mead.ResumeTest do
       assert Mead.delete_session(session_id) == :ok
       refute Store.exists?(directory, session_id)
       assert Mead.resume_session(session_id) == {:error, :not_found}
+    end
+
+    test "delete_session/1 forgets the ledger aggregate even when the file cannot be removed",
+         %{directory: directory} do
+      {:ok, session_id} = Mead.start_session(handler: Mead.Router)
+
+      on_exit(fn ->
+        File.chmod(directory, 0o755)
+        Mead.stop_session(session_id)
+      end)
+
+      assert {:ok, "cloud reply"} = Mead.submit_turn(session_id, "explain this")
+      File.chmod!(directory, 0o000)
+
+      assert Mead.delete_session(session_id) == {:error, {:persistence, :eacces}}
+      assert Ledger.session_totals(session_id) == {:error, :not_found}
+    end
+
+    test "start_session/1 raises on a malformed storage setting" do
+      Application.put_env(:mead, :storage, "not a keyword list")
+
+      assert_raise ArgumentError, ~r/must be a keyword list/, fn -> Mead.start_session() end
     end
 
     test "delete_session/1 is :not_found when there was neither a process nor a file" do

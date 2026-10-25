@@ -12,8 +12,10 @@ defmodule Mead.Session.StoreTest do
     %{directory: directory, session_id: Mead.UUID.generate()}
   end
 
-  defp record(payload),
-    do: <<byte_size(payload)::32, :erlang.crc32(payload)::32, payload::binary>>
+  defp record(payload) do
+    size = byte_size(payload)
+    <<size::32, :erlang.crc32(<<size::32>>)::32, :erlang.crc32(payload)::32, payload::binary>>
+  end
 
   defp encoded(event), do: record(:erlang.term_to_binary(event))
 
@@ -163,6 +165,64 @@ defmodule Mead.Session.StoreTest do
 
         assert Store.load(directory, session_id) == {:error, :corrupt_history}
       end
+    end
+  end
+
+  describe "a damaged header" do
+    test "a flipped bit in the length of an early record is :corrupt_history, not a torn tail",
+         context do
+      %{directory: directory, session_id: session_id} = context
+
+      for text <- ["a", "b", "c"] do
+        :ok = Store.append(directory, session_id, {:append, Turn.start(text)})
+      end
+
+      <<first_byte, rest::binary>> = File.read!(file_of(directory, session_id))
+      write_raw(directory, session_id, <<Bitwise.bxor(first_byte, 0x80), rest::binary>>)
+
+      assert Store.load(directory, session_id) == {:error, :corrupt_history}
+      assert Store.recover(directory, session_id) == {:error, :corrupt_history}
+    end
+  end
+
+  describe "recover/2" do
+    test "cuts a torn tail off the file so the next turn can be stored", context do
+      %{directory: directory, session_id: session_id} = context
+      kept = Turn.start("kept")
+      :ok = Store.append(directory, session_id, {:append, kept})
+      File.write!(file_of(directory, session_id), <<0, 0, 0>>, [:append])
+
+      capture_log(fn -> assert Store.recover(directory, session_id) == {:ok, [kept]} end)
+
+      next = Turn.start("next")
+      assert :ok = Store.append(directory, session_id, {:append, next})
+      assert Store.load(directory, session_id) == {:ok, [kept, next]}
+    end
+
+    test "a file without damage is left byte-identical", context do
+      %{directory: directory, session_id: session_id} = context
+      :ok = Store.append(directory, session_id, {:append, Turn.start("a")})
+      written = File.read!(file_of(directory, session_id))
+
+      assert {:ok, [_turn]} = Store.recover(directory, session_id)
+      assert File.read!(file_of(directory, session_id)) == written
+    end
+
+    test "a missing file is :not_found", %{directory: directory, session_id: session_id} do
+      assert Store.recover(directory, session_id) == {:error, :not_found}
+    end
+  end
+
+  describe "rollback/2" do
+    test "cuts the file back to the given size", context do
+      %{directory: directory, session_id: session_id} = context
+      :ok = Store.append(directory, session_id, {:append, Turn.start("a")})
+      path = file_of(directory, session_id)
+      size = File.stat!(path).size
+      File.write!(path, "partial", [:append])
+
+      assert Store.rollback(path, size) == :ok
+      assert File.stat!(path).size == size
     end
   end
 

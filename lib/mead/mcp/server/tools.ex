@@ -1,8 +1,8 @@
 defmodule Mead.MCP.Server.Tools do
   @moduledoc """
-  The six tools the MCP server offers: `start_session`, `submit_turn`, `history`,
-  `stop_session`, `resume_session`, and `delete_session`. They are the only code of the server that touches the runtime, and they do it
-  only through the public `Mead` API.
+  The six tools the MCP server offers: `start_session`, `submit_turn`, `history`, `stop_session`,
+  `resume_session`, and `delete_session`. They are the only code of the server that touches the
+  runtime, and they do it only through the public `Mead` API.
 
   A tool never raises for what a client can send. Arguments of the wrong type come back as
   `{:error, {:invalid_params, message}}`, which the dispatcher turns into a JSON-RPC error.

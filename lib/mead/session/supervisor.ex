@@ -5,7 +5,8 @@ defmodule Mead.Session.Supervisor do
   The history is started before the server and the strategy is `:rest_for_one`, so a server
   crash restarts only the server and leaves the history untouched. The default restart
   intensity applies: a server that crashes more than 3 times in 5 seconds takes the whole pair
-  down, and the conversation is gone, which is a visible failure instead of a hidden loop.
+  down, which is a visible failure instead of a hidden loop. A stored conversation survives that
+  and can be brought back with `Mead.resume_session/2`; one without storage is gone.
   """
 
   use Supervisor, restart: :transient

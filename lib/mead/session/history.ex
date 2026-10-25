@@ -31,11 +31,26 @@ defmodule Mead.Session.History do
   def start_link(options) do
     session_id = Keyword.fetch!(options, :session_id)
     directory = Keyword.get(options, :directory)
-    turns = options |> Keyword.get(:resume, []) |> Enum.reverse()
+    resume = Keyword.get(options, :resume, [])
 
-    Agent.start_link(fn -> %{turns: turns, directory: directory} end,
+    Agent.start_link(
+      fn ->
+        %{turns: Enum.reverse(initial_turns(directory, session_id, resume)), directory: directory}
+      end,
       name: Session.via(session_id, :history)
     )
+  end
+
+  # The file is the truth. A history that restarts after a crash must not fall back to the turns
+  # it was resumed with, which the file has long outgrown; `resume` is the answer only when there
+  # is nothing stored to read (no directory, or nothing written yet).
+  defp initial_turns(nil, _session_id, resume), do: resume
+
+  defp initial_turns(directory, session_id, resume) do
+    case Store.load(directory, session_id) do
+      {:ok, turns} -> turns
+      {:error, _reason} -> resume
+    end
   end
 
   @doc "Records a turn as the newest one, or refuses it when it cannot be written."
