@@ -9,6 +9,8 @@ defmodule Mead do
   disk, and `resume_session/2` brings a stopped session back with the same id and turns.
   """
 
+  require Logger
+
   alias Mead.Session
   alias Mead.Session.EchoHandler
   alias Mead.Session.History
@@ -48,7 +50,8 @@ defmodule Mead do
   `config :mead, :storage, directory: ...`; without it nothing is stored and the answer is
   `{:error, :not_found}`, which is also the answer for an id with no file or one that is not a
   session id. A running session is `{:error, :already_running}`, and a file damaged anywhere but
-  its last record is `{:error, :corrupt_history}`.
+  its last record is `{:error, :corrupt_history}`. The file is compacted first; a failed
+  compaction only logs a warning.
   """
   @spec resume_session(String.t(), keyword()) :: {:ok, String.t()} | {:error, term()}
   def resume_session(session_id, options \\ []) do
@@ -66,6 +69,7 @@ defmodule Mead do
         {:error, :already_running}
       else
         with {:ok, turns} <- Store.recover(directory, session_id) do
+          compact_quietly(directory, session_id, turns)
           launch(session_id, options, resume: turns)
         end
       end
@@ -76,6 +80,19 @@ defmodule Mead do
   # just before a delete removed it would leave a running session with no file behind it.
   defp exclusive(session_id, function) do
     :global.trans({{__MODULE__, session_id}, self()}, function)
+  end
+
+  # Housekeeping must not stop a conversation from coming back, so a failed rewrite only warns.
+  defp compact_quietly(directory, session_id, turns) do
+    case Store.compact(directory, session_id, turns) do
+      {:ok, _sizes} ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning(
+          "could not compact the history of session #{session_id}: #{inspect(reason)}"
+        )
+    end
   end
 
   defp launch(session_id, options, extra) do
@@ -223,6 +240,39 @@ defmodule Mead do
              Map.put(entry, :running, Session.whereis(entry.session_id, :supervisor) != nil)
            end)}
         end
+    end
+  end
+
+  @doc """
+  Rewrites the stored conversation as one record per turn and returns the bytes before and after.
+
+  Nothing is lost: `history/1` and `resume_session/2` see the same turns. A running session is
+  compacted from memory, a stopped one from its file. Returns `{:error, :not_found}` without
+  storage, for an id that is not a session id, and when no file exists yet,
+  `{:error, :corrupt_history}` for a damaged file, which is left as it is, and
+  `{:error, {:persistence, reason}}` when the rewrite failed and the file is untouched.
+  """
+  @spec compact_session(String.t()) ::
+          {:ok, %{bytes_before: non_neg_integer(), bytes_after: non_neg_integer()}}
+          | {:error, :not_found | :corrupt_history | {:persistence, term()}}
+  def compact_session(session_id) do
+    case Store.directory() do
+      nil -> {:error, :not_found}
+      directory -> exclusive(session_id, fn -> compact_stored(directory, session_id) end)
+    end
+  end
+
+  defp compact_stored(directory, session_id) do
+    if Session.whereis(session_id, :history) do
+      try do
+        History.compact(session_id)
+      catch
+        :exit, _reason -> {:error, :not_found}
+      end
+    else
+      with {:ok, turns} <- Store.recover(directory, session_id) do
+        Store.compact(directory, session_id, turns)
+      end
     end
   end
 

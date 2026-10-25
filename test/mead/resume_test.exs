@@ -83,10 +83,17 @@ defmodule Mead.ResumeTest do
       assert {:ok, [%Turn{input: "lost", status: :interrupted}]} = Mead.history(session_id)
 
       assert Mead.stop_session(session_id) == :ok
-      written = File.read!(file_of(directory, session_id))
 
+      # The interrupt marker is written after the compaction of the first resume,
+      # so the second resume folds it into the turn; from then on nothing changes.
       assert Mead.resume_session(session_id, handler: Mead.Test.TextHandler) == {:ok, session_id}
       assert {:ok, [%Turn{status: :interrupted}]} = Mead.history(session_id)
+      assert Mead.stop_session(session_id) == :ok
+      written = File.read!(file_of(directory, session_id))
+      {:ok, stored} = Store.load(directory, session_id)
+
+      assert Mead.resume_session(session_id, handler: Mead.Test.TextHandler) == {:ok, session_id}
+      assert Mead.history(session_id) == {:ok, stored}
       assert File.read!(file_of(directory, session_id)) == written
     end
 
