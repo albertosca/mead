@@ -94,7 +94,8 @@ defmodule Mead do
             Application.get_env(:mead, :turn_timeout, @default_turn_timeout)
           end)
           |> validate_turn_timeout!(),
-        directory: Store.directory()
+        directory: Store.directory(),
+        compact_after_bytes: Store.compact_after_bytes()
       ] ++ extra
 
     case Pool.start_session(session_options) do
