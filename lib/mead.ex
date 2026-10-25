@@ -70,7 +70,9 @@ defmodule Mead do
       if Session.whereis(session_id, :supervisor) do
         {:error, :already_running}
       else
-        with {:ok, turns} <- Store.recover(directory, session_id) do
+        with {:ok, recovered} <- Store.recover(directory, session_id) do
+          # Interrupted before compacting, so the file is already what the history would write.
+          turns = Enum.map(recovered, &Turn.interrupt/1)
           compact_quietly(directory, session_id, turns)
           launch(session_id, options, resume: turns)
         end
