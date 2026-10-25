@@ -49,6 +49,12 @@ defmodule Mead.Session.StoreDirectoryTest do
     assert Store.compact_after_bytes() == 4_096
   end
 
+  test "compact_after_bytes/0 defaults when storage is explicitly nil" do
+    Application.put_env(:mead, :storage, nil)
+
+    assert Store.compact_after_bytes() == 1_048_576
+  end
+
   test "compact_after_bytes/0 refuses anything but a positive integer" do
     for invalid <- [0, -1, 1.5, "1000", nil, :never] do
       Application.put_env(:mead, :storage,

@@ -118,6 +118,44 @@ defmodule Mead.Session.HistoryCompactionTest do
              {:ok, History.all(context.session_id)}
   end
 
+  describe "a file that was damaged before the history started" do
+    setup context do
+      history =
+        start_supervised!({History, session_id: context.session_id, directory: context.directory},
+          id: :first
+        )
+
+      for index <- 1..6, do: run_turn(context, index)
+      stop_supervised!(:first)
+      assert is_pid(history)
+
+      path = file_of(context)
+      bytes = File.read!(path)
+
+      damaged =
+        :binary.part(bytes, 0, 20) <> <<255>> <> :binary.part(bytes, 21, byte_size(bytes) - 21)
+
+      File.write!(path, damaged)
+      assert Store.load(context.directory, context.session_id) == {:error, :corrupt_history}
+      %{damaged: damaged}
+    end
+
+    test "an explicit compaction refuses and leaves the file untouched", context do
+      start_history(context, [])
+
+      assert History.compact(context.session_id) == {:error, :corrupt_history}
+      assert File.read!(file_of(context)) == context.damaged
+    end
+
+    test "the live trigger never rewrites it from an empty memory", context do
+      start_history(context, compact_after_bytes: 1)
+      for index <- 7..40, do: run_turn(context, index)
+
+      assert Store.load(context.directory, context.session_id) == {:error, :corrupt_history}
+      assert String.starts_with?(File.read!(file_of(context)), context.damaged)
+    end
+  end
+
   test "compact/1 on a history with no directory is not found", context do
     start_supervised!({History, session_id: context.session_id, directory: nil})
 

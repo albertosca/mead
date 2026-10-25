@@ -74,7 +74,10 @@ defmodule Mead.Session.Store do
   """
   @spec compact_after_bytes() :: pos_integer()
   def compact_after_bytes do
-    case Application.get_env(:mead, :storage, []) do
+    case Application.get_env(:mead, :storage) do
+      nil ->
+        @default_compact_after_bytes
+
       storage when is_list(storage) ->
         storage
         |> Keyword.get(:compact_after_bytes, @default_compact_after_bytes)

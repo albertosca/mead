@@ -42,8 +42,11 @@ defmodule Mead.Session.History do
 
     Agent.start_link(
       fn ->
+        {turns, readable} = initial_turns(directory, session_id, resume)
+
         %{
-          turns: Enum.reverse(initial_turns(directory, session_id, resume)),
+          turns: Enum.reverse(turns),
+          readable: readable,
           directory: directory,
           compact_after_bytes: compact_after_bytes,
           floor: stored_size(directory, session_id)
@@ -65,12 +68,16 @@ defmodule Mead.Session.History do
   # The file is the truth. A history that restarts after a crash must not fall back to the turns
   # it was resumed with, which the file has long outgrown; `resume` is the answer only when there
   # is nothing stored to read (no directory, or nothing written yet).
-  defp initial_turns(nil, _session_id, resume), do: resume
+  #
+  # A file that is damaged cannot be compared with memory, which then holds only `resume`: the
+  # history remembers that, and never rewrites such a file from memory.
+  defp initial_turns(nil, _session_id, resume), do: {resume, true}
 
   defp initial_turns(directory, session_id, resume) do
     case Store.load(directory, session_id) do
-      {:ok, turns} -> turns
-      {:error, _reason} -> resume
+      {:ok, turns} -> {turns, true}
+      {:error, :corrupt_history} -> {resume, false}
+      {:error, _reason} -> {resume, true}
     end
   end
 
@@ -140,12 +147,15 @@ defmodule Mead.Session.History do
   """
   @spec compact(String.t()) ::
           {:ok, %{bytes_before: non_neg_integer(), bytes_after: non_neg_integer()}}
-          | {:error, :not_found | {:persistence, term()}}
+          | {:error, :not_found | :corrupt_history | {:persistence, term()}}
   def compact(session_id) do
     Agent.get_and_update(Session.via(session_id, :history), &compact_now(&1, session_id))
   end
 
   defp compact_now(%{directory: nil} = state, _session_id), do: {{:error, :not_found}, state}
+
+  defp compact_now(%{readable: false} = state, _session_id),
+    do: {{:error, :corrupt_history}, state}
 
   defp compact_now(state, session_id) do
     case Store.compact(state.directory, session_id, Enum.reverse(state.turns)) do
@@ -165,6 +175,7 @@ defmodule Mead.Session.History do
   # right after the last compaction. Without the second condition a file whose compact form
   # already passes the threshold would be rewritten on every turn.
   defp compact_if_due(%{directory: nil} = state, _session_id), do: state
+  defp compact_if_due(%{readable: false} = state, _session_id), do: state
   defp compact_if_due(%{compact_after_bytes: nil} = state, _session_id), do: state
 
   defp compact_if_due(state, session_id) do
