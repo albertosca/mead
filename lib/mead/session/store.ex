@@ -34,6 +34,7 @@ defmodule Mead.Session.Store do
   @session_id_shape ~r/\A[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\z/
 
   @header_size 12
+  @default_compact_after_bytes 1_048_576
 
   @type event :: {:append, Turn.t()} | {:replace_last, Turn.t()} | :interrupt
 
@@ -59,6 +60,33 @@ defmodule Mead.Session.Store do
   defp validate_directory(other) do
     raise ArgumentError,
           "config :mead, :storage, directory must be a non-empty string, got: #{inspect(other)}"
+  end
+
+  @doc """
+  Returns the size in bytes a live session's file may reach before it is compacted.
+
+  Defaults to one mebibyte; `config :mead, :storage, compact_after_bytes:` sets it. Anything but
+  a positive integer raises `ArgumentError`, rather than quietly never compacting.
+  """
+  @spec compact_after_bytes() :: pos_integer()
+  def compact_after_bytes do
+    case Application.get_env(:mead, :storage, []) do
+      storage when is_list(storage) ->
+        storage
+        |> Keyword.get(:compact_after_bytes, @default_compact_after_bytes)
+        |> validate_compact_after()
+
+      other ->
+        raise ArgumentError,
+              "config :mead, :storage must be a keyword list, got: #{inspect(other)}"
+    end
+  end
+
+  defp validate_compact_after(bytes) when is_integer(bytes) and bytes > 0, do: bytes
+
+  defp validate_compact_after(other) do
+    raise ArgumentError,
+          "config :mead, :storage, compact_after_bytes must be a positive integer, got: #{inspect(other)}"
   end
 
   @doc "Appends one event to the file of a session, creating the directory and file on first use."
@@ -264,6 +292,94 @@ defmodule Mead.Session.Store do
   @spec exists?(String.t(), String.t()) :: boolean()
   def exists?(directory, session_id) do
     valid_session_id?(session_id) and File.exists?(path(directory, session_id))
+  end
+
+  @doc "Returns the size in bytes of the file of a session."
+  @spec size(String.t(), String.t()) ::
+          {:ok, non_neg_integer()} | {:error, :not_found | {:persistence, term()}}
+  def size(directory, session_id) do
+    with :ok <- valid_or_missing(session_id) do
+      case File.stat(path(directory, session_id)) do
+        {:ok, %File.Stat{type: :regular, size: size}} -> {:ok, size}
+        {:ok, _not_a_file} -> {:error, :not_found}
+        {:error, :enoent} -> {:error, :not_found}
+        {:error, reason} -> {:error, {:persistence, reason}}
+      end
+    end
+  end
+
+  @doc """
+  Rewrites the file of a session as one `{:append, turn}` record per turn, given in
+  chronological order, and returns the size of the file before and after.
+
+  The file is replaced only when the new form is smaller, so a file that is already compact is
+  left alone and both sizes are the current one. The replacement is written to `<id>.log.tmp`,
+  synced, and renamed over the log, so a crash leaves the old file or the new one. A failure
+  leaves the log as it was and removes the temporary file. A file that does not exist is
+  `{:error, :not_found}`: compaction never creates a conversation.
+  """
+  @spec compact(String.t(), String.t(), [Turn.t()]) ::
+          {:ok, %{bytes_before: non_neg_integer(), bytes_after: non_neg_integer()}}
+          | {:error, :not_found | {:persistence, term()}}
+  def compact(directory, session_id, turns) do
+    with {:ok, bytes_before} <- size(directory, session_id) do
+      canonical = turns |> Enum.map(&encode({:append, &1})) |> IO.iodata_to_binary()
+      bytes_after = byte_size(canonical)
+
+      if bytes_after < bytes_before do
+        with :ok <- replace(directory, path(directory, session_id), canonical) do
+          {:ok, %{bytes_before: bytes_before, bytes_after: bytes_after}}
+        end
+      else
+        {:ok, %{bytes_before: bytes_before, bytes_after: bytes_before}}
+      end
+    end
+  end
+
+  defp replace(directory, path, canonical) do
+    temporary = path <> ".tmp"
+
+    result =
+      with :ok <- remove_leftover(temporary),
+           :ok <- create_private(temporary),
+           :ok <- write_synced(temporary, canonical),
+           :ok <- File.rename(temporary, path) do
+        sync_directory(directory)
+      end
+
+    File.rm(temporary)
+
+    case result do
+      :ok -> :ok
+      {:error, reason} -> {:error, {:persistence, reason}}
+    end
+  end
+
+  defp remove_leftover(temporary) do
+    case File.rm(temporary) do
+      :ok -> :ok
+      {:error, :enoent} -> :ok
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp write_synced(path, binary) do
+    with {:ok, device} <- :file.open(path, [:write, :binary]) do
+      result = with :ok <- :file.write(device, binary), do: :file.sync(device)
+      :file.close(device)
+      result
+    end
+  end
+
+  # Syncing the directory makes the new name durable. Not every platform lets Erlang open a
+  # directory, so a refusal here is not a failure: the rename has already happened.
+  defp sync_directory(directory) do
+    with {:ok, device} <- :file.open(directory, [:read, :raw]) do
+      :file.sync(device)
+      :file.close(device)
+    end
+
+    :ok
   end
 
   @doc "Removes the file of a session; a missing file or an invalid id is not an error."
