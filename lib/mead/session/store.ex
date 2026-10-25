@@ -2,10 +2,7 @@ defmodule Mead.Session.Store do
   @moduledoc """
   Keeps the turns of each conversation in one append-only file per session.
 
-  A file is a sequence of records, `[4-byte length][4-byte CRC32 of the length][4-byte CRC32 of
-  the payload][term_to_binary payload]`, each the encoding of one event: `{:append, turn}` when a turn starts, `{:replace_last, turn}` when
-  the newest turn is closed, and `:interrupt` when every turn still in progress became
-  interrupted. Replaying the events in order rebuilds the list the history agent held.
+  A file is a sequence of records framed by `Mead.Session.Record`, each the encoding of one event: `{:append, turn}` when a turn starts, `{:replace_last, turn}` when the newest turn is closed, and `:interrupt` when every turn still in progress became interrupted. Replaying the events in order rebuilds the list the history agent held.
 
   A last record that is cut short or fails its payload checksum is what a crash during a write
   leaves, so it is dropped with a warning. The length has a checksum of its own, so a flipped bit
@@ -33,11 +30,11 @@ defmodule Mead.Session.Store do
 
   require Logger
 
+  alias Mead.Session.Record
   alias Mead.Session.Turn
 
   @session_id_shape ~r/\A[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\z/
 
-  @header_size 12
   @default_compact_after_bytes 1_048_576
 
   @type event :: {:append, Turn.t()} | {:replace_last, Turn.t()} | :interrupt
@@ -102,7 +99,7 @@ defmodule Mead.Session.Store do
     with :ok <- check_session_id(session_id),
          :ok <- File.mkdir_p(directory),
          path = path(directory, session_id),
-         :ok <- create_private(path),
+         :ok <- Record.create_private(path),
          {:ok, %File.Stat{size: size_before}} <- File.stat(path),
          {:ok, device} <- File.open(path, [:append, :binary]) do
       outcome = write_record(device, event)
@@ -112,36 +109,12 @@ defmodule Mead.Session.Store do
     end
   end
 
-  # The file exists, empty and private, before any record is written to it, so the content is
-  # never readable by anyone else, not even for the moment between a write and a later chmod.
-  defp create_private(path) do
-    if File.exists?(path) do
-      :ok
-    else
-      with :ok <- File.touch(path), do: File.chmod(path, 0o600)
-    end
-  end
-
   @doc false
   @spec rollback(Path.t(), non_neg_integer()) :: :ok | {:error, term()}
-  def rollback(path, size) do
-    with {:ok, device} <- :file.open(path, [:read, :write, :binary]) do
-      result =
-        with {:ok, _position} <- :file.position(device, size), do: :file.truncate(device)
-
-      :file.close(device)
-      result
-    end
-  end
+  defdelegate rollback(path, size), to: Record, as: :truncate
 
   defp write_record(device, event) do
-    with :ok <- IO.binwrite(device, encode(event)), do: :file.sync(device)
-  end
-
-  defp encode(event) do
-    payload = :erlang.term_to_binary(event)
-    size = byte_size(payload)
-    <<size::32, :erlang.crc32(<<size::32>>)::32, :erlang.crc32(payload)::32, payload::binary>>
+    with :ok <- IO.binwrite(device, Record.encode(event)), do: :file.sync(device)
   end
 
   @doc "Returns the turns of a session in chronological order, without touching the file."
@@ -150,7 +123,7 @@ defmodule Mead.Session.Store do
   def load(directory, session_id) do
     with :ok <- valid_or_missing(session_id),
          {:ok, binary} <- read(path(directory, session_id)),
-         {:ok, turns, _valid_size} <- replay(binary, 0, [], session_id) do
+         {:ok, turns, _valid_size} <- replay(binary, session_id) do
       {:ok, turns}
     end
   end
@@ -165,7 +138,7 @@ defmodule Mead.Session.Store do
     with :ok <- valid_or_missing(session_id),
          path = path(directory, session_id),
          {:ok, binary} <- read(path),
-         {:ok, turns, valid_size} <- replay(binary, 0, [], session_id),
+         {:ok, turns, valid_size} <- replay(binary, session_id),
          :ok <- cut_tail(path, valid_size, byte_size(binary)) do
       {:ok, turns}
     end
@@ -192,64 +165,35 @@ defmodule Mead.Session.Store do
     end
   end
 
-  defp replay(<<>>, offset, turns, _session_id), do: {:ok, Enum.reverse(turns), offset}
-
-  defp replay(
-         <<size::32, header_checksum::32, checksum::32, rest::binary>>,
-         offset,
-         turns,
-         session_id
-       ) do
-    cond do
-      :erlang.crc32(<<size::32>>) != header_checksum ->
-        {:error, :corrupt_history}
-
-      byte_size(rest) < size ->
-        torn_tail(turns, offset, session_id)
-
-      true ->
-        <<payload::binary-size(^size), remaining::binary>> = rest
-
-        replay_record(
-          payload,
-          checksum,
-          remaining,
-          offset + @header_size + size,
-          turns,
-          session_id
+  defp replay(binary, session_id) do
+    with {:ok, events, valid_size, tail} <- Record.scan(binary),
+         {:ok, turns} <- apply_events(events) do
+      if tail == :torn do
+        Logger.warning(
+          "dropped an incomplete last record of the history of session #{session_id}"
         )
+      end
+
+      {:ok, turns, valid_size}
+    else
+      {:error, :corrupt} -> {:error, :corrupt_history}
+      {:error, :corrupt_history} = error -> error
     end
   end
 
-  defp replay(_incomplete_header, offset, turns, session_id),
-    do: torn_tail(turns, offset, session_id)
-
-  defp replay_record(payload, checksum, remaining, next_offset, turns, session_id) do
-    cond do
-      :erlang.crc32(payload) == checksum ->
-        with {:ok, event} <- decode(payload),
-             {:ok, turns} <- apply_event(event, turns) do
-          replay(remaining, next_offset, turns, session_id)
-        end
-
-      remaining == <<>> ->
-        torn_tail(turns, next_offset - @header_size - byte_size(payload), session_id)
-
-      true ->
-        {:error, :corrupt_history}
-    end
+  defp apply_events(events) do
+    events
+    |> Enum.reduce_while({:ok, []}, fn event, {:ok, turns} ->
+      case apply_event(event, turns) do
+        {:ok, turns} -> {:cont, {:ok, turns}}
+        {:error, _reason} = error -> {:halt, error}
+      end
+    end)
+    |> chronological()
   end
 
-  defp torn_tail(turns, valid_size, session_id) do
-    Logger.warning("dropped an incomplete last record of the history of session #{session_id}")
-    {:ok, Enum.reverse(turns), valid_size}
-  end
-
-  defp decode(payload) do
-    {:ok, :erlang.binary_to_term(payload)}
-  rescue
-    ArgumentError -> {:error, :corrupt_history}
-  end
+  defp chronological({:ok, turns}), do: {:ok, Enum.reverse(turns)}
+  defp chronological({:error, _reason} = error), do: error
 
   defp apply_event({:append, %Turn{} = turn}, turns), do: {:ok, [turn | turns]}
 
@@ -330,7 +274,7 @@ defmodule Mead.Session.Store do
           | {:error, :not_found | {:persistence, term()}}
   def compact(directory, session_id, turns) do
     with {:ok, bytes_before} <- size(directory, session_id) do
-      canonical = turns |> Enum.map(&encode({:append, &1})) |> IO.iodata_to_binary()
+      canonical = turns |> Enum.map(&Record.encode({:append, &1})) |> IO.iodata_to_binary()
       bytes_after = byte_size(canonical)
 
       if bytes_after < bytes_before do
@@ -347,11 +291,11 @@ defmodule Mead.Session.Store do
     temporary = path <> ".tmp"
 
     result =
-      with :ok <- remove_leftover(temporary),
-           :ok <- create_private(temporary),
-           :ok <- write_synced(temporary, canonical),
+      with :ok <- Record.remove_leftover(temporary),
+           :ok <- Record.create_private(temporary),
+           :ok <- Record.write_synced(temporary, canonical),
            :ok <- File.rename(temporary, path) do
-        sync_directory(directory)
+        Record.sync_directory(directory)
       end
 
     File.rm(temporary)
@@ -360,33 +304,6 @@ defmodule Mead.Session.Store do
       :ok -> :ok
       {:error, reason} -> {:error, {:persistence, reason}}
     end
-  end
-
-  defp remove_leftover(temporary) do
-    case File.rm(temporary) do
-      :ok -> :ok
-      {:error, :enoent} -> :ok
-      {:error, reason} -> {:error, reason}
-    end
-  end
-
-  defp write_synced(path, binary) do
-    with {:ok, device} <- :file.open(path, [:write, :binary]) do
-      result = with :ok <- :file.write(device, binary), do: :file.sync(device)
-      :file.close(device)
-      result
-    end
-  end
-
-  # Syncing the directory makes the new name durable. Not every platform lets Erlang open a
-  # directory, so a refusal here is not a failure: the rename has already happened.
-  defp sync_directory(directory) do
-    with {:ok, device} <- :file.open(directory, [:read, :raw]) do
-      :file.sync(device)
-      :file.close(device)
-    end
-
-    :ok
   end
 
   @doc """
@@ -398,8 +315,8 @@ defmodule Mead.Session.Store do
     if valid_session_id?(session_id) do
       log = path(directory, session_id)
 
-      with :ok <- remove_leftover(log <> ".tmp") do
-        remove_leftover(log)
+      with :ok <- Record.remove_leftover(log <> ".tmp") do
+        Record.remove_leftover(log)
       end
     else
       :ok
