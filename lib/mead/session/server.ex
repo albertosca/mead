@@ -18,6 +18,8 @@ defmodule Mead.Session.Server do
 
   use GenServer
 
+  require Logger
+
   alias Mead.Session
   alias Mead.Session.History
   alias Mead.Session.Turn
@@ -38,7 +40,7 @@ defmodule Mead.Session.Server do
     Process.flag(:trap_exit, true)
 
     session_id = Keyword.fetch!(options, :session_id)
-    History.mark_interrupted(session_id)
+    record(History.mark_interrupted(session_id), session_id)
 
     state = %{
       session_id: session_id,
@@ -61,16 +63,20 @@ defmodule Mead.Session.Server do
     history = History.all(state.session_id)
     handler_options = Keyword.put(options, :session_id, state.session_id)
 
-    History.append(state.session_id, Turn.start(input))
+    case History.append(state.session_id, Turn.start(input)) do
+      :ok ->
+        task =
+          Task.Supervisor.async(Mead.TurnSupervisor, fn ->
+            handler.handle_turn(history, input, handler_options)
+          end)
 
-    task =
-      Task.Supervisor.async(Mead.TurnSupervisor, fn ->
-        handler.handle_turn(history, input, handler_options)
-      end)
+        timer = Process.send_after(self(), {:turn_timeout, task.ref}, state.turn_timeout)
 
-    timer = Process.send_after(self(), {:turn_timeout, task.ref}, state.turn_timeout)
+        {:noreply, %{state | running: %{from: from, task: task, timer: timer}}}
 
-    {:noreply, %{state | running: %{from: from, task: task, timer: timer}}}
+      {:error, _reason} = error ->
+        {:reply, error, state}
+    end
   end
 
   @impl true
@@ -125,10 +131,22 @@ defmodule Mead.Session.Server do
     %{from: from, timer: timer} = state.running
 
     Process.cancel_timer(timer)
-    History.update_last(state.session_id, &Turn.finish(&1, status, output))
+
+    record(
+      History.update_last(state.session_id, &Turn.finish(&1, status, output)),
+      state.session_id
+    )
+
     GenServer.reply(from, reply_for(outcome))
 
     {:noreply, %{state | running: nil}}
+  end
+
+  # The caller already has the answer, so a failed write is logged and never replaces the reply.
+  defp record(:ok, _session_id), do: :ok
+
+  defp record({:error, reason}, session_id) do
+    Logger.error("could not record the history of session #{session_id}: #{inspect(reason)}")
   end
 
   defp reply_for({:ok, output}), do: {:ok, output}
