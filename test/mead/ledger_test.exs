@@ -10,7 +10,7 @@ defmodule Mead.LedgerTest do
   setup do
     name = :"ledger_#{System.unique_integer([:positive])}"
     event = [:mead_test, name]
-    start_supervised!({Ledger, name: name, event: event})
+    start_supervised!({Ledger, name: name, event: event, directory: nil})
 
     %{ledger: name, event: event}
   end
@@ -232,7 +232,7 @@ defmodule Mead.LedgerTest do
     test "a supervised ledger that is killed comes back with one handler that counts" do
       name = :"restarted_ledger_#{System.unique_integer([:positive])}"
       event = [:mead_test, name]
-      first_pid = start_supervised!({Ledger, name: name, event: event})
+      first_pid = start_supervised!({Ledger, name: name, event: event, directory: nil})
       reference = Process.monitor(first_pid)
       Process.exit(first_pid, :kill)
       assert_receive {:DOWN, ^reference, :process, ^first_pid, :killed}

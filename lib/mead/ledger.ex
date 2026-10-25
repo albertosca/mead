@@ -1,26 +1,35 @@
 defmodule Mead.Ledger do
   @moduledoc """
-  In-memory ledger of what the router sends to providers.
+  Ledger of what the router sends to providers, kept in memory and journaled to disk.
 
-  It listens to `[:mead, :router, :route]` and keeps, with no disk behind it:
+  It listens to `[:mead, :router, :route]` and keeps:
 
-    * a counter row per session, dropped by `forget/2` when the session is stopped;
+    * a counter row per session, dropped by `forget/2` when the session is deleted;
     * a counter row per `{route, provider}`;
-    * a ring of the last 100 turns.
+    * a ring of the last 100 turns;
+    * a count of the events it could not read.
 
-  The process only owns the two public ETS tables, so they live as long as it does. The
-  `:telemetry` handler writes to them in the process that emitted the event, which keeps the
-  ledger off the critical path of every conversation and leaves no mailbox to grow under load.
-  Because `:telemetry` detaches a handler that raises, the handler never raises: an event it cannot
-  read is counted as `dropped`.
+  The process owns the two public ETS tables, so they live as long as it does. The `:telemetry` handler writes to them in the process that emitted the event, which keeps the ledger off the critical path of every conversation. Because `:telemetry` detaches a handler that raises, the handler never raises: an event it cannot read is counted as `dropped`.
+
+  With a storage directory (`config :mead, :storage, directory: ...`, or the `:directory` option) the handler also casts every event to the ledger, which appends it to `ledger.journal` (`Mead.Ledger.JournalFile`) in batches of up to 100 events or 50 milliseconds, with one sync per batch, and again when it stops. A turn never waits for the disk. At boot the ledger replays the journal into the tables before it attaches the handler. A crash of the whole VM loses the events still waiting for the next batch. Without a directory the ledger is memory only and receives no casts.
 
   A counter row is `{key, turns, failures, input_tokens, output_tokens, duration_ms}`.
   """
 
   use GenServer
 
+  require Logger
+
+  alias Mead.Ledger.Journal
+  alias Mead.Ledger.JournalFile
+  alias Mead.Session.Store
+
   @default_event [:mead, :router, :route]
   @ring_size 100
+  @flush_events 100
+  @flush_after_ms 50
+  @retry_after_ms 1_000
+  @pending_limit 10_000
 
   @doc """
   Starts the ledger.
@@ -30,6 +39,8 @@ defmodule Mead.Ledger do
     * `:name` - registered name; defaults to `Mead.Ledger`.
     * `:event` - the telemetry event to listen to; defaults to `[:mead, :router, :route]`. Tests
       give each ledger its own event so they do not see each other's turns.
+    * `:directory` - where the journal lives, or `nil` for a ledger that is memory only; defaults
+      to `Mead.Session.Store.directory/0`.
   """
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(options \\ []) do
@@ -96,10 +107,19 @@ defmodule Mead.Ledger do
   @doc "Forgets the aggregate of a session; the route totals keep what the session added."
   @spec forget(String.t(), GenServer.server()) :: :ok
   def forget(session_id, ledger \\ __MODULE__) do
-    %{counters: counters} = tables(ledger)
+    %{counters: counters} = configuration = tables(ledger)
     :ets.delete(counters, {:session, session_id})
+    journal(configuration, {:forget, session_id})
     :ok
   end
+
+  @doc """
+  Writes the events that are pending now and returns `:ok`, or the error of the write.
+
+  The ledger does this by itself within 50 milliseconds; this is for the caller that needs the journal to be current, such as a test.
+  """
+  @spec flush(GenServer.server()) :: :ok | {:error, term()}
+  def flush(ledger \\ __MODULE__), do: GenServer.call(ledger, :flush, 30_000)
 
   @impl true
   def init(options) do
@@ -107,36 +127,139 @@ defmodule Mead.Ledger do
 
     event = Keyword.get(options, :event, @default_event)
     name = Keyword.get(options, :name, __MODULE__)
+    directory = Keyword.get_lazy(options, :directory, &Store.directory/0)
     handler_id = {__MODULE__, name}
 
-    tables = %{
-      counters: :ets.new(:mead_ledger_counters, [:set, :public, write_concurrency: true]),
-      ring: :ets.new(:mead_ledger_ring, [:set, :public, write_concurrency: true])
-    }
+    counters = :ets.new(:mead_ledger_counters, [:set, :public, write_concurrency: true])
+    ring = :ets.new(:mead_ledger_ring, [:set, :public, write_concurrency: true])
+    if directory, do: restore(counters, ring, JournalFile.load(directory))
+
+    configuration = %{counters: counters, ring: ring, ledger: name, journal: directory != nil}
 
     # A ledger that was killed leaves its handler attached to dead tables, so attach replaces it.
     :telemetry.detach(handler_id)
-    :ok = :telemetry.attach(handler_id, event, &__MODULE__.handle_event/4, tables)
+    :ok = :telemetry.attach(handler_id, event, &__MODULE__.handle_event/4, configuration)
 
-    {:ok, %{tables: tables, handler_id: handler_id}}
+    {:ok,
+     %{
+       tables: configuration,
+       handler_id: handler_id,
+       directory: directory,
+       pending: [],
+       pending_count: 0,
+       timer: nil,
+       failing: false
+     }}
+  end
+
+  # The tables are loaded before the handler is attached, so no live event can interleave with
+  # the replay. Sequences are renumbered from 1, which keeps the slot of each entry consistent
+  # with the counter the next live turn continues from.
+  defp restore(counters, ring, model) do
+    Enum.each(Journal.rows(model), &:ets.insert(counters, &1))
+    if Journal.dropped(model) > 0, do: :ets.insert(counters, {:dropped, Journal.dropped(model)})
+
+    entries = Journal.ring_oldest_first(model)
+
+    entries
+    |> Enum.with_index(1)
+    |> Enum.each(fn {entry, sequence} ->
+      :ets.insert(ring, {rem(sequence - 1, @ring_size), sequence, entry})
+    end)
+
+    :ets.insert(counters, {:ring_index, length(entries)})
   end
 
   @impl true
   def handle_call(:tables, _from, state), do: {:reply, state.tables, state}
 
+  def handle_call(:flush, _from, state) do
+    {result, state} = flush_pending(state)
+    {:reply, result, state}
+  end
+
+  @impl true
+  def handle_cast({:journal, _event}, %{directory: nil} = state), do: {:noreply, state}
+
+  def handle_cast({:journal, event}, state) do
+    state = enqueue(state, event)
+
+    if state.pending_count >= @flush_events and not state.failing do
+      {_result, state} = flush_pending(state)
+      {:noreply, state}
+    else
+      {:noreply, ensure_timer(state)}
+    end
+  end
+
+  @impl true
+  def handle_info({:flush, reference}, %{timer: reference} = state) do
+    {_result, state} = flush_pending(state)
+    {:noreply, state}
+  end
+
+  def handle_info(_message, state), do: {:noreply, state}
+
   @impl true
   def terminate(_reason, state) do
     :telemetry.detach(state.handler_id)
+    flush_pending(state)
     :ok
+  end
+
+  # The newest event is first. Past the limit the oldest are dropped, so a dead disk cannot grow
+  # the state of the ledger without bound.
+  defp enqueue(state, event) do
+    pending = [event | state.pending]
+    count = state.pending_count + 1
+
+    if count > @pending_limit do
+      %{state | pending: Enum.take(pending, @pending_limit), pending_count: @pending_limit}
+    else
+      %{state | pending: pending, pending_count: count}
+    end
+  end
+
+  defp ensure_timer(%{timer: nil} = state) do
+    delay = if state.failing, do: @retry_after_ms, else: @flush_after_ms
+    reference = make_ref()
+    Process.send_after(self(), {:flush, reference}, delay)
+    %{state | timer: reference}
+  end
+
+  defp ensure_timer(state), do: state
+
+  defp flush_pending(%{pending: []} = state), do: {:ok, %{state | timer: nil}}
+
+  defp flush_pending(state) do
+    state = %{state | timer: nil}
+
+    case JournalFile.append(state.directory, Enum.reverse(state.pending)) do
+      :ok ->
+        {:ok, %{state | pending: [], pending_count: 0, failing: false}}
+
+      {:error, reason} ->
+        unless state.failing do
+          Logger.warning("could not write the ledger journal: #{inspect(reason)}")
+        end
+
+        {{:error, reason}, ensure_timer(%{state | failing: true})}
+    end
   end
 
   @doc false
   # The telemetry handler. It runs in the process that emitted the event and must never raise,
   # because `:telemetry` would detach it for good.
-  def handle_event(_event, measurements, metadata, %{counters: counters, ring: ring}) do
+  def handle_event(_event, measurements, metadata, %{counters: counters, ring: ring} = config) do
     case normalize(measurements, metadata) do
-      {:ok, entry} -> record(counters, ring, entry)
-      :error -> :ets.update_counter(counters, :dropped, 1, {:dropped, 0})
+      {:ok, entry} ->
+        entry = Map.put(entry, :at, System.system_time(:millisecond))
+        record(counters, ring, entry)
+        journal(config, {:turn, entry})
+
+      :error ->
+        :ets.update_counter(counters, :dropped, 1, {:dropped, 0})
+        journal(config, :dropped)
     end
 
     :ok
@@ -145,6 +268,13 @@ defmodule Mead.Ledger do
   catch
     _kind, _reason -> :ok
   end
+
+  # A cast to a ledger that is not running is a no-op, so the handler stays safe. Without a
+  # storage directory nothing is cast and the mailbox stays empty.
+  defp journal(%{journal: true, ledger: ledger}, event),
+    do: GenServer.cast(ledger, {:journal, event})
+
+  defp journal(_configuration, _event), do: :ok
 
   defp normalize(
          %{input_tokens: input_tokens, output_tokens: output_tokens, duration: duration},
@@ -177,15 +307,7 @@ defmodule Mead.Ledger do
   defp normalize(_measurements, _metadata), do: :error
 
   defp record(counters, ring, entry) do
-    failures = if entry.status == :ok, do: 0, else: 1
-
-    operations = [
-      {2, 1},
-      {3, failures},
-      {4, entry.input_tokens},
-      {5, entry.output_tokens},
-      {6, entry.duration_ms}
-    ]
+    operations = Journal.operations(entry)
 
     if entry.session_id, do: bump(counters, {:session, entry.session_id}, operations)
     bump(counters, {:route, entry.route, entry.provider}, operations)
@@ -202,7 +324,7 @@ defmodule Mead.Ledger do
   defp write_ring(counters, ring, entry) do
     sequence = :ets.update_counter(counters, :ring_index, 1, {:ring_index, 0})
     slot = rem(sequence - 1, @ring_size)
-    :ets.insert(ring, {slot, sequence, Map.put(entry, :at, System.system_time(:millisecond))})
+    :ets.insert(ring, {slot, sequence, entry})
   end
 
   defp tables(ledger), do: GenServer.call(ledger, :tables)

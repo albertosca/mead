@@ -1,0 +1,247 @@
+defmodule Mead.LedgerJournalTest do
+  use ExUnit.Case, async: true
+
+  import ExUnit.CaptureLog
+  import Mead.TestHelpers
+
+  alias Mead.Ledger
+  alias Mead.Ledger.Journal
+  alias Mead.Ledger.JournalFile
+
+  @moduletag :tmp_dir
+
+  setup %{tmp_dir: directory} do
+    name = :"journal_ledger_#{System.unique_integer([:positive])}"
+    %{name: name, event: [:mead_test, name], directory: directory}
+  end
+
+  defp start_ledger(context, extra \\ []) do
+    options =
+      Keyword.merge(
+        [name: context.name, event: context.event, directory: context.directory],
+        extra
+      )
+
+    start_supervised!({Ledger, options}, id: context.name)
+  end
+
+  defp stop_ledger(context), do: stop_supervised!(context.name)
+
+  defp emit(context, overrides \\ %{}, measurement_overrides \\ %{}) do
+    metadata =
+      Map.merge(
+        %{
+          route: :cloud,
+          route_source: :classified,
+          provider: Mead.Test.FakeProvider,
+          status: :ok,
+          session_id: "session-a"
+        },
+        overrides
+      )
+
+    measurements =
+      Map.merge(
+        %{
+          duration: System.convert_time_unit(7, :millisecond, :native),
+          input_tokens: 5,
+          output_tokens: 3
+        },
+        measurement_overrides
+      )
+
+    :telemetry.execute(context.event, measurements, metadata)
+  end
+
+  defp snapshot(context) do
+    name = context.name
+
+    %{
+      totals: Ledger.totals(name),
+      routes: Ledger.route_totals(name),
+      recent: Ledger.recent(100, name),
+      sessions: Map.new(["session-a", "session-b"], &{&1, Ledger.session_totals(&1, name)})
+    }
+  end
+
+  defp journaled_turns(directory) do
+    {:ok, model, _size, _tail} = JournalFile.read(directory)
+
+    model
+    |> Journal.rows()
+    |> Enum.filter(&match?({{:route, _, _}, _, _, _, _, _}, &1))
+    |> Enum.map(&elem(&1, 1))
+    |> Enum.sum()
+  end
+
+  defp record_some_turns(context) do
+    emit(context)
+    emit(context, %{status: :error, route: :local, provider: Mead.Test.OtherProvider})
+    emit(context, %{session_id: "session-b"}, %{input_tokens: 11})
+    emit(context, %{}, %{input_tokens: -1})
+  end
+
+  describe "a restart" do
+    test "restores every number, and the ring in the same order", context do
+      start_ledger(context)
+      record_some_turns(context)
+      before_restart = snapshot(context)
+      assert before_restart.totals.dropped == 1
+      assert before_restart.totals.turns == 3
+
+      stop_ledger(context)
+      start_ledger(context)
+
+      assert snapshot(context) == before_restart
+    end
+
+    test "keeps counting on top of what it restored", context do
+      start_ledger(context)
+      emit(context)
+      stop_ledger(context)
+
+      start_ledger(context)
+      emit(context)
+
+      assert {:ok, %{turns: 2, input_tokens: 10}} =
+               Ledger.session_totals("session-a", context.name)
+    end
+
+    test "a forgotten session stays forgotten and the route totals stay", context do
+      start_ledger(context)
+      emit(context)
+      emit(context, %{session_id: "session-b"})
+      assert :ok = Ledger.forget("session-a", context.name)
+      stop_ledger(context)
+
+      start_ledger(context)
+
+      assert Ledger.session_totals("session-a", context.name) == {:error, :not_found}
+      assert {:ok, %{turns: 1}} = Ledger.session_totals("session-b", context.name)
+      assert Ledger.totals(context.name).turns == 2
+    end
+
+    test "drops a torn tail with a warning and the next restart still reads the file", context do
+      start_ledger(context)
+      emit(context)
+      stop_ledger(context)
+      File.write!(JournalFile.path(context.directory), <<0, 0, 0, 40, 1>>, [:append])
+
+      log = capture_log(fn -> start_ledger(context) end)
+      assert log =~ "dropped an incomplete last record of the ledger journal"
+      assert {:ok, %{turns: 1}} = Ledger.session_totals("session-a", context.name)
+
+      emit(context)
+      stop_ledger(context)
+      start_ledger(context)
+
+      assert {:ok, %{turns: 2}} = Ledger.session_totals("session-a", context.name)
+    end
+
+    test "sets a damaged journal aside, starts empty and keeps persisting", context do
+      start_ledger(context)
+      emit(context)
+      emit(context)
+      stop_ledger(context)
+      path = JournalFile.path(context.directory)
+      <<head::binary-size(13), byte, tail::binary>> = File.read!(path)
+      File.write!(path, <<head::binary, Bitwise.bxor(byte, 255), tail::binary>>)
+
+      log = capture_log(fn -> start_ledger(context) end)
+
+      assert log =~ "moved to ledger.journal.corrupt"
+      assert File.exists?(path <> ".corrupt")
+      assert Ledger.totals(context.name).turns == 0
+
+      emit(context)
+      stop_ledger(context)
+      start_ledger(context)
+
+      assert {:ok, %{turns: 1}} = Ledger.session_totals("session-a", context.name)
+    end
+  end
+
+  describe "the write path" do
+    test "a full batch is written without waiting for the timer", context do
+      start_ledger(context)
+      for _index <- 1..100, do: emit(context)
+
+      wait_until(fn -> journaled_turns(context.directory) == 100 end)
+    end
+
+    test "a single event is written within the flush delay", context do
+      start_ledger(context)
+      emit(context)
+
+      wait_until(fn -> journaled_turns(context.directory) == 1 end)
+    end
+
+    test "flush/1 writes what is pending now", context do
+      start_ledger(context)
+      emit(context)
+      emit(context)
+      :sys.get_state(context.name)
+
+      assert Ledger.flush(context.name) == :ok
+      assert journaled_turns(context.directory) == 2
+    end
+
+    test "the handler does not wait for the ledger", context do
+      start_ledger(context)
+      %{tables: %{counters: counters}} = :sys.get_state(context.name)
+      :sys.suspend(context.name)
+
+      assert Task.async(fn -> emit(context) end) |> Task.await(2_000) == :ok
+
+      assert [{{:session, "session-a"}, 1, 0, 5, 3, 7}] =
+               :ets.lookup(counters, {:session, "session-a"})
+
+      :sys.resume(context.name)
+      assert Ledger.flush(context.name) == :ok
+      assert journaled_turns(context.directory) == 1
+    end
+
+    test "a write that fails is logged once, counted anyway, and retried until it works",
+         context do
+      File.mkdir_p!(JournalFile.path(context.directory))
+      capture_log(fn -> start_ledger(context) end)
+
+      log =
+        capture_log(fn ->
+          emit(context)
+          assert {:error, :eisdir} = Ledger.flush(context.name)
+          emit(context)
+          assert {:error, :eisdir} = Ledger.flush(context.name)
+        end)
+
+      assert length(String.split(log, "could not write the ledger journal")) == 2
+      assert {:ok, %{turns: 2}} = Ledger.session_totals("session-a", context.name)
+
+      File.rm_rf!(JournalFile.path(context.directory))
+      assert Ledger.flush(context.name) == :ok
+      assert journaled_turns(context.directory) == 2
+    end
+
+    test "events still pending when the ledger stops are written", context do
+      start_ledger(context)
+      emit(context)
+      stop_ledger(context)
+
+      assert journaled_turns(context.directory) == 1
+    end
+  end
+
+  describe "without a directory" do
+    test "nothing is cast, nothing is written", context do
+      pid = start_ledger(context, directory: nil)
+      emit(context)
+      emit(context)
+
+      assert Process.info(pid, :message_queue_len) == {:message_queue_len, 0}
+      assert :sys.get_state(pid).pending == []
+      assert Ledger.flush(context.name) == :ok
+      assert File.ls!(context.directory) == []
+      assert Ledger.totals(context.name).turns == 2
+    end
+  end
+end
