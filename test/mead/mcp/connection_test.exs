@@ -373,7 +373,7 @@ defmodule Mead.MCP.ConnectionTest do
     end
 
     test "a refresh the server never answers drops the stale tools and reconnects", context do
-      start_connection(context, handshake_timeout: @short_timeout)
+      start_connection(context, refresh_timeout: @short_timeout)
       transport = started_transport()
       FakeTransport.complete_handshake(transport, [raw_tool("a")])
       wait_until(fn -> entry_names(context.catalog) == ["a"] end)
@@ -392,7 +392,7 @@ defmodule Mead.MCP.ConnectionTest do
     end
 
     test "an answered refresh is not mistaken for a stuck one", context do
-      start_connection(context, handshake_timeout: @short_timeout)
+      start_connection(context, refresh_timeout: @short_timeout)
       transport = started_transport()
       FakeTransport.complete_handshake(transport, [raw_tool("a")])
       wait_until(fn -> entry_names(context.catalog) == ["a"] end)
@@ -406,7 +406,7 @@ defmodule Mead.MCP.ConnectionTest do
       FakeTransport.reply(transport, list, %{"tools" => [raw_tool("b")]})
       wait_until(fn -> entry_names(context.catalog) == ["b"] end)
 
-      # Longer than the handshake timeout the refresh was started under.
+      # Longer than the refresh timeout the refresh was started under.
       Process.sleep(@short_timeout + 100)
 
       assert entry_names(context.catalog) == ["b"]

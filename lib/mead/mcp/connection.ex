@@ -6,7 +6,8 @@ defmodule Mead.MCP.Connection do
   ## Lifecycle
 
   `:disconnected` -> `:initializing` -> `:listing` -> `:ready`. When the transport cannot start,
-  closes, dies, or the handshake does not finish in `:handshake_timeout`, the connection does not
+  closes, dies, the handshake does not finish in `:handshake_timeout`, or a tool refresh does not
+  finish in `:refresh_timeout` (which defaults to the handshake timeout), the connection does not
   crash: it removes its tools from the catalog, fails every pending caller with
   `{:error, :connection_lost}`, stops the transport, and tries again after the next delay of
   `:reconnect_delays` (the last one repeats). A missing command or a server that is down therefore
@@ -61,6 +62,7 @@ defmodule Mead.MCP.Connection do
   def init(options) do
     Process.flag(:trap_exit, true)
     {transport_module, transport_options} = Keyword.fetch!(options, :transport)
+    handshake_timeout = Keyword.get(options, :handshake_timeout, @default_handshake_timeout)
 
     state = %{
       server: Keyword.fetch!(options, :server),
@@ -68,7 +70,8 @@ defmodule Mead.MCP.Connection do
       transport_module: transport_module,
       transport_options: transport_options,
       reconnect_delays: Keyword.get(options, :reconnect_delays, @default_reconnect_delays),
-      handshake_timeout: Keyword.get(options, :handshake_timeout, @default_handshake_timeout),
+      handshake_timeout: handshake_timeout,
+      refresh_timeout: Keyword.get(options, :refresh_timeout, handshake_timeout),
       transport: nil,
       phase: :disconnected,
       attempt: 0,
@@ -293,12 +296,12 @@ defmodule Mead.MCP.Connection do
 
   defp handle_decoded(_ignored, state), do: state
 
-  # The handshake has its own timeout; a refresh needs one too, because a server that never answers
-  # `tools/list` would otherwise leave the catalog stale until the transport happens to drop.
-  # Giving up reconnects, which lists the tools again from scratch.
+  # The handshake has its own timeout; a refresh needs one too (`:refresh_timeout`), because a
+  # server that never answers `tools/list` would otherwise leave the catalog stale until the
+  # transport happens to drop. Giving up reconnects, which lists the tools again from scratch.
   defp start_refresh(state) do
     reference = make_ref()
-    Process.send_after(self(), {:refresh_timeout, reference}, state.handshake_timeout)
+    Process.send_after(self(), {:refresh_timeout, reference}, state.refresh_timeout)
 
     start_listing(%{state | tools: [], refresh_reference: reference}, nil, 1)
   end
