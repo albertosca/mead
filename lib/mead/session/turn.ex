@@ -26,4 +26,11 @@ defmodule Mead.Session.Turn do
   def finish(%__MODULE__{} = turn, status, output \\ nil) do
     %{turn | status: status, output: output}
   end
+
+  @doc "Marks a turn that was still in progress as interrupted; any other turn is unchanged."
+  @spec interrupt(t()) :: t()
+  def interrupt(%__MODULE__{status: :in_progress} = turn),
+    do: finish(turn, :interrupted, turn.output)
+
+  def interrupt(%__MODULE__{} = turn), do: turn
 end
