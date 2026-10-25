@@ -23,4 +23,14 @@ defmodule Mead.Session.PoolTest do
     :ok = DynamicSupervisor.terminate_child(pool, first)
     assert {:ok, _third} = Pool.start_session(session_options(), pool)
   end
+
+  test "the id is free again the moment stop_session returns" do
+    for _attempt <- 1..300 do
+      {:ok, session_id} = Mead.start_session()
+
+      assert Pool.stop_session(session_id) == :ok
+      assert Mead.Session.whereis(session_id, :supervisor) == nil
+      assert Mead.Session.whereis(session_id, :server) == nil
+    end
+  end
 end

@@ -12,6 +12,8 @@ defmodule Mead.Session.Pool do
   alias Mead.Session
 
   @default_maximum_sessions 1_000
+  @roles [:supervisor, :server, :history]
+  @release_attempts 1_000
 
   @spec start_link(keyword()) :: Supervisor.on_start()
   def start_link(options \\ []) do
@@ -41,7 +43,26 @@ defmodule Mead.Session.Pool do
   def stop_session(session_id) do
     case Session.whereis(session_id, :supervisor) do
       nil -> {:error, :not_found}
-      pid -> DynamicSupervisor.terminate_child(__MODULE__, pid)
+      pid -> terminate(pid, session_id)
+    end
+  end
+
+  # The registry drops a dead process asynchronously, so a stop followed at once by a resume or a
+  # start of the same id could still find the old entry. Wait until the id is free.
+  defp terminate(pid, session_id) do
+    with :ok <- DynamicSupervisor.terminate_child(__MODULE__, pid) do
+      await_released(session_id, @release_attempts)
+    end
+  end
+
+  defp await_released(_session_id, 0), do: :ok
+
+  defp await_released(session_id, attempts) do
+    if Enum.any?(@roles, &Session.whereis(session_id, &1)) do
+      Process.sleep(1)
+      await_released(session_id, attempts - 1)
+    else
+      :ok
     end
   end
 end
