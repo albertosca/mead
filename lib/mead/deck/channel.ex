@@ -88,7 +88,7 @@ defmodule Mead.Deck.Channel do
          directory = Keyword.get_lazy(options, :storage_directory, &Store.directory/0),
          {:ok, log} <- open_log(directory, session_id),
          {:ok, state} <-
-           expire_dangling(%{
+           recover(%{
              session_id: session_id,
              configuration: configuration,
              log: log,
@@ -105,10 +105,74 @@ defmodule Mead.Deck.Channel do
              open_cards: %{},
              resolved: resolved_requests(log)
            }) do
-      {:ok, state}
+      {:ok, state, {:continue, :start_queue}}
     else
       {:error, reason} -> {:stop, reason}
     end
+  end
+
+  @impl GenServer
+  def handle_continue(:start_queue, state), do: continue(start_next_turn(state))
+
+  # What an earlier channel left in the log. Dangling requests are expired; a prompt whose turn has
+  # no closing metric (each turn ends with exactly one `tokens_out`, which carries its turn id) did
+  # not finish: the first of them was running when the channel died and is reported as interrupted
+  # with its open tool cards closed, and the ones behind it are queued again.
+  defp recover(state) do
+    with {:ok, state} <- expire_dangling(state) do
+      events = EventLog.read_after(state.log, 0)
+
+      finished =
+        for %{
+              "type" => "metric.updated",
+              "payload" => %{"key" => "tokens_out", "turn_id" => turn_id}
+            } <-
+              events,
+            into: MapSet.new(),
+            do: turn_id
+
+      unfinished =
+        for %{"type" => "prompt.accepted", "sequence" => sequence, "payload" => %{"text" => text}} <-
+              events,
+            not MapSet.member?(finished, "turn-#{sequence}"),
+            do: {sequence, text}
+
+      interrupt(state, events, unfinished)
+    end
+  end
+
+  defp interrupt(state, _events, []), do: {:ok, state}
+
+  defp interrupt(state, events, [{sequence, _text} | queued]) do
+    turn_id = "turn-#{sequence}"
+    state = %{state | open_cards: open_cards_in(events)}
+
+    with {:ok, state} <- close_open_cards(state),
+         {:ok, state} <-
+           emit_all(
+             state,
+             [{"turn.failed", %{"turn_id" => turn_id, "reason" => "interrupted"}}] ++
+               metric_events(state.session_id, turn_id)
+           ) do
+      {:ok, %{state | queue: :queue.from_list(queued)}}
+    else
+      {:error, reason} -> {:error, {:event_log, reason}}
+    end
+  end
+
+  # The tool cards of the log whose last update is not a final status.
+  defp open_cards_in(events) do
+    Enum.reduce(events, %{}, fn
+      %{"type" => "tool_call.updated", "payload" => payload}, open ->
+        if payload["status"] in ["completed", "failed"] do
+          Map.delete(open, payload["tool_call_id"])
+        else
+          Map.put(open, payload["tool_call_id"], {payload["turn_id"], payload["title"]})
+        end
+
+      _other, open ->
+        open
+    end)
   end
 
   defp resolved_requests(log) do
@@ -683,7 +747,7 @@ defmodule Mead.Deck.Channel do
   defp finish_turn(%{running: %{turn_id: turn_id}} = state, result) do
     with {:ok, state} <- close_open_cards(state),
          events = text_events(state.running, turn_id, result) ++ failure_events(turn_id, result),
-         events = events ++ metric_events(state.session_id),
+         events = events ++ metric_events(state.session_id, turn_id),
          {:ok, state} <- emit_all(%{state | running: nil}, events) do
       continue(start_next_turn(state))
     else
@@ -753,7 +817,7 @@ defmodule Mead.Deck.Channel do
 
   defp text_events(_running, _turn_id, _result), do: []
 
-  defp metric_events(session_id) do
+  defp metric_events(session_id, turn_id) do
     totals =
       case Mead.session_usage(session_id) do
         {:ok, totals} -> totals
@@ -764,6 +828,7 @@ defmodule Mead.Deck.Channel do
       {"metric.updated",
        %{
          "key" => "tokens_in",
+         "turn_id" => turn_id,
          "label" => "Tokens in",
          "value" => totals.input_tokens,
          "unit" => "tokens"
@@ -771,6 +836,7 @@ defmodule Mead.Deck.Channel do
       {"metric.updated",
        %{
          "key" => "tokens_out",
+         "turn_id" => turn_id,
          "label" => "Tokens out",
          "value" => totals.output_tokens,
          "unit" => "tokens"

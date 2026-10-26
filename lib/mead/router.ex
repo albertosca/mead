@@ -353,8 +353,13 @@ defmodule Mead.Router do
   # The tool runs in its own process so that whoever holds the pid (registered with the
   # interaction) can cancel it by killing it. Only that kill reads as a cancellation.
   defp run_cancellable(context, module, interaction_context, tool_use) do
+    owner = self()
+
     task =
-      Task.Supervisor.async_nolink(Mead.TurnSupervisor, fn -> run_tool(context, tool_use) end)
+      Task.Supervisor.async_nolink(Mead.TurnSupervisor, fn ->
+        watch_owner(owner)
+        run_tool(context, tool_use)
+      end)
 
     module.register_call(interaction_context, tool_use.id, task.pid)
 
@@ -376,6 +381,23 @@ defmodule Mead.Router do
       nil ->
         {:finished, error_result(tool_use, "The tool call failed: #{describe(:timeout)}.")}
     end
+  end
+
+  # The task is not linked to the router, so a router that dies (its turn timed out, or it was
+  # killed) would leave the tool running with nobody to wait for it. The watcher ends the tool
+  # when the router goes, and ends itself when the tool does.
+  defp watch_owner(owner) do
+    tool = self()
+
+    spawn(fn ->
+      owner_monitor = Process.monitor(owner)
+      tool_monitor = Process.monitor(tool)
+
+      receive do
+        {:DOWN, ^owner_monitor, :process, _pid, _reason} -> Process.exit(tool, :kill)
+        {:DOWN, ^tool_monitor, :process, _pid, _reason} -> :ok
+      end
+    end)
   end
 
   defp tool_update(%{id: id, name: name}, status, overrides) do
