@@ -476,10 +476,12 @@ defmodule Mead.LedgerJournalTest do
   test "the published tables are erased only after the shutdown flush", context do
     start_ledger(context)
     ledger = Process.whereis(context.name)
-    emit(context)
 
-    :erlang.trace_pattern({JournalFile, :append, 2}, true, [:local])
-    :erlang.trace_pattern({:persistent_term, :erase, 1}, true, [:global])
+    # A pattern on a module that is not loaded yet matches nothing, and right after a recompile
+    # the journal file module may not have been called by anyone so far.
+    {:module, JournalFile} = Code.ensure_loaded(JournalFile)
+    1 = :erlang.trace_pattern({JournalFile, :append, 2}, true, [:local])
+    1 = :erlang.trace_pattern({:persistent_term, :erase, 1}, true, [:global])
     :erlang.trace(ledger, true, [:call])
 
     on_exit(fn ->
@@ -487,6 +489,9 @@ defmodule Mead.LedgerJournalTest do
       :erlang.trace_pattern({:persistent_term, :erase, 1}, false, [:global])
     end)
 
+    # Traced before the event, so a batch the 50 ms timer flushes on a slow machine is seen too:
+    # either way the one append comes before the erase.
+    emit(context)
     stop_ledger(context)
 
     wait_until(fn ->
