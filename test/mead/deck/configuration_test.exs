@@ -49,7 +49,8 @@ defmodule Mead.Deck.ConfigurationTest do
             :permission_timeout_ms,
             :heartbeat_ms,
             :resume_deadline_ms,
-            :queue_limit
+            :queue_limit,
+            :event_log_limit
           ],
           value <- [0, -1, 1.5, "10", nil, :infinity] do
         assert {:error, message} = Configuration.load([{:token, @token}, {setting, value}])

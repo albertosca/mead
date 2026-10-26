@@ -748,12 +748,29 @@ defmodule Mead.Deck.Channel do
     with {:ok, state} <- close_open_cards(state),
          events = text_events(state.running, turn_id, result) ++ failure_events(turn_id, result),
          events = events ++ metric_events(state.session_id, turn_id),
-         {:ok, state} <- emit_all(%{state | running: nil}, events) do
+         {:ok, state} <- emit_all(%{state | running: nil}, events),
+         {:ok, state} <- compact_when_idle(state) do
       continue(start_next_turn(state))
     else
       {:error, reason} -> stop_for_log_failure(reason, state)
     end
   end
+
+  # The log is cut only between turns with nothing queued: every request in the dropped part is
+  # resolved and every dropped prompt has its closing metric, so a later recovery loses nothing.
+  # Prompts older than the cut can be accepted again if a client resends their message id.
+  defp compact_when_idle(%{running: nil} = state) do
+    if :queue.is_empty(state.queue) do
+      case EventLog.compact(state.log, state.configuration.event_log_limit) do
+        {:ok, log} -> {:ok, %{state | log: log}}
+        {:error, reason} -> {:error, {:event_log, reason}}
+      end
+    else
+      {:ok, state}
+    end
+  end
+
+  defp compact_when_idle(state), do: {:ok, state}
 
   # A tool still running when its turn ends (timeout, crash) is killed and its card is closed as
   # failed, so no card stays "running" and no cancel waits for a confirmation that never comes.
@@ -874,6 +891,7 @@ defmodule Mead.Deck.Channel do
       %{
         "protocol_version" => @protocol_version,
         "current_sequence" => current_sequence,
+        "first_sequence" => EventLog.first_sequence(state.log),
         "permission_policy_level" => Events.policy_level_name(state.policy_level)
       },
       DateTime.utc_now()

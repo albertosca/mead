@@ -175,4 +175,74 @@ defmodule Mead.Deck.EventLogTest do
 
     assert File.ls!(directory) == []
   end
+
+  describe "compact/2" do
+    defp policy_event(sequence) do
+      %{event(sequence) | "type" => "policy.updated", "payload" => %{"level" => "allow_all"}}
+    end
+
+    test "a log within the limit is returned unchanged", %{tmp_dir: directory} do
+      {:ok, log} = EventLog.open(directory, @session_id)
+      log = append_all(log, [1, 2, 3])
+
+      assert {:ok, ^log} = EventLog.compact(log, 3)
+      assert EventLog.first_sequence(log) == 1
+    end
+
+    test "keeps the newest events and survives a reopen", %{tmp_dir: directory} do
+      {:ok, log} = EventLog.open(directory, @session_id)
+      log = append_all(log, 1..10)
+
+      assert {:ok, compacted} = EventLog.compact(log, 4)
+      assert Enum.map(EventLog.read_after(compacted, 0), & &1["sequence"]) == [7, 8, 9, 10]
+      assert EventLog.last_sequence(compacted) == 10
+      assert EventLog.count(compacted) == 4
+      assert EventLog.first_sequence(compacted) == 7
+      assert File.stat!(events_path(directory)).mode |> Bitwise.band(0o777) == 0o600
+
+      {:ok, reopened} = EventLog.open(directory, @session_id)
+      assert Enum.map(EventLog.read_after(reopened, 0), & &1["sequence"]) == [7, 8, 9, 10]
+      assert EventLog.first_sequence(reopened) == 7
+      assert {:ok, appended} = EventLog.append(reopened, event(11))
+      assert EventLog.count(appended) == 5
+    end
+
+    test "keeps the latest policy event that would otherwise be dropped", %{tmp_dir: directory} do
+      {:ok, log} = EventLog.open(directory, @session_id)
+      {:ok, log} = EventLog.append(log, policy_event(1))
+      log = append_all(log, 2..3)
+
+      {:ok, log} =
+        EventLog.append(log, %{policy_event(4) | "payload" => %{"level" => "ask_always"}})
+
+      log = append_all(log, 5..10)
+
+      assert {:ok, compacted} = EventLog.compact(log, 3)
+
+      assert Enum.map(EventLog.read_after(compacted, 0), & &1["sequence"]) == [4, 8, 9, 10]
+      assert EventLog.first_sequence(compacted) == 8
+      assert Enum.at(EventLog.read_after(compacted, 0), 0)["payload"]["level"] == "ask_always"
+    end
+
+    test "leaves no temporary file and the old log when the rewrite fails", %{tmp_dir: directory} do
+      {:ok, log} = EventLog.open(directory, @session_id)
+      log = append_all(log, 1..5)
+      File.mkdir_p!(events_path(directory) <> ".compact")
+
+      assert {:error, _reason} = EventLog.compact(log, 2)
+      assert EventLog.count(log) == 5
+      {:ok, reopened} = EventLog.open(directory, @session_id)
+      assert EventLog.last_sequence(reopened) == 5
+      assert length(EventLog.read_after(reopened, 0)) == 5
+    end
+
+    test "memory mode compacts without touching the disk", %{tmp_dir: directory} do
+      {:ok, log} = EventLog.open(nil, @session_id)
+      log = append_all(log, 1..6)
+
+      assert {:ok, compacted} = EventLog.compact(log, 2)
+      assert Enum.map(EventLog.read_after(compacted, 0), & &1["sequence"]) == [5, 6]
+      assert File.ls!(directory) == []
+    end
+  end
 end

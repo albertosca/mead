@@ -6,8 +6,9 @@ defmodule Mead.Deck.EventLog do
 
   The value is plain data: events are held in memory, newest first, so `read_after/2` never
   touches the disk, and every `append/2` opens the file, writes, syncs and closes it, the way
-  `Mead.Session.Store.append/3` does. The whole log is read on `open/2`; that is a documented
-  limit until the log gets rotation.
+  `Mead.Session.Store.append/3` does. The whole log is read on `open/2`. `compact/2` keeps it
+  bounded: the oldest events are dropped, except the latest `policy.updated`, which the channel
+  rebuilds its permission level from. `first_sequence/1` is where a replay can start.
 
   With a `nil` directory the log lives in memory only, for sessions that have no storage.
   Sequences must strictly increase; an event that does not carry a larger sequence than the last
@@ -17,12 +18,13 @@ defmodule Mead.Deck.EventLog do
   alias Mead.Session.Record
   alias Mead.Session.Store
 
-  defstruct [:path, events: [], last_sequence: 0]
+  defstruct [:path, events: [], last_sequence: 0, count: 0]
 
   @type t :: %__MODULE__{
           path: Path.t() | nil,
           events: [map()],
-          last_sequence: non_neg_integer()
+          last_sequence: non_neg_integer(),
+          count: non_neg_integer()
         }
 
   @spec open(String.t() | nil, term()) ::
@@ -54,7 +56,8 @@ defmodule Mead.Deck.EventLog do
        %__MODULE__{
          path: path,
          events: Enum.reverse(events),
-         last_sequence: last_sequence_of(events)
+         last_sequence: last_sequence_of(events),
+         count: length(events)
        }}
     end
   end
@@ -76,7 +79,7 @@ defmodule Mead.Deck.EventLog do
   def append(%__MODULE__{last_sequence: last} = log, %{"sequence" => sequence} = event, options)
       when is_integer(sequence) and sequence > last do
     with :ok <- write(log.path, event, Keyword.get(options, :sync, true)) do
-      {:ok, %{log | events: [event | log.events], last_sequence: sequence}}
+      {:ok, %{log | events: [event | log.events], last_sequence: sequence, count: log.count + 1}}
     end
   end
 
@@ -109,6 +112,66 @@ defmodule Mead.Deck.EventLog do
   @spec last_sequence(t()) :: non_neg_integer()
   def last_sequence(%__MODULE__{last_sequence: last}), do: last
 
+  @spec count(t()) :: non_neg_integer()
+  def count(%__MODULE__{count: count}), do: count
+
+  @doc """
+  The lowest sequence a replay can start from: 1 for a log that was never compacted, and the first
+  sequence of the retained tail after a compaction. The kept `policy.updated` older than the tail
+  is not part of it.
+  """
+  @spec first_sequence(t()) :: non_neg_integer()
+  def first_sequence(%__MODULE__{events: []}), do: 1
+
+  def first_sequence(%__MODULE__{events: [newest | older]}) do
+    older
+    |> Enum.reduce_while(newest["sequence"], fn event, expected ->
+      if event["sequence"] == expected - 1, do: {:cont, expected - 1}, else: {:halt, expected}
+    end)
+  end
+
+  @doc """
+  Drops the oldest events until `keep` remain, plus the latest `policy.updated` when it would
+  otherwise go. The new file is written beside the old one and renamed over it, so a crash leaves
+  either the whole old log or the whole new one. A log within `keep` is returned unchanged.
+  """
+  @spec compact(t(), pos_integer()) :: {:ok, t()} | {:error, term()}
+  def compact(%__MODULE__{count: count} = log, keep) when count <= keep, do: {:ok, log}
+
+  def compact(%__MODULE__{events: newest_first} = log, keep) do
+    tail = Enum.take(newest_first, keep)
+
+    dropped_policy =
+      newest_first |> Enum.drop(keep) |> Enum.find(&(&1["type"] == "policy.updated"))
+
+    retained = Enum.reverse(tail) |> prepend_policy(dropped_policy)
+
+    with :ok <- rewrite(log.path, retained) do
+      {:ok, %{log | events: Enum.reverse(retained), count: length(retained)}}
+    end
+  end
+
+  defp prepend_policy(retained, nil), do: retained
+  defp prepend_policy(retained, policy), do: [policy | retained]
+
+  defp rewrite(nil, _events), do: :ok
+
+  defp rewrite(path, events) do
+    temporary = path <> ".compact"
+    binary = events |> Enum.map(&Record.encode/1) |> IO.iodata_to_binary()
+
+    with :ok <- Record.remove_leftover(temporary),
+         :ok <- Record.create_private(temporary),
+         :ok <- Record.write_synced(temporary, binary),
+         :ok <- File.rename(temporary, path) do
+      Record.sync_directory(Path.dirname(path))
+    else
+      {:error, reason} ->
+        Record.remove_leftover(temporary)
+        {:error, reason}
+    end
+  end
+
   @doc "Present for symmetry with the file lifecycle; the log holds no open handle."
   @spec close(t()) :: :ok
   def close(%__MODULE__{}), do: :ok
@@ -117,7 +180,8 @@ defmodule Mead.Deck.EventLog do
   @spec delete(String.t(), term()) :: :ok | {:error, term()}
   def delete(directory, session_id) do
     if Store.valid_session_id?(session_id) do
-      Record.remove_leftover(path(directory, session_id))
+      with :ok <- Record.remove_leftover(path(directory, session_id) <> ".compact"),
+           do: Record.remove_leftover(path(directory, session_id))
     else
       :ok
     end

@@ -92,6 +92,7 @@ defmodule Mead.Deck.ChannelTest do
     assert snapshot["payload"] == %{
              "protocol_version" => 1,
              "current_sequence" => 0,
+             "first_sequence" => 1,
              "permission_policy_level" => "ask_for_risky"
            }
 
@@ -191,6 +192,32 @@ defmodule Mead.Deck.ChannelTest do
     assert sequences(events) == [3, 4, 5, 6, 7, 8]
     assert Enum.at(events, 0)["payload"]["text"] == "released block first"
     assert Enum.at(events, 3)["payload"]["text"] == "second"
+  end
+
+  test "an idle channel drops the oldest events past the log limit and says where replay starts",
+       context do
+    {:ok, configuration} =
+      Configuration.load(token: "deck-channel-test-token", event_log_limit: 6)
+
+    {:ok, session_id} = Mead.start_session(handler: Mead.Test.DeckHandler, turn_timeout: 5_000)
+    on_exit(fn -> Mead.stop_session(session_id) end)
+    Registry.register(Mead.Registry, {:deck_test_notify, session_id}, nil)
+    {:ok, channel} = ensure(session_id, configuration, context.directory)
+
+    attach(channel)
+    for text <- ["echo one", "echo two", "echo three"], do: prompt(channel, text)
+    collect(12)
+    refute_receive {:deck_event, _}, 100
+
+    {:ok, log} = Mead.Deck.EventLog.open(context.directory, session_id)
+    assert Mead.Deck.EventLog.last_sequence(log) == 12
+    assert Mead.Deck.EventLog.count(log) == 6
+    assert Mead.Deck.EventLog.first_sequence(log) == 7
+
+    snapshot = attach(channel)
+    assert snapshot["payload"]["first_sequence"] == 7
+    assert snapshot["payload"]["current_sequence"] == 12
+    assert sequences(collect(6)) == [7, 8, 9, 10, 11, 12]
   end
 
   test "a prompt over the queue limit is dropped without any event", context do

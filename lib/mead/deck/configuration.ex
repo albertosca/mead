@@ -21,6 +21,7 @@ defmodule Mead.Deck.Configuration do
     * `:resume_deadline_ms` - how long a fresh socket may wait before sending `session.resume`;
       defaults to 10 000.
     * `:queue_limit` - how many prompts may wait behind a running turn; defaults to 10.
+    * `:event_log_limit` - how many events a session's log keeps; once an idle channel holds more, the oldest are dropped (the latest permission policy is always kept); defaults to 10 000.
     * `:default_policy_level` - `:ask_always`, `:ask_for_risky` or `:allow_all`; defaults to
       `:ask_for_risky`.
   """
@@ -32,7 +33,8 @@ defmodule Mead.Deck.Configuration do
     permission_timeout_ms: 120_000,
     heartbeat_ms: 15_000,
     resume_deadline_ms: 10_000,
-    queue_limit: 10
+    queue_limit: 10,
+    event_log_limit: 10_000
   ]
   @allowed_keys [:token, :default_policy_level | Keyword.keys(@positive_integer_defaults)]
 
@@ -44,6 +46,7 @@ defmodule Mead.Deck.Configuration do
     :heartbeat_ms,
     :resume_deadline_ms,
     :queue_limit,
+    :event_log_limit,
     :default_policy_level
   ]
   defstruct @enforce_keys
@@ -57,6 +60,7 @@ defmodule Mead.Deck.Configuration do
           heartbeat_ms: pos_integer(),
           resume_deadline_ms: pos_integer(),
           queue_limit: pos_integer(),
+          event_log_limit: pos_integer(),
           default_policy_level: policy_level()
         }
 
