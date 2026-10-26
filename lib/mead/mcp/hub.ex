@@ -83,6 +83,19 @@ defmodule Mead.MCP.Hub do
     end
   end
 
+  @doc """
+  What `call_tool/4` would run for `name`, without running it: the server, the tool and its class.
+  The router needs the class to ask permission before the call. Fails like `call_tool/4` does for a
+  name that is unknown or not allowed in this turn.
+  """
+  @spec describe_tool(term(), keyword(), atom()) ::
+          {:ok, %{server: atom(), tool: String.t(), class: Policy.class()}} | {:error, term()}
+  def describe_tool(name, options, hub \\ __MODULE__) do
+    with {:ok, entries, servers} <- snapshot(hub) do
+      Policy.authorize(name, entries, servers, options)
+    end
+  end
+
   defp snapshot(hub) do
     case Catalog.snapshot(catalog_name(hub)) do
       {:ok, entries, servers} -> {:ok, entries, servers}

@@ -172,6 +172,9 @@ defmodule Mead do
       recorded.
     * `:tools` - `:effect` also shows the model tools that have side effects; see
       `Mead.MCP.Policy`. Handed to the handler unchanged and absent when not given.
+    * `:interaction` - a `{module, context}` pair, `module` implementing `Mead.Router.Interaction`;
+      `Mead.Router` then asks it for permission around every tool call. Anything else returns
+      `{:error, :invalid_interaction}` before a turn is recorded.
 
   Returns `{:error, :not_found}` for an unknown session, `{:error, :session_stopped}` when the
   session was stopped with `stop_session/1` while the turn was running, and
@@ -181,16 +184,21 @@ defmodule Mead do
   def submit_turn(session_id, input, options \\ []) do
     options = validate_submit_options!(options)
 
-    if Keyword.fetch!(options, :route) in @routes do
-      run_turn(session_id, input, options)
-    else
-      {:error, :invalid_route}
+    cond do
+      Keyword.fetch!(options, :route) not in @routes -> {:error, :invalid_route}
+      invalid_interaction?(options) -> {:error, :invalid_interaction}
+      true -> run_turn(session_id, input, options)
     end
+  end
+
+  defp invalid_interaction?(options) do
+    Keyword.has_key?(options, :interaction) and
+      not Mead.Router.Interaction.valid?(Keyword.fetch!(options, :interaction))
   end
 
   defp validate_submit_options!(options) do
     if Keyword.keyword?(options) do
-      Keyword.validate!(options, [:tools, route: :auto])
+      Keyword.validate!(options, [:tools, :interaction, route: :auto])
     else
       raise ArgumentError, "options must be a keyword list, got: #{inspect(options)}"
     end

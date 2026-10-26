@@ -177,7 +177,7 @@ defmodule Mead.Router do
             {{:error, :tool_loop_limit}, progress}
 
           tool_uses ->
-            results = Enum.map(tool_uses, &run_tool(context, &1))
+            results = Enum.map(tool_uses, &run_tool_for_turn(context, &1))
 
             messages =
               messages ++
@@ -222,6 +222,70 @@ defmodule Mead.Router do
 
     %{type: :tool_result, tool_use_id: id, content: content, is_error: is_error}
   end
+
+  # Without an interaction the old path runs untouched; with one, every call is announced, asked
+  # about, and reported, and a denied call never reaches the hub.
+  defp run_tool_for_turn(context, tool_use) do
+    case Keyword.get(context.options, :interaction) do
+      nil -> run_tool(context, tool_use)
+      interaction -> run_tool_with_interaction(context, interaction, tool_use)
+    end
+  end
+
+  defp run_tool_with_interaction(context, {module, interaction_context}, tool_use) do
+    update = fn status ->
+      module.tool_updated(interaction_context, tool_update(tool_use, status))
+    end
+
+    update.(:pending)
+
+    with {:ok, target} <- context.hub.describe_tool(tool_use.name, context.options),
+         :allow <-
+           module.request_permission(interaction_context, permission_request(tool_use, target)) do
+      update.(:in_progress)
+      result = run_tool(context, tool_use)
+      update.(if result.is_error, do: :failed, else: :completed)
+      result
+    else
+      {:deny, reason} ->
+        update.(:failed)
+        error_result(tool_use, denial_text(reason))
+
+      {:error, reason} ->
+        update.(:failed)
+        error_result(tool_use, "The tool call failed: #{describe(reason)}.")
+    end
+  end
+
+  defp tool_update(%{id: id, name: name}, status) do
+    %{
+      tool_call_id: id,
+      title: name,
+      status: status,
+      current_step: nil,
+      progress: nil,
+      cancellable: false
+    }
+  end
+
+  defp permission_request(%{id: id, input: input}, target) do
+    %{
+      tool_call_id: id,
+      tool: target.tool,
+      server: Atom.to_string(target.server),
+      class: target.class,
+      arguments: input
+    }
+  end
+
+  defp error_result(%{id: id}, content) do
+    %{type: :tool_result, tool_use_id: id, content: content, is_error: true}
+  end
+
+  defp denial_text(:rejected), do: "The person rejected this tool call."
+
+  defp denial_text(:expired),
+    do: "The person did not answer in time, so this tool call was not run."
 
   defp describe(:unknown_tool), do: "unknown tool"
   defp describe(:not_allowed), do: "this tool is not allowed in this turn"
