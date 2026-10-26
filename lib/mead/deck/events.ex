@@ -12,7 +12,7 @@ defmodule Mead.Deck.Events do
 
   @server_event_types ~w(
     session.snapshot prompt.accepted text.delta tool_call.updated permission.requested
-    permission.resolved choice.requested choice.resolved turn.failed metric.updated policy.updated
+    permission.resolved permission.forgotten choice.requested choice.resolved turn.failed metric.updated policy.updated
     heartbeat
   )
 
@@ -28,6 +28,7 @@ defmodule Mead.Deck.Events do
           | {:choice_respond, %{request_id: String.t(), option_id: String.t()}}
           | {:tool_call_cancel, %{tool_call_id: String.t()}}
           | {:session_resume, %{last_sequence: non_neg_integer()}}
+          | {:permission_forget, %{tool: String.t()}}
           | {:policy_set, %{level: :ask_always | :ask_for_risky | :allow_all}}
 
   @type decode_error :: :too_large | :not_json | :not_object | :unknown_type | :invalid_payload
@@ -90,7 +91,8 @@ defmodule Mead.Deck.Events do
   defp decode_message(_message), do: {:error, :unknown_type}
 
   defp known_client_types do
-    ~w(prompt.send permission.respond choice.respond tool_call.cancel session.resume policy.set)
+    ~w(prompt.send permission.respond choice.respond tool_call.cancel session.resume policy.set
+    permission.forget)
   end
 
   defp validate("prompt.send", %{"client_message_id" => id, "text" => text}) do
@@ -118,6 +120,13 @@ defmodule Mead.Deck.Events do
   defp validate("session.resume", %{"last_sequence" => last_sequence})
        when is_integer(last_sequence) and last_sequence >= 0,
        do: {:ok, {:session_resume, %{last_sequence: last_sequence}}}
+
+  defp validate("permission.forget", %{"tool" => tool}) do
+    case identifier(tool) do
+      {:ok, tool} -> {:ok, {:permission_forget, %{tool: tool}}}
+      :error -> {:error, :invalid_payload}
+    end
+  end
 
   defp validate("policy.set", %{"level" => level}) do
     case parse_policy_level(level) do

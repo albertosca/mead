@@ -32,6 +32,12 @@ defmodule Mead.Deck.Channel do
   as `expired` when the next channel starts, before it serves anyone. The details of a request come
   from the model's arguments and are never logged.
 
+  `allow_always` answers allow the call and remember the tool (`"<server>__<tool>"`): the
+  `permission.resolved` carries `remember`, and from then on the same tool is allowed at once with
+  `decided_by_rule`, whatever the level but `allow_all`, which keeps `decided_by_policy`. The rules
+  are rebuilt from the log, and `permission.forget` with the tool name removes one
+  (`permission.forgotten`).
+
   The channel monitors the session and stops with it. It is registered in `Mead.Registry` as
   `{:deck, session_id}`.
   """
@@ -50,6 +56,11 @@ defmodule Mead.Deck.Channel do
   @maximum_detail_characters 2_000
   @permission_options [
     %{"option_id" => "allow_once", "label" => "Allow once", "kind" => "allow_once"},
+    %{
+      "option_id" => "allow_always",
+      "label" => "Always allow this tool",
+      "kind" => "allow_always"
+    },
     %{"option_id" => "reject_once", "label" => "Reject", "kind" => "reject_once"}
   ]
 
@@ -100,6 +111,7 @@ defmodule Mead.Deck.Channel do
              queue: :queue.new(),
              running: nil,
              policy_level: derive_policy_level(log, configuration.default_policy_level),
+             remembered_tools: derive_remembered_tools(log),
              pending: %{},
              calls: %{},
              open_cards: %{},
@@ -255,6 +267,21 @@ defmodule Mead.Deck.Channel do
     end)
   end
 
+  defp derive_remembered_tools(log) do
+    log
+    |> EventLog.read_after(0)
+    |> Enum.reduce(MapSet.new(), fn
+      %{"type" => "permission.resolved", "payload" => %{"remember" => tool}}, tools ->
+        MapSet.put(tools, tool)
+
+      %{"type" => "permission.forgotten", "payload" => %{"tool" => tool}}, tools ->
+        MapSet.delete(tools, tool)
+
+      _other, tools ->
+        tools
+    end)
+  end
+
   defp derive_policy_level(log, default) do
     log
     |> EventLog.read_after(0)
@@ -318,10 +345,18 @@ defmodule Mead.Deck.Channel do
     do: {:reply, :ok, %{state | calls: Map.put(state.calls, tool_call_id, pid)}}
 
   def handle_call({:permission_request, request}, from, state) do
-    case {state.policy_level, request.class} do
-      {:allow_all, _class} -> approve_by_policy(state, request)
-      {:ask_for_risky, :read} -> {:reply, :allow, state}
-      _ask -> ask_permission(state, from, request)
+    cond do
+      state.policy_level == :allow_all ->
+        approve(state, request, %{"decided_by_policy" => "allow_all"})
+
+      MapSet.member?(state.remembered_tools, tool_key(request)) ->
+        approve(state, request, %{"decided_by_rule" => tool_key(request)})
+
+      state.policy_level == :ask_for_risky and request.class == :read ->
+        {:reply, :allow, state}
+
+      true ->
+        ask_permission(state, from, request)
     end
   end
 
@@ -419,6 +454,20 @@ defmodule Mead.Deck.Channel do
     {:noreply, state}
   end
 
+  defp handle_client_message({:permission_forget, %{tool: tool}}, _socket, state) do
+    if MapSet.member?(state.remembered_tools, tool) do
+      case emit(state, "permission.forgotten", %{"tool" => tool}) do
+        {:ok, state, _envelope} ->
+          {:noreply, %{state | remembered_tools: MapSet.delete(state.remembered_tools, tool)}}
+
+        {:error, reason} ->
+          stop_for_log_failure(reason, state)
+      end
+    else
+      {:noreply, state}
+    end
+  end
+
   defp handle_client_message({:policy_set, %{level: level}}, _socket, state) do
     case emit(state, "policy.updated", %{"level" => Events.policy_level_name(level)}) do
       {:ok, state, _envelope} -> {:noreply, %{state | policy_level: level}}
@@ -442,15 +491,13 @@ defmodule Mead.Deck.Channel do
   defp finish_call(state, %{tool_call_id: tool_call_id, title: title}, turn_id),
     do: %{state | open_cards: Map.put(state.open_cards, tool_call_id, {turn_id, title})}
 
-  defp approve_by_policy(state, request) do
+  defp approve(state, request, decided_by) do
     request_id = new_request_id()
 
     with {:ok, state, _envelope} <-
            emit(state, "permission.requested", requested_payload(state, request_id, request)),
          {:ok, state} <-
-           emit_resolved(state, request_id, action(request), "allowed", %{
-             "decided_by_policy" => "allow_all"
-           }) do
+           emit_resolved(state, request_id, action(request), "allowed", decided_by) do
       {:reply, :allow, state}
     else
       {:error, reason} -> stop_for_log_failure(reason, state)
@@ -468,6 +515,7 @@ defmodule Mead.Deck.Channel do
           kind: :permission,
           from: from,
           action: action(request),
+          tool: tool_key(request),
           monitor: Process.monitor(requester),
           timer:
             Process.send_after(
@@ -536,6 +584,12 @@ defmodule Mead.Deck.Channel do
     case option_id do
       "allow_once" ->
         settle(state, request_id, "allowed", :allow, device_of(state, socket))
+
+      "allow_always" ->
+        tool = state.pending[request_id].tool
+        extra = Map.put(device_of(state, socket), "remember", tool)
+        state = %{state | remembered_tools: MapSet.put(state.remembered_tools, tool)}
+        settle(state, request_id, "allowed", :allow, extra)
 
       "reject_once" ->
         settle(state, request_id, "rejected", {:deny, :rejected}, device_of(state, socket))
@@ -625,6 +679,8 @@ defmodule Mead.Deck.Channel do
       "expires_at" => DateTime.to_iso8601(expires_at)
     }
   end
+
+  defp tool_key(request), do: "#{request.server}__#{request.tool}"
 
   defp action(request), do: "Run #{request.tool} on the #{request.server} server"
 

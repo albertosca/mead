@@ -7,8 +7,8 @@ defmodule Mead.Deck.EventLog do
   The value is plain data: events are held in memory, newest first, so `read_after/2` never
   touches the disk, and every `append/2` opens the file, writes, syncs and closes it, the way
   `Mead.Session.Store.append/3` does. The whole log is read on `open/2`. `compact/2` keeps it
-  bounded: the oldest events are dropped, except the latest `policy.updated`, which the channel
-  rebuilds its permission level from. `first_sequence/1` is where a replay can start.
+  bounded: the oldest events are dropped, except the ones the channel rebuilds its permission
+  state from, the latest `policy.updated` and every remembered tool rule still in force. `first_sequence/1` is where a replay can start.
 
   With a `nil` directory the log lives in memory only, for sessions that have no storage.
   Sequences must strictly increase; an event that does not carry a larger sequence than the last
@@ -131,8 +131,9 @@ defmodule Mead.Deck.EventLog do
   end
 
   @doc """
-  Drops the oldest events until `keep` remain, plus the latest `policy.updated` when it would
-  otherwise go. The new file is written beside the old one and renamed over it, so a crash leaves
+  Drops the oldest events until `keep` remain, plus the latest `policy.updated` and the live
+  remembered-tool rules (`permission.resolved` with `remember`, not undone by a later
+  `permission.forgotten`) when they would otherwise go. The new file is written beside the old one and renamed over it, so a crash leaves
   either the whole old log or the whole new one. A log within `keep` is returned unchanged.
   """
   @spec compact(t(), pos_integer()) :: {:ok, t()} | {:error, term()}
@@ -141,18 +142,34 @@ defmodule Mead.Deck.EventLog do
   def compact(%__MODULE__{events: newest_first} = log, keep) do
     tail = Enum.take(newest_first, keep)
 
-    dropped_policy =
-      newest_first |> Enum.drop(keep) |> Enum.find(&(&1["type"] == "policy.updated"))
-
-    retained = Enum.reverse(tail) |> prepend_policy(dropped_policy)
+    dropped = newest_first |> Enum.drop(keep) |> Enum.reverse()
+    retained = standing_events(dropped) ++ Enum.reverse(tail)
 
     with :ok <- rewrite(log.path, retained) do
       {:ok, %{log | events: Enum.reverse(retained), count: length(retained)}}
     end
   end
 
-  defp prepend_policy(retained, nil), do: retained
-  defp prepend_policy(retained, policy), do: [policy | retained]
+  # What the channel folds out of the log to know the permission state, oldest first.
+  defp standing_events(dropped) do
+    latest_policy = dropped |> Enum.filter(&(&1["type"] == "policy.updated")) |> List.last()
+
+    live_rules =
+      dropped
+      |> Enum.reduce(%{}, fn
+        %{"type" => "permission.resolved", "payload" => %{"remember" => tool}} = event, rules ->
+          Map.put(rules, tool, event)
+
+        %{"type" => "permission.forgotten", "payload" => %{"tool" => tool}}, rules ->
+          Map.delete(rules, tool)
+
+        _other, rules ->
+          rules
+      end)
+      |> Map.values()
+
+    Enum.sort_by(Enum.reject([latest_policy | live_rules], &is_nil/1), & &1["sequence"])
+  end
 
   defp rewrite(nil, _events), do: :ok
 

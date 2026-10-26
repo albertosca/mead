@@ -224,6 +224,48 @@ defmodule Mead.Deck.EventLogTest do
       assert Enum.at(EventLog.read_after(compacted, 0), 0)["payload"]["level"] == "ask_always"
     end
 
+    test "keeps the remembered tool rules still in force and drops the ones taken back", %{
+      tmp_dir: directory
+    } do
+      remembered = fn sequence, tool ->
+        %{
+          event(sequence)
+          | "type" => "permission.resolved",
+            "payload" => %{"remember" => tool}
+        }
+      end
+
+      forgotten = fn sequence, tool ->
+        %{event(sequence) | "type" => "permission.forgotten", "payload" => %{"tool" => tool}}
+      end
+
+      {:ok, log} = EventLog.open(directory, @session_id)
+
+      log =
+        Enum.reduce(
+          [
+            remembered.(1, "a__kept"),
+            remembered.(2, "b__taken_back"),
+            forgotten.(3, "b__taken_back"),
+            event(4),
+            event(5),
+            event(6),
+            event(7)
+          ],
+          log,
+          fn entry, current ->
+            {:ok, next} = EventLog.append(current, entry)
+            next
+          end
+        )
+
+      assert {:ok, compacted} = EventLog.compact(log, 2)
+      kept = EventLog.read_after(compacted, 0)
+      assert Enum.map(kept, & &1["sequence"]) == [1, 6, 7]
+      assert hd(kept)["payload"]["remember"] == "a__kept"
+      assert EventLog.first_sequence(compacted) == 6
+    end
+
     test "leaves no temporary file and the old log when the rewrite fails", %{tmp_dir: directory} do
       {:ok, log} = EventLog.open(directory, @session_id)
       log = append_all(log, 1..5)

@@ -94,6 +94,11 @@ defmodule Mead.Deck.PermissionsTest do
 
     assert payload["options"] == [
              %{"option_id" => "allow_once", "label" => "Allow once", "kind" => "allow_once"},
+             %{
+               "option_id" => "allow_always",
+               "label" => "Always allow this tool",
+               "kind" => "allow_always"
+             },
              %{"option_id" => "reject_once", "label" => "Reject", "kind" => "reject_once"}
            ]
   end

@@ -43,7 +43,8 @@ defmodule Mead.Deck.StreamingTest do
   defp open(directory) do
     server =
       DeckServer.start(directory, [],
-        session_options: [handler: Mead.Test.ToolHandler, turn_timeout: 10_000]
+        # Five thousand fragments are five thousand file writes; a slow disk must not end the turn.
+        session_options: [handler: Mead.Test.ToolHandler, turn_timeout: 60_000]
       )
 
     %{"ticket" => ticket, "session_id" => session_id} = DeckServer.ticket(server)
