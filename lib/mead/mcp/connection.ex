@@ -135,7 +135,10 @@ defmodule Mead.MCP.Connection do
   def handle_info({:refresh_timeout, reference}, %{refresh_reference: reference} = state),
     do: {:noreply, disconnect(state, :tool_refresh_timeout)}
 
-  def handle_info({:call_timeout, id}, state), do: {:noreply, fail_request(state, id, :timeout)}
+  def handle_info({:call_timeout, id}, state) do
+    {:noreply,
+     state |> tell_server_to_cancel(id, "the call timed out") |> fail_request(id, :timeout)}
+  end
 
   def handle_info({:DOWN, monitor, :process, _caller, _reason}, state) do
     case Enum.find(state.pending, fn {_id, step} ->
@@ -143,6 +146,7 @@ defmodule Mead.MCP.Connection do
          end) do
       {id, {:call, _from, _monitor, timer}} ->
         Process.cancel_timer(timer)
+        state = tell_server_to_cancel(state, id, "the caller is gone")
         {:noreply, %{state | pending: Map.delete(state.pending, id)}}
 
       nil ->
@@ -235,6 +239,21 @@ defmodule Mead.MCP.Connection do
       :ok -> state
       {:error, reason} -> fail_request(state, id, {:send_failed, reason})
     end
+  end
+
+  # MCP lets a client say it no longer wants an answer. The server may ignore it, and the answer
+  # that still arrives finds no pending entry and is dropped; without the notice a long tool would
+  # keep running for nobody.
+  defp tell_server_to_cancel(%{pending: pending} = state, id, reason) do
+    if match?({:call, _from, _monitor, _timer}, Map.get(pending, id)) and state.transport do
+      state.transport_module.send_message(
+        state.transport,
+        nil,
+        Protocol.cancelled_notification(id, reason)
+      )
+    end
+
+    state
   end
 
   defp fail_request(state, id, reason) do

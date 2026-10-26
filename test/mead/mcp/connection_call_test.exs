@@ -167,6 +167,11 @@ defmodule Mead.MCP.ConnectionCallTest do
     assert Task.await(task) == {:error, :timeout}
     assert :sys.get_state(context.connection).pending == %{}
 
+    assert %{"method" => "notifications/cancelled", "params" => params} =
+             FakeTransport.next_request(context.transport)
+
+    assert params["requestId"] == request["id"]
+
     FakeTransport.reply(context.transport, request, text_result("too late"))
     Process.sleep(30)
     assert Process.alive?(context.connection)
@@ -201,6 +206,11 @@ defmodule Mead.MCP.ConnectionCallTest do
     Process.exit(caller, :kill)
 
     wait_until(fn -> :sys.get_state(context.connection).pending == %{} end)
+
+    assert %{"method" => "notifications/cancelled", "params" => params} =
+             FakeTransport.next_request(context.transport)
+
+    assert params["requestId"] == request["id"]
 
     FakeTransport.reply(context.transport, request, text_result("nobody is listening"))
     Process.sleep(30)

@@ -71,6 +71,11 @@ defmodule Mead.MCP.TurnTimeoutTest do
 
     wait_until(fn -> pending_calls(hub) == 0 end)
 
+    # The server is told nobody waits for the abandoned call.
+    cancelled = FakeTransport.next_request(transport)
+    assert cancelled["method"] == "notifications/cancelled"
+    assert cancelled["params"]["requestId"] == stuck_request["id"]
+
     # The late answer for the abandoned call is ignored, and the next turn is served normally.
     FakeTransport.reply(transport, stuck_request, %{
       "content" => [%{"type" => "text", "text" => "too late"}]

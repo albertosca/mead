@@ -40,6 +40,16 @@ defmodule Mead.MCP.Protocol do
     JSON.encode!(%{"jsonrpc" => "2.0", "method" => "notifications/initialized"})
   end
 
+  @doc "Tells the server that nobody waits for the answer to request `id` any more."
+  @spec cancelled_notification(request_id(), String.t()) :: binary()
+  def cancelled_notification(id, reason) do
+    JSON.encode!(%{
+      "jsonrpc" => "2.0",
+      "method" => "notifications/cancelled",
+      "params" => %{"requestId" => id, "reason" => reason}
+    })
+  end
+
   @spec list_tools_request(request_id(), String.t() | nil) :: binary()
   def list_tools_request(id, cursor \\ nil)
   def list_tools_request(id, nil), do: request(id, "tools/list", %{})
