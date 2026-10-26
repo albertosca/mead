@@ -19,6 +19,18 @@ defmodule Mead.Deck.Channel do
   `metric.updated` reports the session's token totals from the ledger. A failed turn emits no
   event of its own.
 
+  ## Permissions
+
+  Every turn the channel starts carries `Mead.Deck.Interaction`, so the router asks the channel
+  before each tool call. The policy level decides: `allow_all` emits `permission.requested` and,
+  at once, `permission.resolved` with `decided_by_policy`; `ask_for_risky` lets a `:read` call run
+  silently; anything else emits `permission.requested`, pauses the turn clock
+  (`Mead.Session.Server.pause_clock/1`) and waits for the first valid `permission.respond` or for
+  the deadline, which resolves as `expired`. A later answer gets the existing `permission.resolved`
+  sent again to the answering socket alone. A request left open by a channel that died is resolved
+  as `expired` when the next channel starts, before it serves anyone. The details of a request come
+  from the model's arguments and are never logged.
+
   The channel monitors the session and stops with it. It is registered in `Mead.Registry` as
   `{:deck, session_id}`.
   """
@@ -34,6 +46,11 @@ defmodule Mead.Deck.Channel do
   alias Mead.Session.Store
 
   @protocol_version 1
+  @maximum_detail_characters 2_000
+  @permission_options [
+    %{"option_id" => "allow_once", "label" => "Allow once", "kind" => "allow_once"},
+    %{"option_id" => "reject_once", "label" => "Reject", "kind" => "reject_once"}
+  ]
 
   def start_link(options) do
     session_id = Keyword.fetch!(options, :session_id)
@@ -68,22 +85,59 @@ defmodule Mead.Deck.Channel do
     with {:ok, configuration} <- fetch_configuration(options),
          {:ok, server} <- fetch_session_server(session_id),
          directory = Keyword.get_lazy(options, :storage_directory, &Store.directory/0),
-         {:ok, log} <- open_log(directory, session_id) do
-      {:ok,
-       %{
-         session_id: session_id,
-         configuration: configuration,
-         log: log,
-         session_monitor: Process.monitor(server),
-         sockets: %{},
-         accepted: accepted_prompts(log),
-         queue: :queue.new(),
-         running: nil,
-         policy_level: derive_policy_level(log, configuration.default_policy_level)
-       }}
+         {:ok, log} <- open_log(directory, session_id),
+         {:ok, state} <-
+           expire_dangling(%{
+             session_id: session_id,
+             configuration: configuration,
+             log: log,
+             session_monitor: Process.monitor(server),
+             sockets: %{},
+             devices: %{},
+             next_device: 1,
+             accepted: accepted_prompts(log),
+             queue: :queue.new(),
+             running: nil,
+             policy_level: derive_policy_level(log, configuration.default_policy_level),
+             pending: %{},
+             resolved: resolved_requests(log)
+           }) do
+      {:ok, state}
     else
       {:error, reason} -> {:stop, reason}
     end
+  end
+
+  defp resolved_requests(log) do
+    log
+    |> EventLog.read_after(0)
+    |> Enum.reduce(%{}, fn
+      %{"type" => "permission.resolved", "sequence" => sequence, "payload" => payload},
+      resolved ->
+        Map.put(resolved, payload["request_id"], sequence)
+
+      _other, resolved ->
+        resolved
+    end)
+  end
+
+  # A request in the log with no resolution belongs to a channel that died while it waited; the
+  # turn that asked is gone with it, so the honest outcome is that nobody answered in time.
+  defp expire_dangling(state) do
+    open =
+      state.log
+      |> EventLog.read_after(0)
+      |> Enum.filter(&(&1["type"] == "permission.requested"))
+      |> Enum.reject(&Map.has_key?(state.resolved, &1["payload"]["request_id"]))
+
+    Enum.reduce_while(open, {:ok, state}, fn envelope, {:ok, current} ->
+      payload = envelope["payload"]
+
+      case emit_resolved(current, payload["request_id"], payload["action"], "expired", %{}) do
+        {:ok, next} -> {:cont, {:ok, next}}
+        {:error, reason} -> {:halt, {:error, {:event_log, reason}}}
+      end
+    end)
   end
 
   defp fetch_configuration(options) do
@@ -159,6 +213,31 @@ defmodule Mead.Deck.Channel do
 
   def handle_call(:policy_level, _from, state), do: {:reply, state.policy_level, state}
 
+  def handle_call({:tool_updated, turn_id, update}, _from, state) do
+    payload = %{
+      "tool_call_id" => update.tool_call_id,
+      "turn_id" => turn_id,
+      "title" => update.title,
+      "status" => Atom.to_string(update.status),
+      "current_step" => update.current_step,
+      "progress" => update.progress,
+      "cancellable" => update.cancellable
+    }
+
+    case emit(state, "tool_call.updated", payload) do
+      {:ok, state, _envelope} -> {:reply, :ok, state}
+      {:error, reason} -> stop_for_log_failure(reason, state)
+    end
+  end
+
+  def handle_call({:permission_request, request}, from, state) do
+    case {state.policy_level, request.class} do
+      {:allow_all, _class} -> approve_by_policy(state, request)
+      {:ask_for_risky, :read} -> {:reply, :allow, state}
+      _ask -> ask_permission(state, from, request)
+    end
+  end
+
   @impl GenServer
   def handle_cast({:client_message, socket, message}, state) do
     if Map.has_key?(state.sockets, socket) do
@@ -183,7 +262,163 @@ defmodule Mead.Deck.Channel do
     end
   end
 
+  defp handle_client_message(
+         {:permission_respond, %{request_id: request_id, option_id: option_id}},
+         socket,
+         state
+       ) do
+    cond do
+      Map.has_key?(state.pending, request_id) ->
+        answer_pending(state, socket, request_id, option_id)
+
+      Map.has_key?(state.resolved, request_id) ->
+        resend(state, socket, Map.fetch!(state.resolved, request_id))
+        {:noreply, state}
+
+      true ->
+        {:noreply, state}
+    end
+  end
+
+  defp handle_client_message({:policy_set, %{level: level}}, _socket, state) do
+    case emit(state, "policy.updated", %{"level" => Events.policy_level_name(level)}) do
+      {:ok, state, _envelope} -> {:noreply, %{state | policy_level: level}}
+      {:error, reason} -> stop_for_log_failure(reason, state)
+    end
+  end
+
   defp handle_client_message(_message, _socket, state), do: {:noreply, state}
+
+  defp approve_by_policy(state, request) do
+    request_id = new_request_id()
+
+    with {:ok, state, _envelope} <-
+           emit(state, "permission.requested", requested_payload(state, request_id, request)),
+         {:ok, state} <-
+           emit_resolved(state, request_id, action(request), "allowed", %{
+             "decided_by_policy" => "allow_all"
+           }) do
+      {:reply, :allow, state}
+    else
+      {:error, reason} -> stop_for_log_failure(reason, state)
+    end
+  end
+
+  defp ask_permission(state, {requester, _tag} = from, request) do
+    request_id = new_request_id()
+
+    case emit(state, "permission.requested", requested_payload(state, request_id, request)) do
+      {:ok, state, _envelope} ->
+        Session.Server.pause_clock(state.session_id)
+
+        entry = %{
+          from: from,
+          action: action(request),
+          monitor: Process.monitor(requester),
+          timer:
+            Process.send_after(
+              self(),
+              {:request_deadline, request_id},
+              state.configuration.permission_timeout_ms
+            )
+        }
+
+        {:noreply, %{state | pending: Map.put(state.pending, request_id, entry)}}
+
+      {:error, reason} ->
+        stop_for_log_failure(reason, state)
+    end
+  end
+
+  defp answer_pending(state, socket, request_id, option_id) do
+    case option_id do
+      "allow_once" ->
+        settle(state, request_id, "allowed", :allow, device_of(state, socket))
+
+      "reject_once" ->
+        settle(state, request_id, "rejected", {:deny, :rejected}, device_of(state, socket))
+
+      _not_offered ->
+        {:noreply, state}
+    end
+  end
+
+  defp device_of(state, socket), do: %{"decided_by_device" => Map.get(state.devices, socket)}
+
+  # Resolves an open request: log first, then wake the turn that is waiting for the answer.
+  defp settle(state, request_id, outcome, answer, extra) do
+    {entry, pending} = Map.pop!(state.pending, request_id)
+    Process.cancel_timer(entry.timer)
+    Process.demonitor(entry.monitor, [:flush])
+    state = %{state | pending: pending}
+
+    case emit_resolved(state, request_id, entry.action, outcome, extra) do
+      {:ok, state} ->
+        Session.Server.resume_clock(state.session_id)
+        GenServer.reply(entry.from, answer)
+        {:noreply, state}
+
+      {:error, reason} ->
+        stop_for_log_failure(reason, state)
+    end
+  end
+
+  defp emit_resolved(state, request_id, action, outcome, extra) do
+    payload =
+      Map.merge(
+        %{
+          "request_id" => request_id,
+          "action" => action,
+          "outcome" => outcome,
+          "decided_at" => DateTime.to_iso8601(DateTime.utc_now())
+        },
+        extra
+      )
+
+    case emit(state, "permission.resolved", payload) do
+      {:ok, state, envelope} ->
+        {:ok, %{state | resolved: Map.put(state.resolved, request_id, envelope["sequence"])}}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp requested_payload(state, request_id, request) do
+    expires_at =
+      DateTime.add(DateTime.utc_now(), state.configuration.permission_timeout_ms, :millisecond)
+
+    %{
+      "request_id" => request_id,
+      "action" => action(request),
+      "risk_level" => if(request.class == :effect, do: "high", else: "low"),
+      "details" => details(request.arguments),
+      "options" => @permission_options,
+      "expires_at" => DateTime.to_iso8601(expires_at)
+    }
+  end
+
+  defp action(request), do: "Run #{request.tool} on the #{request.server} server"
+
+  defp details(arguments) when is_map(arguments) do
+    arguments
+    |> Enum.map(fn {key, value} -> {render(key), value} end)
+    |> Enum.sort()
+    |> Enum.map(fn {key, value} -> key <> ": " <> truncate(render(value)) end)
+  end
+
+  defp details(arguments), do: ["arguments: " <> truncate(render(arguments))]
+
+  defp render(value) when is_binary(value) do
+    if String.valid?(value), do: value, else: inspect(value)
+  end
+
+  defp render(value), do: inspect(value, printable_limit: @maximum_detail_characters)
+
+  defp truncate(text), do: String.slice(text, 0, @maximum_detail_characters)
+
+  defp new_request_id,
+    do: "request-" <> Base.url_encode64(:crypto.strong_rand_bytes(9), padding: false)
 
   defp accept_prompt(state, client_message_id, text) do
     if :queue.len(state.queue) >= state.configuration.queue_limit do
@@ -217,13 +452,19 @@ defmodule Mead.Deck.Channel do
     case :queue.out(state.queue) do
       {{:value, {sequence, text}}, queue} ->
         session_id = state.session_id
+        turn_id = "turn-#{sequence}"
+        interaction = {Mead.Deck.Interaction, %{channel: self(), turn_id: turn_id}}
 
         task =
           Task.Supervisor.async_nolink(Mead.TurnSupervisor, fn ->
-            Mead.submit_turn(session_id, text, route: :auto, tools: :effect)
+            Mead.submit_turn(session_id, text,
+              route: :auto,
+              tools: :effect,
+              interaction: interaction
+            )
           end)
 
-        %{state | queue: queue, running: %{ref: task.ref, turn_id: "turn-#{sequence}"}}
+        %{state | queue: queue, running: %{ref: task.ref, turn_id: turn_id}}
 
       {:empty, _queue} ->
         state
@@ -250,8 +491,28 @@ defmodule Mead.Deck.Channel do
       ),
       do: {:stop, {:shutdown, :session_gone}, state}
 
-  def handle_info({:DOWN, _reference, :process, pid, _reason}, state),
-    do: {:noreply, %{state | sockets: Map.delete(state.sockets, pid)}}
+  def handle_info({:request_deadline, request_id}, state) do
+    if Map.has_key?(state.pending, request_id) do
+      settle(state, request_id, "expired", {:deny, :expired}, %{})
+    else
+      {:noreply, state}
+    end
+  end
+
+  def handle_info({:DOWN, reference, :process, pid, _reason}, state) do
+    case Enum.find(state.pending, fn {_id, entry} -> entry.monitor == reference end) do
+      {request_id, _entry} ->
+        settle(state, request_id, "expired", {:deny, :expired}, %{})
+
+      nil ->
+        {:noreply,
+         %{
+           state
+           | sockets: Map.delete(state.sockets, pid),
+             devices: Map.delete(state.devices, pid)
+         }}
+    end
+  end
 
   def handle_info(_message, state), do: {:noreply, state}
 
@@ -310,7 +571,12 @@ defmodule Mead.Deck.Channel do
     if Map.has_key?(state.sockets, socket) do
       state
     else
-      %{state | sockets: Map.put(state.sockets, socket, Process.monitor(socket))}
+      %{
+        state
+        | sockets: Map.put(state.sockets, socket, Process.monitor(socket)),
+          devices: Map.put(state.devices, socket, "device-#{state.next_device}"),
+          next_device: state.next_device + 1
+      }
     end
   end
 

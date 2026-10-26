@@ -21,6 +21,46 @@ defmodule Mead.Test.DeckHandler do
     end
   end
 
+  # "ask <read|effect> <server>__<tool> <argument text>" plays the router's calls on the turn's
+  # interaction for one tool call and answers "allowed" or "denied <reason>".
+  def handle_turn(_history, "ask " <> specification, options) do
+    [class, name, argument_text] = String.split(specification, " ", parts: 3)
+    [server, tool] = String.split(name, "__", parts: 2)
+    {module, context} = Keyword.fetch!(options, :interaction)
+
+    request = %{
+      tool_call_id: "call-1",
+      tool: tool,
+      server: server,
+      class: String.to_existing_atom(class),
+      arguments: %{"argument" => argument_text}
+    }
+
+    update = fn status ->
+      module.tool_updated(context, %{
+        tool_call_id: "call-1",
+        title: name,
+        status: status,
+        current_step: nil,
+        progress: nil,
+        cancellable: false
+      })
+    end
+
+    update.(:pending)
+
+    case module.request_permission(context, request) do
+      :allow ->
+        update.(:in_progress)
+        update.(:completed)
+        {:ok, "allowed"}
+
+      {:deny, reason} ->
+        update.(:failed)
+        {:ok, "denied #{reason}"}
+    end
+  end
+
   def handle_turn(_history, "telemetry " <> numbers, options) do
     [input_tokens, output_tokens] = numbers |> String.split(" ") |> Enum.map(&String.to_integer/1)
 
