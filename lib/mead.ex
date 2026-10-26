@@ -24,6 +24,8 @@ defmodule Mead do
   @routes [:auto, :local, :cloud]
   # The longest delay `Process.send_after/3` accepts on every platform.
   @maximum_turn_timeout 4_294_967_295
+  @default_recent 20
+  @maximum_recent 100
 
   @doc """
   Starts a session and returns its id.
@@ -316,5 +318,58 @@ defmodule Mead do
       :ok -> :ok
       {:error, reason} -> {:error, {:persistence, reason}}
     end
+  end
+
+  @doc """
+  Reads the ledger: the totals over every route, the totals per route and provider, and the most recent turns.
+
+  ## Options
+
+    * `:recent` - how many of the latest turns to include, newest first, from 0 to 100; defaults to 20.
+    * `:ledger` - the ledger to read; defaults to `Mead.Ledger`.
+
+  It never changes anything. When the ledger is not running it exits, as the ledger accessors do.
+  """
+  @spec usage(keyword()) :: %{totals: map(), routes: [map()], recent: [map()]}
+  def usage(options \\ []) do
+    options = validate_usage_options!(options)
+    ledger = Keyword.fetch!(options, :ledger)
+
+    routes =
+      ledger
+      |> Mead.Ledger.route_totals()
+      |> Enum.map(fn {{route, provider}, totals} ->
+        Map.merge(%{route: route, provider: provider}, totals)
+      end)
+      |> Enum.sort_by(&{Atom.to_string(&1.route), inspect(&1.provider)})
+
+    %{
+      totals: Mead.Ledger.totals(ledger),
+      routes: routes,
+      recent: Mead.Ledger.recent(Keyword.fetch!(options, :recent), ledger)
+    }
+  end
+
+  @doc """
+  Returns what the ledger counted for one session, or `{:error, :not_found}` for a session that has not completed a turn or was deleted.
+  """
+  @spec session_usage(String.t(), GenServer.server()) :: {:ok, map()} | {:error, :not_found}
+  def session_usage(session_id, ledger \\ Mead.Ledger),
+    do: Mead.Ledger.session_totals(session_id, ledger)
+
+  defp validate_usage_options!(options) do
+    unless Keyword.keyword?(options) do
+      raise ArgumentError, "options must be a keyword list, got: #{inspect(options)}"
+    end
+
+    options = Keyword.validate!(options, recent: @default_recent, ledger: Mead.Ledger)
+    recent = Keyword.fetch!(options, :recent)
+
+    unless is_integer(recent) and recent in 0..@maximum_recent//1 do
+      raise ArgumentError,
+            "recent must be an integer from 0 to #{@maximum_recent}, got: #{inspect(recent)}"
+    end
+
+    options
   end
 end
