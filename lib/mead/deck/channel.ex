@@ -16,8 +16,9 @@ defmodule Mead.Deck.Channel do
   `queue_limit` others (a prompt over the limit is dropped without any event), and the queue runs
   one turn at a time through `Mead.submit_turn/3` in a task under `Mead.TurnSupervisor`. When a
   turn ends, its text arrives as a `text.delta` (unless it was already streamed), and
-  `metric.updated` reports the session's token totals from the ledger. A failed turn emits no
-  event of its own.
+  `metric.updated` reports the session's token totals from the ledger. A turn that ends in an
+  error emits `turn.failed`; one that succeeds with an empty or invalid answer emits neither text
+  nor failure.
 
   ## Permissions
 
