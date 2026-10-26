@@ -225,6 +225,14 @@ defmodule Mead.Deck.Channel do
 
   def handle_call(:policy_level, _from, state), do: {:reply, state.policy_level, state}
 
+  # An update from a turn that is over (or that is not the running one) is dropped, as a late text
+  # fragment is: its card was already closed with the turn.
+  def handle_call({:tool_updated, turn_id, _update}, _from, %{running: running} = state)
+      when not is_map(running) or running.turn_id != turn_id do
+    Logger.warning("deck dropped a tool update from #{turn_id}, which is not the running turn")
+    {:reply, :ok, state}
+  end
+
   def handle_call({:tool_updated, turn_id, update}, _from, state) do
     payload = %{
       "tool_call_id" => update.tool_call_id,
@@ -259,7 +267,7 @@ defmodule Mead.Deck.Channel do
     case state.running do
       %{turn_id: ^turn_id} = running when is_binary(text) and text != "" ->
         if String.valid?(text) do
-          case emit(state, "text.delta", %{"turn_id" => turn_id, "text" => text}) do
+          case emit(state, "text.delta", %{"turn_id" => turn_id, "text" => text}, sync: false) do
             {:ok, state, _envelope} ->
               {:reply, :ok, %{state | running: Map.put(running, :streamed, true)}}
 
@@ -725,9 +733,14 @@ defmodule Mead.Deck.Channel do
   defp failure_events(_turn_id, _result), do: []
 
   # Only the name of an atom reason is sent; anything else could carry what the model or a tool said.
-  defp failure_reason({:failed, reason}), do: failure_reason(reason)
-  defp failure_reason(reason) when is_atom(reason), do: Atom.to_string(reason)
-  defp failure_reason(_reason), do: "failed"
+  defp failure_reason(:timeout), do: "turn_timeout"
+  defp failure_reason({:failed, reason}), do: provider_reason(reason)
+  defp failure_reason(reason), do: provider_reason(reason)
+
+  defp provider_reason(reason) when is_atom(reason) and not is_nil(reason),
+    do: Atom.to_string(reason)
+
+  defp provider_reason(_reason), do: "failed"
 
   # A turn that streamed already sent its text piece by piece; the whole of it is not sent again.
   defp text_events(%{streamed: true}, _turn_id, _result), do: []
@@ -811,11 +824,11 @@ defmodule Mead.Deck.Channel do
   end
 
   # Writes the event to the log first, then sends it to every attached socket.
-  defp emit(state, type, payload) do
+  defp emit(state, type, payload, options \\ []) do
     sequence = EventLog.last_sequence(state.log) + 1
     envelope = Events.envelope(sequence, state.session_id, type, payload, DateTime.utc_now())
 
-    case EventLog.append(state.log, envelope) do
+    case EventLog.append(state.log, envelope, options) do
       {:ok, log} ->
         encoded = Events.encode(envelope)
         for socket <- Map.keys(state.sockets), do: send(socket, {:deck_event, encoded})

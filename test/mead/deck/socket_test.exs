@@ -265,6 +265,19 @@ defmodule Mead.Deck.SocketTest do
              WebSocketClient.receive_frame(client, 2_000)
   end
 
+  test "a channel that stops for a log failure closes the socket with that reason",
+       %{directory: directory} do
+    {server, session_id, ticket} = connected(directory)
+    client = DeckServer.open(server, ticket)
+    {client, _snapshot} = WebSocketClient.receive_type(client, "session.snapshot")
+
+    channel = channel_of(session_id)
+    GenServer.stop(channel, {:shutdown, {:log_failed, :eacces}})
+
+    assert {_client, {:close, 1011, "event log failed"}} =
+             WebSocketClient.receive_frame(client, 2_000)
+  end
+
   defp channel_of(session_id) do
     [{pid, _value}] = Registry.lookup(Mead.Registry, {:deck, session_id})
     pid

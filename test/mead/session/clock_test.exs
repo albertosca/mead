@@ -23,6 +23,18 @@ defmodule Mead.Session.ClockTest do
     {turn, handler}
   end
 
+  test "pausing the clock waits for a busy session server instead of giving up after five seconds" do
+    session_id = start_session(10_000)
+    server = Mead.Session.whereis(session_id, :server)
+    :ok = :sys.suspend(server)
+
+    task = Task.async(fn -> Server.pause_clock(session_id) end)
+    assert Task.yield(task, 5_500) == nil
+
+    :ok = :sys.resume(server)
+    assert Task.await(task) == :ok
+  end
+
   test "a paused turn does not time out and completes once released" do
     session_id = start_session(200)
     {turn, handler} = start_blocked_turn(session_id)

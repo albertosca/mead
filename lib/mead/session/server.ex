@@ -54,7 +54,7 @@ defmodule Mead.Session.Server do
   defp clock_call(session_id, request) do
     case Session.whereis(session_id, :server) do
       nil -> {:error, :not_found}
-      server -> GenServer.call(server, request)
+      server -> GenServer.call(server, request, :infinity)
     end
   catch
     :exit, _reason -> {:error, :not_found}

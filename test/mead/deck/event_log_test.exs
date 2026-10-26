@@ -26,6 +26,15 @@ defmodule Mead.Deck.EventLogTest do
 
   defp events_path(directory), do: Path.join(directory, @session_id <> ".events")
 
+  test "an event appended without a sync is still on disk after a reopen", %{tmp_dir: directory} do
+    {:ok, log} = EventLog.open(directory, @session_id)
+    {:ok, log} = EventLog.append(log, event(1), sync: false)
+    {:ok, _log} = EventLog.append(log, event(2))
+
+    {:ok, reopened} = EventLog.open(directory, @session_id)
+    assert Enum.map(EventLog.read_after(reopened, 0), & &1["sequence"]) == [1, 2]
+  end
+
   test "an empty log has last_sequence 0", %{tmp_dir: directory} do
     {:ok, log} = EventLog.open(directory, @session_id)
     assert EventLog.last_sequence(log) == 0

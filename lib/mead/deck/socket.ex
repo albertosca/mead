@@ -60,8 +60,8 @@ defmodule Mead.Deck.Socket do
   def handle_info(:resume_deadline, %{resumed: false} = state),
     do: {:stop, :normal, {1008, "session.resume expected"}, state}
 
-  def handle_info({:DOWN, _reference, :process, channel, _reason}, %{channel: channel} = state),
-    do: {:stop, :normal, {1011, "session closed"}, state}
+  def handle_info({:DOWN, _reference, :process, channel, reason}, %{channel: channel} = state),
+    do: {:stop, :normal, {1011, close_reason(reason)}, state}
 
   def handle_info(_message, state), do: {:ok, state}
 
@@ -86,6 +86,9 @@ defmodule Mead.Deck.Socket do
     Channel.client_message(state.channel, self(), message)
     {:ok, state}
   end
+
+  defp close_reason({:shutdown, {:log_failed, _reason}}), do: "event log failed"
+  defp close_reason(_reason), do: "session closed"
 
   defp invalid_frame(reason, state) do
     Logger.warning("deck socket ignored a frame: #{reason}")

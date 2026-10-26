@@ -130,5 +130,30 @@ defmodule Mead.Deck.TurnFailureTest do
     assert final["status"] == "failed"
     assert final["tool_call_id"] == "call-1"
     assert final["cancellable"] == false
+
+    failed = Enum.find(events, &(&1["type"] == "turn.failed"))
+    assert failed["payload"]["reason"] == "turn_timeout"
+  end
+
+  test "a tool update from a turn that is over is dropped", %{directory: directory} do
+    {client, session_id} = open(directory, Mead.Test.DeckHandler, 10_000)
+    [{channel, _value}] = Registry.lookup(Mead.Registry, {:deck, session_id})
+
+    update = %{
+      tool_call_id: "late-1",
+      title: "files__read_file",
+      status: :in_progress,
+      current_step: nil,
+      progress: nil,
+      cancellable: true
+    }
+
+    assert :ok = GenServer.call(channel, {:tool_updated, "turn-9", update})
+    assert %{open_cards: open_cards} = :sys.get_state(channel)
+    assert open_cards == %{}
+
+    client = DeckServer.send_prompt(client, "echo after")
+    {_client, events} = events_until(client, &metric?/1)
+    refute Enum.any?(events, &(&1["type"] == "tool_call.updated"))
   end
 end
