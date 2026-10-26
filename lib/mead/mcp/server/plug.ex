@@ -40,7 +40,6 @@ defmodule Mead.MCP.Server.Plug do
   alias Mead.MCP.Server.Dispatcher
 
   @maximum_body_bytes 1024 * 1024
-  @loopback_hosts ["localhost", "127.0.0.1", "::1"]
   @refused -32_000
   @parse_error -32_700
   @invalid_request -32_600
@@ -96,30 +95,9 @@ defmodule Mead.MCP.Server.Plug do
   defp require_origin(%Plug.Conn{halted: true} = conn, _configuration), do: conn
 
   defp require_origin(conn, configuration) do
-    case get_req_header(conn, "origin") do
-      [] ->
-        conn
-
-      [origin] ->
-        if allowed_origin?(origin, configuration), do: conn, else: forbidden(conn)
-
-      _several ->
-        forbidden(conn)
-    end
-  end
-
-  defp allowed_origin?(origin, configuration) do
-    origin in configuration.allowed_origins or loopback_origin?(origin)
-  end
-
-  defp loopback_origin?(origin) do
-    case URI.parse(origin) do
-      %URI{scheme: scheme, host: host, userinfo: nil}
-      when scheme in ["http", "https"] and host in @loopback_hosts ->
-        true
-
-      _other ->
-        false
+    case Mead.Origin.check(conn, configuration.allowed_origins) do
+      :ok -> conn
+      :forbidden -> forbidden(conn)
     end
   end
 

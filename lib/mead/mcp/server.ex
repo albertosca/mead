@@ -8,9 +8,15 @@ defmodule Mead.MCP.Server do
   opens no port. An invalid setting stops the application at boot with a message that names the
   setting and never contains the token.
 
-  The listener is a `Bandit` instance running `Mead.MCP.Server.Plug`. It is supervised
+  The listener is a `Bandit` instance running `Mead.Gateway`, which serves `Mead.MCP.Server.Plug`
+  when `:mcp_server` has a token and `Mead.Deck.Plug` when `:deck` has one (the deck reuses the
+  `:allowed_origins` of `:mcp_server`), and starts when either does. It is supervised
   `:one_for_one`, so a listener that dies is started again without touching the hub or the
   sessions. A port that is already taken stops the start, loudly, as any other boot error.
+
+  Tests start their own server with `:settings`, `:deck_settings` (replacing the application
+  environment) and `:deck_options` (extra options for `Mead.Deck.Plug`, such as the session
+  handler).
   """
 
   use Supervisor
@@ -44,7 +50,11 @@ defmodule Mead.MCP.Server do
 
       _enabled ->
         {:ok, listener} = Configuration.listener(mcp_settings)
-        Supervisor.init([listener_child(listener, mcp, deck)], strategy: :one_for_one)
+        deck_options = Keyword.get(options, :deck_options, [])
+
+        Supervisor.init([listener_child(listener, mcp, deck, deck_options)],
+          strategy: :one_for_one
+        )
     end
   end
 
@@ -82,15 +92,28 @@ defmodule Mead.MCP.Server do
     :exit, _reason -> :error
   end
 
-  defp listener_child(listener, mcp, _deck) do
+  defp listener_child(listener, mcp, deck, deck_options) do
     mcp_plug =
       case mcp do
         {:ok, configuration} -> {Mead.MCP.Server.Plug, [configuration: configuration]}
         :disabled -> nil
       end
 
+    deck_plug =
+      case deck do
+        {:ok, configuration} ->
+          {Mead.Deck.Plug,
+           Keyword.merge(
+             [configuration: configuration, allowed_origins: listener.allowed_origins],
+             deck_options
+           )}
+
+        :disabled ->
+          nil
+      end
+
     {Bandit,
-     plug: {Mead.Gateway, mcp: mcp_plug, deck: nil},
+     plug: {Mead.Gateway, mcp: mcp_plug, deck: deck_plug},
      scheme: :http,
      ip: listener.address,
      port: listener.port,

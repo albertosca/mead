@@ -21,7 +21,9 @@ defmodule Mead.MixProject do
       {:bandit, "~> 1.13"},
       {:req, "~> 0.7.5"},
       {:telemetry, "~> 1.4"},
-      {:plug, "~> 1.20"}
+      {:plug, "~> 1.20"},
+      {:websock_adapter, "~> 0.5"},
+      {:mint_web_socket, "~> 1.0", only: :test}
     ]
   end
 

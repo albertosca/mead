@@ -68,14 +68,16 @@ defmodule Mead.MCP.Server.Configuration do
   end
 
   @doc """
-  Reads only the listener settings (`:port`, `:address`, `:maximum_connections`), which are valid
-  with or without a token, so the shared listener can start for the deck alone.
+  Reads only the listener settings (`:port`, `:address`, `:allowed_origins`,
+  `:maximum_connections`), which are valid with or without a token, so the shared listener can
+  start for the deck alone. The deck applies the same `Origin` rule as MCP.
   """
   @spec listener(term()) ::
           {:ok,
            %{
              port: 0..65_535,
              address: :inet.ip4_address(),
+             allowed_origins: [String.t()],
              maximum_connections: pos_integer()
            }}
           | {:error, String.t()}
@@ -84,8 +86,15 @@ defmodule Mead.MCP.Server.Configuration do
          :ok <- check_keys(settings),
          {:ok, port} <- fetch_port(settings),
          {:ok, address} <- fetch_address(settings),
+         {:ok, allowed_origins} <- fetch_allowed_origins(settings),
          {:ok, maximum_connections} <- fetch_maximum_connections(settings) do
-      {:ok, %{port: port, address: address, maximum_connections: maximum_connections}}
+      {:ok,
+       %{
+         port: port,
+         address: address,
+         allowed_origins: allowed_origins,
+         maximum_connections: maximum_connections
+       }}
     end
   end
 

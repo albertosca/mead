@@ -4,21 +4,37 @@ defmodule Mead.MCP.Server.ListenerConfigurationTest do
   alias Mead.MCP.Server.Configuration
 
   test "defaults need no token" do
-    assert {:ok, %{port: 4040, address: {127, 0, 0, 1}, maximum_connections: 250}} =
-             Configuration.listener([])
+    assert {:ok,
+            %{
+              port: 4040,
+              address: {127, 0, 0, 1},
+              allowed_origins: [],
+              maximum_connections: 250
+            }} = Configuration.listener([])
   end
 
   test "the listener settings are read whether or not a token is present" do
-    expected = %{port: 0, address: {10, 0, 0, 7}, maximum_connections: 8}
+    expected = %{
+      port: 0,
+      address: {10, 0, 0, 7},
+      allowed_origins: ["https://deck.example"],
+      maximum_connections: 8
+    }
 
     assert {:ok, ^expected} =
-             Configuration.listener(port: 0, address: {10, 0, 0, 7}, maximum_connections: 8)
+             Configuration.listener(
+               port: 0,
+               address: {10, 0, 0, 7},
+               allowed_origins: ["https://deck.example"],
+               maximum_connections: 8
+             )
 
     assert {:ok, ^expected} =
              Configuration.listener(
                token: "t",
                port: 0,
                address: {10, 0, 0, 7},
+               allowed_origins: ["https://deck.example"],
                maximum_connections: 8
              )
   end
@@ -32,6 +48,9 @@ defmodule Mead.MCP.Server.ListenerConfigurationTest do
 
     assert {:error, "maximum_connections must be a positive integer"} =
              Configuration.listener(maximum_connections: 0)
+
+    assert {:error, "allowed_origins must be a list of strings"} =
+             Configuration.listener(allowed_origins: [1])
 
     assert {:error, "settings must be a keyword list"} = Configuration.listener(%{})
     assert {:error, "unknown setting(s): [:colour]"} = Configuration.listener(colour: 1)
