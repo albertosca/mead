@@ -21,6 +21,7 @@ defmodule Mead.Deck.Configuration do
     * `:resume_deadline_ms` - how long a fresh socket may wait before sending `session.resume`;
       defaults to 10 000.
     * `:queue_limit` - how many prompts may wait behind a running turn; defaults to 10.
+    * `:idle_timeout_ms` - how long a socket may go without any frame from the client (text, ping or pong; the server pings with every heartbeat, so a live client answers by itself) before it is closed with 1001; it must be larger than `:heartbeat_ms`; defaults to 90 000.
     * `:event_log_limit` - how many events a session's log keeps; once an idle channel holds more, the oldest are dropped (the latest permission policy is always kept); defaults to 10 000.
     * `:default_policy_level` - `:ask_always`, `:ask_for_risky` or `:allow_all`; defaults to
       `:ask_for_risky`.
@@ -34,7 +35,8 @@ defmodule Mead.Deck.Configuration do
     heartbeat_ms: 15_000,
     resume_deadline_ms: 10_000,
     queue_limit: 10,
-    event_log_limit: 10_000
+    event_log_limit: 10_000,
+    idle_timeout_ms: 90_000
   ]
   @allowed_keys [:token, :default_policy_level | Keyword.keys(@positive_integer_defaults)]
 
@@ -47,6 +49,7 @@ defmodule Mead.Deck.Configuration do
     :resume_deadline_ms,
     :queue_limit,
     :event_log_limit,
+    :idle_timeout_ms,
     :default_policy_level
   ]
   defstruct @enforce_keys
@@ -61,6 +64,7 @@ defmodule Mead.Deck.Configuration do
           resume_deadline_ms: pos_integer(),
           queue_limit: pos_integer(),
           event_log_limit: pos_integer(),
+          idle_timeout_ms: pos_integer(),
           default_policy_level: policy_level()
         }
 
@@ -98,6 +102,7 @@ defmodule Mead.Deck.Configuration do
     with :ok <- check_token(token),
          {:ok, integers} <- fetch_positive_integers(settings),
          :ok <- check_heartbeat(integers.heartbeat_ms),
+         :ok <- check_idle_timeout(integers),
          {:ok, level} <- fetch_policy_level(settings) do
       {:ok,
        struct!(
@@ -129,6 +134,13 @@ defmodule Mead.Deck.Configuration do
 
   defp check_heartbeat(_heartbeat_ms),
     do: {:error, "heartbeat_ms must be at most #{@maximum_heartbeat_ms}"}
+
+  defp check_idle_timeout(%{idle_timeout_ms: idle, heartbeat_ms: heartbeat})
+       when idle > heartbeat,
+       do: :ok
+
+  defp check_idle_timeout(_integers),
+    do: {:error, "idle_timeout_ms must be larger than heartbeat_ms"}
 
   defp fetch_policy_level(settings) do
     case Keyword.get(settings, :default_policy_level, :ask_for_risky) do

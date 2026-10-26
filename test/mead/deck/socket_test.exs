@@ -115,6 +115,50 @@ defmodule Mead.Deck.SocketTest do
     send(handler, :release)
   end
 
+  test "a client that never answers is closed once the idle timeout passes", %{
+    directory: directory
+  } do
+    {server, _session_id, ticket} = connected(directory, heartbeat_ms: 50, idle_timeout_ms: 200)
+    client = DeckServer.open(server, ticket)
+    {client, _snapshot} = WebSocketClient.receive_type(client, "session.snapshot")
+
+    # Not reading means not answering the server's pings.
+    Process.sleep(400)
+
+    assert {_client, {:close, 1001, "idle"}} = drain_to_close(client)
+  end
+
+  test "a client that answers pings stays connected past the idle timeout", %{
+    directory: directory
+  } do
+    {server, _session_id, ticket} = connected(directory, heartbeat_ms: 50, idle_timeout_ms: 200)
+    client = DeckServer.open(server, ticket)
+    {client, _snapshot} = WebSocketClient.receive_type(client, "session.snapshot")
+
+    deadline = System.monotonic_time(:millisecond) + 600
+
+    client =
+      Stream.repeatedly(fn -> :tick end)
+      |> Enum.reduce_while(client, fn _tick, client ->
+        {client, frame} = WebSocketClient.receive_frame(client, 100)
+        refute match?({:close, _code, _reason}, frame)
+        refute frame == :closed
+
+        if System.monotonic_time(:millisecond) > deadline,
+          do: {:halt, client},
+          else: {:cont, client}
+      end)
+
+    assert {_client, {:text, _heartbeat}} = WebSocketClient.receive_frame(client, 1_000)
+  end
+
+  defp drain_to_close(client) do
+    case WebSocketClient.receive_frame(client, 1_000) do
+      {client, {:text, _frame}} -> drain_to_close(client)
+      other -> other
+    end
+  end
+
   test "no session.resume within the deadline closes the socket", %{directory: directory} do
     {server, _session_id, ticket} = connected(directory, resume_deadline_ms: 100)
     {:ok, client} = WebSocketClient.connect(server.port, socket_path(ticket))

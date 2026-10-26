@@ -11,7 +11,9 @@ defmodule Mead.Deck.Socket do
   A frame that is binary, too large, not JSON, not an object, of an unknown type or with an invalid
   payload is ignored and logged by reason only, never by content. More than 20 of them in a minute
   close the socket (1008). A heartbeat is sent every `heartbeat_ms` whatever the channel is doing,
-  so a long blocked turn does not look like a dead connection.
+  so a long blocked turn does not look like a dead connection. The heartbeat is followed by a
+  WebSocket ping; any frame from the client, a pong included, counts as activity, and a socket
+  with none for `idle_timeout_ms` is closed (1001), so a silent client cannot hold it forever.
   """
 
   @behaviour WebSock
@@ -35,26 +37,36 @@ defmodule Mead.Deck.Socket do
        session_id: session_id,
        configuration: configuration,
        resumed: false,
-       invalid_frames: []
+       invalid_frames: [],
+       last_activity: now()
      }}
   end
 
   @impl WebSock
   def handle_in({data, [opcode: :text]}, state) do
+    state = touch(state)
+
     case Events.decode_client(data) do
       {:ok, message} -> handle_message(message, state)
       {:error, reason} -> invalid_frame(reason, state)
     end
   end
 
-  def handle_in({_data, [opcode: :binary]}, state), do: invalid_frame(:binary, state)
+  def handle_in({_data, [opcode: :binary]}, state), do: invalid_frame(:binary, touch(state))
+
+  @impl WebSock
+  def handle_control({_payload, [opcode: _ping_or_pong]}, state), do: {:ok, touch(state)}
 
   @impl WebSock
   def handle_info({:deck_event, binary}, state), do: {:push, {:text, binary}, state}
 
   def handle_info(:heartbeat, state) do
-    schedule_heartbeat(state)
-    {:push, {:text, heartbeat(state)}, state}
+    if now() - state.last_activity > state.configuration.idle_timeout_ms do
+      {:stop, :normal, {1001, "idle"}, state}
+    else
+      schedule_heartbeat(state)
+      {:push, [{:text, heartbeat(state)}, {:ping, ""}], state}
+    end
   end
 
   def handle_info(:resume_deadline, %{resumed: false} = state),
@@ -108,6 +120,9 @@ defmodule Mead.Deck.Socket do
       {:ok, state}
     end
   end
+
+  defp touch(state), do: %{state | last_activity: now()}
+  defp now, do: System.monotonic_time(:millisecond)
 
   defp schedule_heartbeat(%{configuration: configuration}),
     do: Process.send_after(self(), :heartbeat, configuration.heartbeat_ms)

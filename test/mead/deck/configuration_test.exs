@@ -20,6 +20,7 @@ defmodule Mead.Deck.ConfigurationTest do
       assert configuration.heartbeat_ms == 15_000
       assert configuration.resume_deadline_ms == 10_000
       assert configuration.queue_limit == 10
+      assert configuration.idle_timeout_ms == 90_000
       assert configuration.default_policy_level == :ask_for_risky
     end
 
@@ -50,7 +51,8 @@ defmodule Mead.Deck.ConfigurationTest do
             :heartbeat_ms,
             :resume_deadline_ms,
             :queue_limit,
-            :event_log_limit
+            :event_log_limit,
+            :idle_timeout_ms
           ],
           value <- [0, -1, 1.5, "10", nil, :infinity] do
         assert {:error, message} = Configuration.load([{:token, @token}, {setting, value}])
@@ -63,6 +65,17 @@ defmodule Mead.Deck.ConfigurationTest do
       assert {:ok, _} = Configuration.load(token: @token, heartbeat_ms: 30_000)
       assert {:error, message} = Configuration.load(token: @token, heartbeat_ms: 30_001)
       assert message =~ "heartbeat_ms must be at most 30000"
+    end
+
+    test "an idle timeout that does not outlast the heartbeat is refused" do
+      assert {:ok, _} = Configuration.load(token: @token, heartbeat_ms: 100, idle_timeout_ms: 101)
+
+      for idle <- [100, 99] do
+        assert {:error, message} =
+                 Configuration.load(token: @token, heartbeat_ms: 100, idle_timeout_ms: idle)
+
+        assert message =~ "idle_timeout_ms must be larger than heartbeat_ms"
+      end
     end
 
     test "an unknown policy level is refused" do
