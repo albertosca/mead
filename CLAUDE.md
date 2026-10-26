@@ -41,9 +41,9 @@ Welcome! This document provides complete operational guidelines and technical co
 * Process Registry: Elixir `Registry` mapping UUIDs to running GenServer PIDs.
 * Router: `Mead.Router`, a stateless turn handler (no process) that classifies each turn as local or cloud, calls the provider in that slot (`Mead.Provider`; Anthropic and Ollama implemented), and emits `[:mead, :router, :route]` events for the ledger.
 * Persistence: `Mead.Session.Store`, one append-only file per session under `config :mead, :storage, directory:`; `Mead.Session.History` writes through it and `Mead.resume_session/2` rebuilds a stopped session. `stop_session` keeps the file, `delete_session` removes it.
-* Ledger: `Mead.Ledger`, the first root child, aggregating those events per session and per route in ETS plus a ring of the last 100 turns, journaled to `ledger.journal` in the storage directory and replayed at boot.
+* Ledger: `Mead.Ledger`, the first root child, aggregating those events per session and per route in ETS plus a ring of the last 100 turns, journaled to `ledger.journal` in the storage directory and replayed at boot, and readable through `Mead.usage/1`.
 * MCP Hub: `Mead.MCP.Hub`, the client side of MCP: one `Mead.MCP.Connection` per configured server, a deny-by-default `Mead.MCP.Policy`, and the tool loop of the router.
-* MCP Server: `Mead.MCP.Server`, the last root child; a `Bandit` listener on `POST /mcp` guarded by a bearer token, exposing sessions as eight tools (start, submit, history, stop, resume, delete, list, compact). It starts only when `config :mead, :mcp_server` has a `token`.
+* MCP Server: `Mead.MCP.Server`, the last root child; a `Bandit` listener on `POST /mcp` guarded by a bearer token, exposing sessions as nine tools (start, submit, history, stop, resume, delete, list, compact, usage). It starts only when `config :mead, :mcp_server` has a `token`.
 * Verification gates: `mix test`, `mix format --check-formatted`, and `mix compile --warnings-as-errors`.
 
 For full architectural diagrams and specifications, see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
