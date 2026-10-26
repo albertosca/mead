@@ -45,6 +45,7 @@ defmodule Mead.Router do
   @maximum_replayed_exchanges 20
   # A model that keeps asking for tools would otherwise spend the turn timeout and the budget.
   @maximum_provider_calls 8
+  @text_separator "\n\n"
   # The hub gives up on a tool after 15 seconds; this is the margin for the task around it.
   @tool_wait 20_000
 
@@ -203,24 +204,40 @@ defmodule Mead.Router do
       on_delta: streaming_callback(provider, options)
     }
 
-    {result, progress} = loop(context, messages, %{calls: 0, tool_calls: 0, usage: no_usage()})
+    {result, progress} =
+      loop(context, messages, %{calls: 0, tool_calls: 0, usage: no_usage(), texts: []})
+
     outcome(result, provider, progress.usage, progress.tool_calls)
   end
 
-  defp converse(%{on_delta: nil} = context, messages),
+  defp converse(%{on_delta: nil} = context, messages, _progress),
     do: context.provider.converse(messages, context.tools, context.provider_options)
 
-  defp converse(context, messages) do
+  defp converse(context, messages, progress) do
     context.provider.converse_stream(
       messages,
       context.tools,
       context.provider_options,
-      context.on_delta
+      separated(context.on_delta, progress.texts != [])
     )
   end
 
+  # The first fragment of a call that follows spoken text carries the separator the stored output
+  # has between calls, so the streamed deltas join to exactly what the turn returns.
+  defp separated(on_delta, false), do: on_delta
+
+  defp separated(on_delta, true) do
+    first = :atomics.new(1, [])
+
+    fn fragment ->
+      if :atomics.add_get(first, 1, 1) == 1 and fragment != "",
+        do: on_delta.(@text_separator <> fragment),
+        else: on_delta.(fragment)
+    end
+  end
+
   defp loop(context, messages, progress) do
-    case converse(context, messages) do
+    case converse(context, messages, progress) do
       {:ok, %{content: content, stop_reason: :tool_use, usage: usage}} ->
         progress = add_call(progress, usage)
 
@@ -235,23 +252,32 @@ defmodule Mead.Router do
 
           tool_uses ->
             results = Enum.map(tool_uses, &run_tool_for_turn(context, &1))
+            said = for %{type: :text, text: text} <- content, text != "", do: text
 
             messages =
               messages ++
                 [%{role: :assistant, content: content}, %{role: :user, content: results}]
 
-            loop(context, messages, %{
+            # The next call's text follows what was already said; the stream gets the same
+            # separator the stored output has, so a replay matches the live view.
+            progress = %{
               progress
-              | tool_calls: progress.tool_calls + length(tool_uses)
-            })
+              | tool_calls: progress.tool_calls + length(tool_uses),
+                texts: progress.texts ++ said
+            }
+
+            loop(context, messages, progress)
         end
 
       {:ok, %{content: content, usage: usage}} ->
         progress = add_call(progress, usage)
 
         case for(%{type: :text, text: text} <- content, do: text) do
-          [] -> {{:error, :malformed_response}, progress}
-          texts -> {{:ok, Enum.join(texts)}, progress}
+          [] ->
+            {{:error, :malformed_response}, progress}
+
+          texts ->
+            {{:ok, Enum.join(progress.texts ++ [Enum.join(texts)], @text_separator)}, progress}
         end
 
       {:error, reason} ->

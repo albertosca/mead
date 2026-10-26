@@ -74,6 +74,33 @@ defmodule Mead.RouterStreamingTest do
     assert deltas() == ["don", "e"]
   end
 
+  test "the text said before a tool call is part of the returned output" do
+    steps = [
+      FakeProvider.tool_step_with_text("Checking.", [@call]),
+      FakeProvider.text_step("done")
+    ]
+
+    assert {:ok, "Checking.\n\ndone"} = route(FakeProvider, steps)
+  end
+
+  test "the stream carries a separator so the deltas join to the returned output" do
+    steps = [
+      FakeProvider.tool_step_with_text("Checking.", [@call]),
+      FakeProvider.text_step("done")
+    ]
+
+    assert {:ok, output} = route(StreamingProvider, steps)
+    assert output == "Checking.\n\ndone"
+    assert Enum.join(deltas()) == output
+  end
+
+  test "a tool call without preceding text adds no separator" do
+    steps = [FakeProvider.tool_step([@call]), FakeProvider.text_step("done")]
+
+    assert {:ok, "done"} = route(StreamingProvider, steps)
+    assert Enum.join(deltas()) == "done"
+  end
+
   test "telemetry equals the non-streaming turn for the same content" do
     capture_telemetry()
     steps = fn -> [FakeProvider.tool_step([@call]), FakeProvider.text_step("done")] end

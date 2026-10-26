@@ -33,5 +33,11 @@ defmodule Mead.Test.FakeProvider do
     {:ok, %{content: blocks, stop_reason: :tool_use, usage: usage}}
   end
 
+  # A model that says something before it asks for the tool.
+  def tool_step_with_text(text, tool_uses, usage \\ usage()) do
+    {:ok, %{content: content} = step} = tool_step(tool_uses, usage)
+    {:ok, %{step | content: [%{type: :text, text: text} | content]}}
+  end
+
   def usage, do: %{input_tokens: 5, output_tokens: 3}
 end
