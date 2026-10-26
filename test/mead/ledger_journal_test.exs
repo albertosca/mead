@@ -159,6 +159,28 @@ defmodule Mead.LedgerJournalTest do
 
       assert {:ok, %{turns: 1}} = Ledger.session_totals("session-a", context.name)
     end
+
+    test "sets a damaged journal aside even when an earlier .corrupt is a directory", context do
+      start_ledger(context)
+      emit(context)
+      emit(context)
+      stop_ledger(context)
+      path = JournalFile.path(context.directory)
+      File.mkdir_p!(Path.join(path <> ".corrupt", "inside"))
+      <<head::binary-size(13), byte, tail::binary>> = File.read!(path)
+      File.write!(path, <<head::binary, Bitwise.bxor(byte, 255), tail::binary>>)
+
+      capture_log(fn -> start_ledger(context) end)
+
+      refute File.exists?(path)
+      assert File.regular?(path <> ".corrupt")
+
+      emit(context)
+      stop_ledger(context)
+      start_ledger(context)
+
+      assert {:ok, %{turns: 1}} = Ledger.session_totals("session-a", context.name)
+    end
   end
 
   describe "the write path" do
@@ -264,6 +286,74 @@ defmodule Mead.LedgerJournalTest do
                    id: {:invalid, invalid}
                  )
       end
+    end
+
+    test "a journal that cannot be written warns when it drops pending events", context do
+      File.mkdir_p!(JournalFile.path(context.directory))
+      pid = capture_log(fn -> start_ledger(context) end) && Process.whereis(context.name)
+      :sys.suspend(pid)
+      for _index <- 1..10_050, do: emit(context)
+      :sys.resume(pid)
+
+      log = capture_log(fn -> assert {:error, :eisdir} = Ledger.flush(context.name) end)
+
+      assert log =~ "dropped 50 pending events of the ledger journal"
+    end
+
+    test "a forget survives the cap, so a deleted session stays deleted", context do
+      start_ledger(context)
+      emit(context)
+      assert Ledger.flush(context.name) == :ok
+      stop_ledger(context)
+
+      path = JournalFile.path(context.directory)
+      File.rename!(path, path <> ".saved")
+      File.mkdir_p!(path)
+      pid = capture_log(fn -> start_ledger(context) end) && Process.whereis(context.name)
+      :sys.suspend(pid)
+      Ledger.forget("session-a", context.name)
+      for _index <- 1..10_100, do: emit(context, %{session_id: "session-b"})
+      :sys.resume(pid)
+
+      capture_log(fn -> assert {:error, :eisdir} = Ledger.flush(context.name) end)
+      assert {:forget, "session-a"} in :sys.get_state(pid).pending
+      assert length(:sys.get_state(pid).pending) == 10_000
+
+      File.rm_rf!(path)
+      File.rename!(path <> ".saved", path)
+      assert Ledger.flush(context.name) == :ok
+      stop_ledger(context)
+      start_ledger(context)
+
+      assert Ledger.session_totals("session-a", context.name) == {:error, :not_found}
+    end
+
+    test "the accessors and forget do not wait for a ledger stuck on the disk", context do
+      start_ledger(context)
+      emit(context)
+      :sys.suspend(context.name)
+
+      reads =
+        Task.async(fn ->
+          {Ledger.totals(context.name).turns, Ledger.session_totals("session-a", context.name),
+           Ledger.recent(5, context.name) |> length(),
+           Ledger.route_totals(context.name)
+           |> map_size(), Ledger.forget("session-a", context.name)}
+        end)
+
+      assert {1, {:ok, %{turns: 1}}, 1, 1, :ok} = Task.await(reads, 1_000)
+      :sys.resume(context.name)
+    end
+
+    test "an accessor of a ledger that is not running exits", context do
+      assert {:noproc, _call} =
+               catch_exit(
+                 Ledger.totals(:"ledger_that_never_ran_#{System.unique_integer([:positive])}")
+               )
+
+      start_ledger(context)
+      stop_ledger(context)
+      assert {:noproc, _call} = catch_exit(Ledger.totals(context.name))
     end
 
     test "events still pending when the ledger stops are written", context do

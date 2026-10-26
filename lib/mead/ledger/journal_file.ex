@@ -1,13 +1,8 @@
 defmodule Mead.Ledger.JournalFile do
   @moduledoc """
-  The file side of the ledger journal: `ledger.journal` in the storage directory, a sequence of
-  `Mead.Session.Record` records, each one `Mead.Ledger.Journal` event.
+  The file side of the ledger journal: `ledger.journal` in the storage directory, a sequence of `Mead.Session.Record` records, each one `Mead.Ledger.Journal` event.
 
-  `read/1` has no side effect. `load/1` is what the ledger does at boot: it cuts a torn last
-  record off the file, so that the next append does not land behind garbage, and it moves a file
-  that is damaged anywhere else to `ledger.journal.corrupt` and starts empty, because the ledger
-  is diagnostic and a damaged file must not stop the application. The name has no UUID shape, so
-  `Mead.Session.Store.list/1` never mistakes the file for a conversation.
+  `read/1` has no side effect. `load/1` is what the ledger does at boot: it cuts a torn last record off the file, so that the next append does not land behind garbage, and it moves a file that is damaged anywhere else to `ledger.journal.corrupt` and starts empty, because the ledger is diagnostic and a damaged file must not stop the application. The name has no UUID shape, so `Mead.Session.Store.list/1` never mistakes the file for a conversation.
   """
 
   require Logger
@@ -24,8 +19,7 @@ defmodule Mead.Ledger.JournalFile do
   @doc """
   Reads the journal into a model, without touching the file.
 
-  Returns the model, the size of the valid prefix, and whether the file ended in a torn tail. An
-  absent file is an empty model.
+  Returns the model, the size of the valid prefix, and whether the file ended in a torn tail. An absent file is an empty model.
   """
   @spec read(String.t()) ::
           {:ok, Journal.t(), non_neg_integer(), :clean | :torn}
@@ -75,21 +69,29 @@ defmodule Mead.Ledger.JournalFile do
     end
   end
 
+  # A rename cannot replace a directory, so an earlier `.corrupt` is cleared first. If the file still
+  # cannot be moved it is removed: left in place it would be read as damaged at every boot, and
+  # every append would land behind the damage.
   defp set_aside(directory) do
     journal = path(directory)
+    corrupt = journal <> ".corrupt"
+    File.rm_rf(corrupt)
 
-    case File.rename(journal, journal <> ".corrupt") do
+    case File.rename(journal, corrupt) do
       :ok ->
         Logger.warning("the ledger journal is damaged; moved to #{@file_name}.corrupt")
 
       {:error, reason} ->
-        Logger.warning("the ledger journal is damaged and could not be moved: #{inspect(reason)}")
+        removed = if File.rm(journal) == :ok, do: "removed", else: "left in place"
+
+        Logger.warning(
+          "the ledger journal is damaged and could not be moved (#{inspect(reason)}); #{removed}"
+        )
     end
   end
 
   @doc """
-  Appends the events with one write and one sync, creating the directory and the file on first
-  use. A failed write is rolled back to the size the file had before it.
+  Appends the events with one write and one sync, creating the directory and the file on first use. A failed write is rolled back to the size the file had before it.
   """
   @spec append(String.t(), [Journal.event()]) :: :ok | {:error, term()}
   def append(directory, events) do
@@ -119,9 +121,7 @@ defmodule Mead.Ledger.JournalFile do
   end
 
   @doc """
-  Replaces the journal with one checkpoint record of `model`, written to `ledger.journal.tmp`,
-  synced and renamed over the journal, so a crash leaves the old file or the new one. A failure
-  leaves the journal as it was and removes the temporary file.
+  Replaces the journal with one checkpoint record of `model`, written to `ledger.journal.tmp`, synced and renamed over the journal, so a crash leaves the old file or the new one. A failure leaves the journal as it was and removes the temporary file.
   """
   @spec rewrite(String.t(), Journal.t()) :: :ok | {:error, term()}
   def rewrite(directory, %Journal{} = model) do

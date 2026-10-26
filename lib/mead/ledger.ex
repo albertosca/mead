@@ -30,6 +30,7 @@ defmodule Mead.Ledger do
   @flush_after_ms 50
   @retry_after_ms 1_000
   @pending_limit 10_000
+  @pending_slack 1_000
 
   @doc """
   Starts the ledger.
@@ -144,6 +145,7 @@ defmodule Mead.Ledger do
     if directory, do: restore(counters, ring, JournalFile.load(directory))
 
     configuration = %{counters: counters, ring: ring, ledger: name, journal: directory != nil}
+    :persistent_term.put({__MODULE__, name}, configuration)
 
     # A ledger that was killed leaves its handler attached to dead tables, so attach replaces it.
     :telemetry.detach(handler_id)
@@ -214,6 +216,7 @@ defmodule Mead.Ledger do
   @impl true
   def terminate(_reason, state) do
     :telemetry.detach(state.handler_id)
+    :persistent_term.erase({__MODULE__, state.tables.ledger})
     flush_pending(state)
     :ok
   end
@@ -228,17 +231,37 @@ defmodule Mead.Ledger do
   end
 
   # The newest event is first. Past the limit the oldest are dropped, so a dead disk cannot grow
-  # the state of the ledger without bound.
+  # the state of the ledger without bound. The list may overshoot by @pending_slack before it is
+  # trimmed, so the trim is paid once per thousand events and not on every one.
   defp enqueue(state, event) do
-    pending = [event | state.pending]
-    count = state.pending_count + 1
-
-    if count > @pending_limit do
-      %{state | pending: Enum.take(pending, @pending_limit), pending_count: @pending_limit}
-    else
-      %{state | pending: pending, pending_count: count}
-    end
+    state = %{state | pending: [event | state.pending], pending_count: state.pending_count + 1}
+    if state.pending_count > @pending_limit + @pending_slack, do: trim(state), else: state
   end
+
+  # Turns go first. A forget is the last thing to go: the turns of a deleted session are already in
+  # the file, and without the forget the session would come back at the next boot.
+  defp trim(%{pending_count: count} = state) when count <= @pending_limit, do: state
+
+  defp trim(state) do
+    excess = state.pending_count - @pending_limit
+    pending = state.pending |> Enum.reverse() |> drop_oldest(excess, [])
+
+    Logger.warning(
+      "the ledger journal cannot be written; dropped #{excess} pending events of the ledger journal"
+    )
+
+    %{state | pending: pending, pending_count: @pending_limit}
+  end
+
+  # Walks the events oldest first and returns them newest first.
+  defp drop_oldest(events, 0, kept), do: Enum.reverse(events, kept)
+
+  defp drop_oldest([], excess, kept), do: Enum.take(kept, length(kept) - excess)
+
+  defp drop_oldest([{:forget, _id} = event | rest], excess, kept),
+    do: drop_oldest(rest, excess, [event | kept])
+
+  defp drop_oldest([_event | rest], excess, kept), do: drop_oldest(rest, excess - 1, kept)
 
   defp ensure_timer(%{timer: nil} = state) do
     delay = if state.failing, do: @retry_after_ms, else: @flush_after_ms
@@ -252,7 +275,7 @@ defmodule Mead.Ledger do
   defp flush_pending(%{pending: []} = state), do: {:ok, %{state | timer: nil}}
 
   defp flush_pending(state) do
-    state = %{state | timer: nil}
+    state = trim(%{state | timer: nil})
 
     case JournalFile.append(state.directory, Enum.reverse(state.pending)) do
       :ok ->
@@ -377,6 +400,21 @@ defmodule Mead.Ledger do
     sequence = :ets.update_counter(counters, :ring_index, 1, {:ring_index, 0})
     slot = rem(sequence - 1, @ring_size)
     :ets.insert(ring, {slot, sequence, entry})
+  end
+
+  # The tables are published when the ledger starts, so reading a total never queues behind a
+  # ledger that is stuck on the disk. A name that is not published, or whose tables died with a
+  # killed ledger, falls back to asking the process, which exits when it is not running.
+  defp tables(ledger) when is_atom(ledger) do
+    case :persistent_term.get({__MODULE__, ledger}, nil) do
+      %{counters: counters, ring: ring} = published ->
+        if :ets.info(counters, :id) != :undefined and :ets.info(ring, :id) != :undefined,
+          do: published,
+          else: GenServer.call(ledger, :tables)
+
+      nil ->
+        GenServer.call(ledger, :tables)
+    end
   end
 
   defp tables(ledger), do: GenServer.call(ledger, :tables)

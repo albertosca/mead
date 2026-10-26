@@ -1,13 +1,8 @@
 defmodule Mead.Session.Record do
   @moduledoc """
-  The record framing shared by the session files and the ledger journal, and the few file
-  operations both need.
+  The record framing shared by the session files and the ledger journal, and the few file operations both need.
 
-  A record is `[4-byte length][4-byte CRC32 of the length][4-byte CRC32 of the payload]
-  [term_to_binary payload]`. `scan/1` reads a whole file: a last record that is cut short or fails
-  its payload checksum is what a crash during a write leaves, so it is a `:torn` tail and the valid
-  size stops before it; the length has a checksum of its own, so damage anywhere else, or a
-  payload that does not decode, is `{:error, :corrupt}`.
+  A record is `[4-byte length][4-byte CRC32 of the length][4-byte CRC32 of the payload][term_to_binary payload]`. `scan/1` reads a whole file: a last record that is cut short or fails its payload checksum is what a crash during a write leaves, so it is a `:torn` tail and the valid size stops before it; the length has a checksum of its own, so damage anywhere else, or a payload that does not decode, is `{:error, :corrupt}`.
 
   Payloads are decoded without `:safe`, for the reasons given in `Mead.Session.Store`.
   """
@@ -23,8 +18,7 @@ defmodule Mead.Session.Record do
   end
 
   @doc """
-  Reads every record of `binary` and returns the terms, the size of the valid prefix, and whether
-  the file ended cleanly or in a torn tail.
+  Reads every record of `binary` and returns the terms, the size of the valid prefix, and whether the file ended cleanly or in a torn tail.
   """
   @spec scan(binary()) ::
           {:ok, [term()], non_neg_integer(), :clean | :torn} | {:error, :corrupt}
@@ -74,8 +68,7 @@ defmodule Mead.Session.Record do
   end
 
   @doc """
-  Creates an empty file readable only by its owner, unless the path exists, so the content is
-  never readable by anyone else, not even between a write and a later chmod.
+  Creates an empty file readable only by its owner, unless the path exists, so the content is never readable by anyone else, not even between a write and a later chmod.
   """
   @spec create_private(Path.t()) :: :ok | {:error, term()}
   def create_private(path) do
@@ -109,8 +102,7 @@ defmodule Mead.Session.Record do
   end
 
   @doc """
-  Syncs the directory so a rename is durable. Not every platform lets Erlang open a directory, so
-  a refusal is not a failure: the rename has already happened.
+  Syncs the directory so a rename is durable. Not every platform lets Erlang open a directory, so a refusal is not a failure: the rename has already happened.
   """
   @spec sync_directory(Path.t()) :: :ok
   def sync_directory(directory) do

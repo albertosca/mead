@@ -1,18 +1,10 @@
 defmodule Mead.Ledger.Journal do
   @moduledoc """
-  The pure model of the ledger journal: the counter rows, the ring of the last 100 turns and the
-  dropped count that a sequence of journal events adds up to.
+  The pure model of the ledger journal: the counter rows, the ring of the last 100 turns and the dropped count that a sequence of journal events adds up to.
 
-  The events are `{:turn, entry}`, with the map the ring holds, `{:forget, session_id}`,
-  `:dropped`, and `{:checkpoint, rows, ring}`, which replaces everything before it with the whole
-  state: every counter row, plus `{:dropped, count}` when it is above zero, and the ring entries
-  oldest first. Replaying the events of a file rebuilds the numbers the ETS tables held. It also
-  serves the rewrite of the file, which is built from the file itself and not from the tables:
-  the tables may already hold an event whose journal record has not been written, and a
-  checkpoint taken from them would count it twice.
+  The events are `{:turn, entry}`, with the map the ring holds, `{:forget, session_id}`, `:dropped`, and `{:checkpoint, rows, ring}`, which replaces everything before it with the whole state: every counter row, plus `{:dropped, count}` when it is above zero, and the ring entries oldest first. Replaying the events of a file rebuilds the numbers the ETS tables held. It also serves the rewrite of the file, which is built from the file itself and not from the tables: the tables may already hold an event whose journal record has not been written, and a checkpoint taken from them would count it twice.
 
-  A counter row is `{key, turns, failures, input_tokens, output_tokens, duration_ms}`, where the
-  key is `{:session, id}` or `{:route, route, provider}`.
+  A counter row is `{key, turns, failures, input_tokens, output_tokens, duration_ms}`, where the key is `{:session, id}` or `{:route, route, provider}`.
   """
 
   @ring_size 100
