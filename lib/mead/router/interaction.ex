@@ -5,7 +5,7 @@ defmodule Mead.Router.Interaction do
   A turn that carries `interaction: {module, context}` in its options makes `Mead.Router` call this
   behaviour for every tool the model asks for, in this order: `tool_updated/2` with status
   `:pending`, `request_permission/2`, and, when the answer is `:allow`, `tool_updated/2` with
-  `:in_progress`, the tool itself, then `tool_updated/2` with `:completed` or `:failed`. A denied
+  `register_call/3` and `:in_progress` (with `cancellable: true`), the tool itself, then `tool_updated/2` with `:completed` or `:failed`. A denied
   call never reaches the hub; the model receives an error result that says why. A tool the model
   named wrongly is reported `:failed` without asking anyone.
 
@@ -35,11 +35,18 @@ defmodule Mead.Router.Interaction do
               :allow | {:deny, :rejected | :expired}
   @callback tool_updated(context :: term(), update()) :: :ok
 
+  @doc """
+  Called once an allowed tool call is running in its own process, before the `:in_progress`
+  update, so whoever can cancel the call (by killing `pid`) knows which process to kill.
+  """
+  @callback register_call(context :: term(), tool_call_id :: String.t(), pid :: pid()) :: :ok
+
   @doc "Whether `value` is a `{module, context}` pair whose module implements this behaviour."
   @spec valid?(term()) :: boolean()
   def valid?({module, _context}) when is_atom(module) do
     Code.ensure_loaded?(module) and function_exported?(module, :request_permission, 2) and
-      function_exported?(module, :tool_updated, 2)
+      function_exported?(module, :tool_updated, 2) and
+      function_exported?(module, :register_call, 3)
   end
 
   def valid?(_other), do: false

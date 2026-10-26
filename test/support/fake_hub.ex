@@ -16,7 +16,19 @@ defmodule Mead.Test.FakeHub do
   def call_tool(name, arguments, options) do
     settings = settings()
     send(settings.test_pid, {:tool_called, name, arguments, options})
-    Map.get(settings.results, name, {:error, :unknown_tool})
+
+    case Map.get(settings.results, name, {:error, :unknown_tool}) do
+      # A tool that never answers until the test sends it :release.
+      :block ->
+        send(settings.test_pid, {:tool_blocked, self()})
+
+        receive do
+          :release -> {:ok, %{content: "released", is_error: false}}
+        end
+
+      result ->
+        result
+    end
   end
 
   # The class of a tool defaults to :read; `classes: %{"server__tool" => :effect}` overrides it. A
@@ -33,5 +45,13 @@ defmodule Mead.Test.FakeHub do
     end
   end
 
-  defp settings, do: Process.get(__MODULE__)
+  # The router runs a tool in a task, which has no settings of its own; `$callers` leads back to
+  # the process that configured the hub.
+  defp settings do
+    Enum.find_value([self() | Process.get(:"$callers", [])], fn pid ->
+      with {:dictionary, dictionary} <- Process.info(pid, :dictionary) do
+        Keyword.get(dictionary, __MODULE__)
+      end
+    end)
+  end
 end

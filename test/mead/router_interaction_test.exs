@@ -142,6 +142,53 @@ defmodule Mead.RouterInteractionTest do
     assert {:error, :tool_loop_limit} = route(steps, [])
   end
 
+  test "only a running call is cancellable" do
+    hub()
+    route(tool_use_step([@call]), [:allow])
+
+    assert_received {:register_call, "call-1", _pid}
+
+    cancellable =
+      for status <- [:pending, :in_progress, :completed] do
+        assert_received {:tool_updated, %{status: ^status, cancellable: flag}}
+        flag
+      end
+
+    assert cancellable == [false, true, false]
+  end
+
+  test "killing the registered process cancels the call and the model is told" do
+    hub(results: %{"files__read_file" => :block})
+    context = FakeInteraction.start([:allow])
+    options = [route: :cloud, interaction: {FakeInteraction, context}]
+    configured_slots = slots(tool_use_step([@call]))
+    test_pid = self()
+
+    turn =
+      Task.async(fn ->
+        FakeHub.configure(
+          test_pid: test_pid,
+          tools: [@tool],
+          results: %{"files__read_file" => :block}
+        )
+
+        Router.route([], "read /a", options, configured_slots, FakeHub)
+      end)
+
+    assert_receive {:register_call, "call-1", task_pid}, 2_000
+    assert_receive {:tool_blocked, _blocked_pid}, 2_000
+    Process.exit(task_pid, :kill)
+
+    assert {:ok, "fake reply"} = Task.await(turn)
+    refute Process.alive?(task_pid)
+
+    assert_received {:tool_updated,
+                     %{status: :failed, current_step: "cancelled", cancellable: false}}
+
+    assert %{content: "The person cancelled this tool call.", is_error: true} =
+             List.last(second_conversation_messages()).content |> hd()
+  end
+
   test "a turn without an interaction makes no interaction calls" do
     hub()
 

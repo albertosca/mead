@@ -22,6 +22,12 @@ defmodule Mead.Test.FakeInteraction do
   end
 
   @impl true
+  def register_call(context, tool_call_id, pid) do
+    send(context.test_pid, {:register_call, tool_call_id, pid})
+    :ok
+  end
+
+  @impl true
   def tool_updated(context, update) do
     send(context.test_pid, {:tool_updated, update})
     :ok

@@ -100,6 +100,7 @@ defmodule Mead.Deck.Channel do
              running: nil,
              policy_level: derive_policy_level(log, configuration.default_policy_level),
              pending: %{},
+             calls: %{},
              resolved: resolved_requests(log)
            }) do
       {:ok, state}
@@ -225,10 +226,13 @@ defmodule Mead.Deck.Channel do
     }
 
     case emit(state, "tool_call.updated", payload) do
-      {:ok, state, _envelope} -> {:reply, :ok, state}
+      {:ok, state, _envelope} -> {:reply, :ok, finish_call(state, update)}
       {:error, reason} -> stop_for_log_failure(reason, state)
     end
   end
+
+  def handle_call({:register_call, tool_call_id, pid}, _from, state),
+    do: {:reply, :ok, %{state | calls: Map.put(state.calls, tool_call_id, pid)}}
 
   def handle_call({:permission_request, request}, from, state) do
     case {state.policy_level, request.class} do
@@ -280,6 +284,16 @@ defmodule Mead.Deck.Channel do
     end
   end
 
+  # The router reports the outcome of a killed call itself, so cancelling only has to kill.
+  defp handle_client_message({:tool_call_cancel, %{tool_call_id: tool_call_id}}, _socket, state) do
+    case Map.fetch(state.calls, tool_call_id) do
+      {:ok, pid} -> Process.exit(pid, :kill)
+      :error -> :ok
+    end
+
+    {:noreply, state}
+  end
+
   defp handle_client_message({:policy_set, %{level: level}}, _socket, state) do
     case emit(state, "policy.updated", %{"level" => Events.policy_level_name(level)}) do
       {:ok, state, _envelope} -> {:noreply, %{state | policy_level: level}}
@@ -288,6 +302,12 @@ defmodule Mead.Deck.Channel do
   end
 
   defp handle_client_message(_message, _socket, state), do: {:noreply, state}
+
+  defp finish_call(state, %{status: status, tool_call_id: tool_call_id})
+       when status in [:completed, :failed],
+       do: %{state | calls: Map.delete(state.calls, tool_call_id)}
+
+  defp finish_call(state, _update), do: state
 
   defp approve_by_policy(state, request) do
     request_id = new_request_id()

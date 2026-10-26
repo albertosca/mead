@@ -16,6 +16,10 @@ defmodule Mead.Deck.Interaction do
     do: GenServer.call(channel, {:permission_request, request}, :infinity)
 
   @impl true
+  def register_call(%{channel: channel}, tool_call_id, pid),
+    do: GenServer.call(channel, {:register_call, tool_call_id, pid}, :infinity)
+
+  @impl true
   def tool_updated(%{channel: channel, turn_id: turn_id}, update),
     do: GenServer.call(channel, {:tool_updated, turn_id, update}, :infinity)
 end

@@ -44,6 +44,8 @@ defmodule Mead.Router do
   @maximum_replayed_exchanges 20
   # A model that keeps asking for tools would otherwise spend the turn timeout and the budget.
   @maximum_provider_calls 8
+  # The hub gives up on a tool after 15 seconds; this is the margin for the task around it.
+  @tool_wait 20_000
 
   @impl true
   def handle_turn(history, input, options) do
@@ -233,39 +235,75 @@ defmodule Mead.Router do
   end
 
   defp run_tool_with_interaction(context, {module, interaction_context}, tool_use) do
-    update = fn status ->
-      module.tool_updated(interaction_context, tool_update(tool_use, status))
+    update = fn status, overrides ->
+      module.tool_updated(interaction_context, tool_update(tool_use, status, overrides))
     end
 
-    update.(:pending)
+    update.(:pending, %{})
 
     with {:ok, target} <- context.hub.describe_tool(tool_use.name, context.options),
          :allow <-
            module.request_permission(interaction_context, permission_request(tool_use, target)) do
-      update.(:in_progress)
-      result = run_tool(context, tool_use)
-      update.(if result.is_error, do: :failed, else: :completed)
-      result
+      case run_cancellable(context, module, interaction_context, tool_use) do
+        {:finished, result} ->
+          update.(if(result.is_error, do: :failed, else: :completed), %{})
+          result
+
+        :cancelled ->
+          update.(:failed, %{current_step: "cancelled"})
+          error_result(tool_use, "The person cancelled this tool call.")
+      end
     else
       {:deny, reason} ->
-        update.(:failed)
+        update.(:failed, %{})
         error_result(tool_use, denial_text(reason))
 
       {:error, reason} ->
-        update.(:failed)
+        update.(:failed, %{})
         error_result(tool_use, "The tool call failed: #{describe(reason)}.")
     end
   end
 
-  defp tool_update(%{id: id, name: name}, status) do
-    %{
-      tool_call_id: id,
-      title: name,
-      status: status,
-      current_step: nil,
-      progress: nil,
-      cancellable: false
-    }
+  # The tool runs in its own process so that whoever holds the pid (registered with the
+  # interaction) can cancel it by killing it. Only that kill reads as a cancellation.
+  defp run_cancellable(context, module, interaction_context, tool_use) do
+    task =
+      Task.Supervisor.async_nolink(Mead.TurnSupervisor, fn -> run_tool(context, tool_use) end)
+
+    module.register_call(interaction_context, tool_use.id, task.pid)
+
+    module.tool_updated(
+      interaction_context,
+      tool_update(tool_use, :in_progress, %{cancellable: true})
+    )
+
+    case Task.yield(task, @tool_wait) || Task.shutdown(task, :brutal_kill) do
+      {:ok, result} ->
+        {:finished, result}
+
+      {:exit, :killed} ->
+        :cancelled
+
+      {:exit, reason} ->
+        {:finished, error_result(tool_use, "The tool call failed: #{describe(reason)}.")}
+
+      nil ->
+        {:finished, error_result(tool_use, "The tool call failed: #{describe(:timeout)}.")}
+    end
+  end
+
+  defp tool_update(%{id: id, name: name}, status, overrides) do
+    Map.merge(
+      %{
+        tool_call_id: id,
+        title: name,
+        status: status,
+        current_step: nil,
+        progress: nil,
+        cancellable: false
+      },
+      overrides
+    )
   end
 
   defp permission_request(%{id: id, input: input}, target) do
