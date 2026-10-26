@@ -216,8 +216,8 @@ defmodule Mead.Ledger do
   @impl true
   def terminate(_reason, state) do
     :telemetry.detach(state.handler_id)
-    :persistent_term.erase({__MODULE__, state.tables.ledger})
     flush_pending(state)
+    :persistent_term.erase({__MODULE__, state.tables.ledger})
     :ok
   end
 

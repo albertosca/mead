@@ -357,6 +357,9 @@ defmodule Mead.MCP.Server.Tools do
       {:error, :not_found} ->
         {:ok, failure("unknown session or no turn counted yet")}
     end
+  rescue
+    # the ledger can die between the table check and the ETS read
+    ArgumentError -> {:ok, failure("the ledger is not available")}
   catch
     :exit, _reason -> {:ok, failure("the ledger is not available")}
   end
@@ -373,6 +376,9 @@ defmodule Mead.MCP.Server.Tools do
 
       {:ok, success(JSON.encode!(body))}
     end
+  rescue
+    # the ledger can die between the table check and the ETS read
+    ArgumentError -> {:ok, failure("the ledger is not available")}
   catch
     :exit, _reason -> {:ok, failure("the ledger is not available")}
   end
@@ -403,16 +409,19 @@ defmodule Mead.MCP.Server.Tools do
   defp route_entry(entry) do
     Map.merge(counters(entry), %{
       "route" => Atom.to_string(entry.route),
-      "provider" => inspect(entry.provider)
+      "provider" => provider_name(entry.provider)
     })
   end
+
+  defp provider_name(nil), do: nil
+  defp provider_name(provider), do: inspect(provider)
 
   defp recent_entry(entry) do
     %{
       "session_id" => entry.session_id,
       "route" => Atom.to_string(entry.route),
       "route_source" => Atom.to_string(entry.route_source),
-      "provider" => inspect(entry.provider),
+      "provider" => provider_name(entry.provider),
       "status" => Atom.to_string(entry.status),
       "input_tokens" => entry.input_tokens,
       "output_tokens" => entry.output_tokens,

@@ -128,6 +128,18 @@ defmodule Mead.MCP.Server.ToolsUsageTest do
              )
     end
 
+    test "a turn that had no provider shows null, not the text nil" do
+      session_id = unique_session()
+      emit(session_id, %{route: :local, provider: nil, status: :error})
+
+      decoded = JSON.decode!(text(usage(%{"recent" => 100})))
+
+      assert %{"provider" => nil} =
+               Enum.find(decoded["recent"], &(&1["session_id"] == session_id))
+
+      assert Enum.any?(decoded["routes"], &(&1["route"] == "local" and &1["provider"] == nil))
+    end
+
     test "recent defaults to twenty and zero asks for none" do
       for _index <- 1..25, do: emit(unique_session())
 
