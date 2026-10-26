@@ -472,4 +472,34 @@ defmodule Mead.LedgerJournalTest do
       assert Ledger.totals(context.name).turns == 1
     end
   end
+
+  test "the published tables are erased only after the shutdown flush", context do
+    start_ledger(context)
+    ledger = Process.whereis(context.name)
+    emit(context)
+
+    :erlang.trace_pattern({JournalFile, :append, 2}, true, [:local])
+    :erlang.trace_pattern({:persistent_term, :erase, 1}, true, [:global])
+    :erlang.trace(ledger, true, [:call])
+
+    on_exit(fn ->
+      :erlang.trace_pattern({JournalFile, :append, 2}, false, [:local])
+      :erlang.trace_pattern({:persistent_term, :erase, 1}, false, [:global])
+    end)
+
+    stop_ledger(context)
+
+    wait_until(fn ->
+      {:messages, messages} = Process.info(self(), :messages)
+      Enum.any?(messages, &match?({:trace, ^ledger, :call, {:persistent_term, :erase, _}}, &1))
+    end)
+
+    {:messages, messages} = Process.info(self(), :messages)
+
+    calls =
+      for {:trace, ^ledger, :call, {module, function, _arguments}} <- messages,
+          do: {module, function}
+
+    assert calls == [{JournalFile, :append}, {:persistent_term, :erase}]
+  end
 end

@@ -92,4 +92,11 @@ defmodule Mead.UsageTest do
       assert Mead.session_usage("nobody", context.name) == {:error, :not_found}
     end
   end
+
+  test "both reads exit when the ledger is not running" do
+    missing = :"missing_ledger_#{System.unique_integer([:positive])}"
+
+    assert {:noproc, _call} = catch_exit(Mead.usage(ledger: missing))
+    assert {:noproc, _call} = catch_exit(Mead.session_usage("anyone", missing))
+  end
 end

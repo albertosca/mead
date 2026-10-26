@@ -328,7 +328,7 @@ defmodule Mead do
     * `:recent` - how many of the latest turns to include, newest first, from 0 to 100; defaults to 20.
     * `:ledger` - the ledger to read; defaults to `Mead.Ledger`.
 
-  It never changes anything. When the ledger is not running it exits, as the ledger accessors do.
+  It never changes anything. The totals, the routes and the recent turns are three separate reads of the live tables, so a turn counted between them can show in one and not in another; the result is not a single snapshot. When the ledger is not running it exits, as the ledger accessors do.
   """
   @spec usage(keyword()) :: %{totals: map(), routes: [map()], recent: [map()]}
   def usage(options \\ []) do

@@ -23,4 +23,30 @@ defmodule Mead.MCP.Server.ToolsUsageLedgerDownTest do
       assert result["content"] == [%{"type" => "text", "text" => "the ledger is not available"}]
     end
   end
+
+  test "tables that died between the check and the read answer an error result, not a crash" do
+    parent = self()
+
+    spawn_link(fn ->
+      table = :ets.new(:unreadable_ledger_table, [:private])
+      send(parent, {:table, table})
+      Process.sleep(:infinity)
+    end)
+
+    table =
+      receive do
+        {:table, table} -> table
+      end
+
+    key = {Mead.Ledger, Mead.Ledger}
+    :persistent_term.put(key, %{counters: table, ring: table, ledger: Mead.Ledger})
+    on_exit(fn -> :persistent_term.erase(key) end)
+
+    for arguments <- [%{}, %{"session_id" => "anyone"}] do
+      assert {:ok, %{"isError" => true} = result} =
+               Tools.call("usage", arguments, %{allow_effect: false})
+
+      assert result["content"] == [%{"type" => "text", "text" => "the ledger is not available"}]
+    end
+  end
 end
