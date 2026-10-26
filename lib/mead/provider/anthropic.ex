@@ -16,6 +16,8 @@ defmodule Mead.Provider.Anthropic do
     * `:req_options` - extra options merged into the `Req` request, used by tests to stub the
       network.
 
+  `converse_stream/4` is `converse/3` over server-sent events: it calls `on_delta` with each text fragment as it arrives and returns the same result, built by the same parser, so a stream and the equivalent plain body cannot disagree.
+
   `converse/3` also sends `tools` (omitted from the request when the list is empty) and returns the blocks of the answer; `complete/2` is built on it and keeps returning the joined text. Blocks other than text and tool_use are dropped.
 
   Requests are retried at most twice, and only after HTTP 429 or a 5xx status. A timeout or a
@@ -51,6 +53,15 @@ defmodule Mead.Provider.Anthropic do
          {:ok, api_key} <- fetch_api_key(options),
          {:ok, response} <- request(messages, tools, api_key, options) do
       parse(response)
+    end
+  end
+
+  @impl true
+  def converse_stream(messages, tools, options, on_delta) when is_function(on_delta, 1) do
+    with :ok <- validate_options(options),
+         {:ok, api_key} <- fetch_api_key(options),
+         {:ok, response} <- stream_request(messages, tools, api_key, options, on_delta) do
+      finish_stream(response)
     end
   end
 
@@ -104,7 +115,20 @@ defmodule Mead.Provider.Anthropic do
   defp non_empty(""), do: nil
   defp non_empty(value), do: value
 
-  defp request(messages, tools, api_key, options) do
+  defp request(messages, tools, api_key, options),
+    do: post(messages, tools, api_key, options, [])
+
+  defp stream_request(messages, tools, api_key, options, on_delta) do
+    stream_options = [
+      into: fn {:data, data}, {request, response} ->
+        {:cont, {request, ingest(response, data, on_delta)}}
+      end
+    ]
+
+    post(messages, tools, api_key, options, stream_options, true)
+  end
+
+  defp post(messages, tools, api_key, options, extra_request_options, stream? \\ false) do
     body =
       %{
         model: Keyword.get(options, :model, @default_model),
@@ -112,6 +136,7 @@ defmodule Mead.Provider.Anthropic do
         messages: messages
       }
       |> put_tools(tools)
+      |> put_stream(stream?)
 
     request_options =
       [
@@ -122,6 +147,7 @@ defmodule Mead.Provider.Anthropic do
         retry: &retry?(&1, &2, maximum_retry_delay(options)),
         max_retries: 2
       ]
+      |> Keyword.merge(extra_request_options)
       |> Keyword.merge(Keyword.get(options, :req_options, []))
 
     case Req.post(request_options) do
@@ -153,6 +179,9 @@ defmodule Mead.Provider.Anthropic do
   end
 
   defp retry?(_request, _response_or_exception, _maximum_delay), do: false
+
+  defp put_stream(body, true), do: Map.put(body, :stream, true)
+  defp put_stream(body, false), do: body
 
   defp put_tools(body, []), do: body
   defp put_tools(body, tools), do: Map.put(body, :tools, Enum.map(tools, &encode_tool/1))
@@ -206,4 +235,148 @@ defmodule Mead.Provider.Anthropic do
         []
     end)
   end
+
+  # --- streaming ---------------------------------------------------------------------------------
+  #
+  # The server-sent events are folded into the body a non-streaming call would have returned, and
+  # that body goes through `parse/1`, so both paths agree on every edge by construction.
+
+  defp ingest(%Req.Response{status: 200} = response, data, on_delta) do
+    state = Req.Response.get_private(response, :stream, new_stream())
+    {events, parser} = Mead.Provider.ServerSentEvents.feed(state.parser, data)
+
+    state =
+      Enum.reduce(events, %{state | parser: parser}, fn event, current ->
+        fold_event(current, event, on_delta)
+      end)
+
+    Req.Response.put_private(response, :stream, state)
+  end
+
+  # The body of a failed response is not a stream; the status alone is reported.
+  defp ingest(response, _data, _on_delta), do: response
+
+  defp new_stream do
+    %{
+      parser: Mead.Provider.ServerSentEvents.new(),
+      blocks: %{},
+      input_tokens: nil,
+      output_tokens: nil,
+      stop_reason: nil,
+      completed: false,
+      error: nil,
+      malformed: false
+    }
+  end
+
+  defp fold_event(%{completed: true} = state, _event, _on_delta), do: state
+  defp fold_event(%{error: error} = state, _event, _on_delta) when error != nil, do: state
+
+  defp fold_event(state, %{data: data}, on_delta) do
+    case Jason.decode(data) do
+      {:ok, %{"type" => type} = payload} -> fold(type, payload, state, on_delta)
+      _not_an_event -> %{state | malformed: true}
+    end
+  end
+
+  defp fold("message_start", payload, state, _on_delta) do
+    %{state | input_tokens: get_in(payload, ["message", "usage", "input_tokens"])}
+  end
+
+  defp fold(
+         "content_block_start",
+         %{"index" => index, "content_block" => block},
+         state,
+         _on_delta
+       ) do
+    started =
+      case block do
+        %{"type" => "text"} ->
+          %{"type" => "text", "text" => ""}
+
+        %{"type" => "tool_use"} = tool ->
+          Map.put(Map.take(tool, ["type", "id", "name"]), "json", "")
+
+        other ->
+          %{"type" => Map.get(other, "type", "unknown")}
+      end
+
+    %{state | blocks: Map.put(state.blocks, index, started)}
+  end
+
+  defp fold("content_block_delta", %{"index" => index, "delta" => delta}, state, on_delta) do
+    case {Map.get(state.blocks, index), delta} do
+      {%{"type" => "text"} = block, %{"type" => "text_delta", "text" => text}}
+      when is_binary(text) ->
+        if text != "", do: on_delta.(text)
+        put_block(state, index, %{block | "text" => block["text"] <> text})
+
+      {%{"type" => "tool_use"} = block, %{"type" => "input_json_delta", "partial_json" => json}}
+      when is_binary(json) ->
+        put_block(state, index, %{block | "json" => block["json"] <> json})
+
+      _ignored ->
+        state
+    end
+  end
+
+  defp fold("message_delta", payload, state, _on_delta) do
+    %{
+      state
+      | stop_reason: get_in(payload, ["delta", "stop_reason"]) || state.stop_reason,
+        output_tokens: get_in(payload, ["usage", "output_tokens"]) || state.output_tokens
+    }
+  end
+
+  defp fold("message_stop", _payload, state, _on_delta), do: %{state | completed: true}
+
+  defp fold("error", payload, state, _on_delta),
+    do: %{state | error: get_in(payload, ["error", "type"]) || "unknown"}
+
+  defp fold(_other_event, _payload, state, _on_delta), do: state
+
+  defp put_block(state, index, block), do: %{state | blocks: Map.put(state.blocks, index, block)}
+
+  defp finish_stream(%Req.Response{status: 200} = response) do
+    state = Req.Response.get_private(response, :stream, new_stream())
+
+    cond do
+      state.error != nil -> {:error, stream_error(state.error)}
+      state.malformed or not state.completed -> {:error, :malformed_response}
+      true -> parse(%{response | body: stream_body(state)})
+    end
+  end
+
+  defp finish_stream(%Req.Response{status: status}), do: {:error, {:http_status, status}}
+
+  defp stream_error("overloaded_error"), do: {:http_status, 529}
+  defp stream_error("rate_limit_error"), do: {:http_status, 429}
+  defp stream_error(_other), do: {:http_status, 500}
+
+  defp stream_body(state) do
+    content =
+      state.blocks
+      |> Enum.sort_by(fn {index, _block} -> index end)
+      |> Enum.map(fn {_index, block} -> finish_block(block) end)
+
+    %{
+      "content" => content,
+      "stop_reason" => state.stop_reason,
+      "usage" => %{"input_tokens" => state.input_tokens, "output_tokens" => state.output_tokens}
+    }
+  end
+
+  defp finish_block(%{"type" => "tool_use", "json" => json} = block) do
+    input = if json == "", do: {:ok, %{}}, else: Jason.decode(json)
+
+    case input do
+      {:ok, decoded} when is_map(decoded) ->
+        block |> Map.delete("json") |> Map.put("input", decoded)
+
+      _bad ->
+        Map.delete(block, "json")
+    end
+  end
+
+  defp finish_block(block), do: block
 end

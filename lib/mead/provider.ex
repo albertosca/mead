@@ -52,5 +52,25 @@ defmodule Mead.Provider do
                }}
               | {:error, reason()}
 
-  @optional_callbacks converse: 3
+  @doc """
+  Like `converse/3`, but the answer streams: `on_delta` is called with each fragment of text as it
+  arrives, in order, and the return value is the same as `converse/3` would give for the same
+  content. The fragments are a preview; only the return value is the answer. If the stream fails
+  midway the error is returned and the fragments already delivered stay delivered. Optional.
+  """
+  @callback converse_stream(
+              messages :: [message()],
+              tools :: [tool()],
+              options :: keyword(),
+              on_delta :: (String.t() -> any())
+            ) ::
+              {:ok,
+               %{
+                 content: [block()],
+                 stop_reason: :end_turn | :tool_use | :max_tokens,
+                 usage: usage()
+               }}
+              | {:error, reason()}
+
+  @optional_callbacks converse: 3, converse_stream: 4
 end
