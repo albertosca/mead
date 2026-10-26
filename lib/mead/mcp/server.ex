@@ -28,19 +28,40 @@ defmodule Mead.MCP.Server do
 
   @impl Supervisor
   def init(options) do
-    settings =
+    mcp_settings =
       Keyword.get_lazy(options, :settings, fn -> Application.get_env(:mead, :mcp_server, []) end)
 
-    case Configuration.load(settings) do
-      :disabled ->
+    deck_settings =
+      Keyword.get_lazy(options, :deck_settings, fn -> Application.get_env(:mead, :deck, []) end)
+
+    mcp = load_mcp(mcp_settings)
+    deck = load_deck(deck_settings)
+
+    case {mcp, deck} do
+      {:disabled, :disabled} ->
         Logger.info("MCP server is disabled: no :token is configured under :mcp_server")
         Supervisor.init([], strategy: :one_for_one)
 
-      {:ok, configuration} ->
-        Supervisor.init([listener(configuration)], strategy: :one_for_one)
+      _enabled ->
+        {:ok, listener} = Configuration.listener(mcp_settings)
+        Supervisor.init([listener_child(listener, mcp, deck)], strategy: :one_for_one)
+    end
+  end
 
+  defp load_mcp(settings) do
+    case Configuration.load(settings) do
       {:error, message} ->
         raise ArgumentError, "invalid :mead, :mcp_server configuration: #{message}"
+
+      loaded ->
+        loaded
+    end
+  end
+
+  defp load_deck(settings) do
+    case Mead.Deck.Configuration.load(settings) do
+      {:error, message} -> raise ArgumentError, "invalid :mead, :deck configuration: #{message}"
+      loaded -> loaded
     end
   end
 
@@ -61,13 +82,19 @@ defmodule Mead.MCP.Server do
     :exit, _reason -> :error
   end
 
-  defp listener(configuration) do
+  defp listener_child(listener, mcp, _deck) do
+    mcp_plug =
+      case mcp do
+        {:ok, configuration} -> {Mead.MCP.Server.Plug, [configuration: configuration]}
+        :disabled -> nil
+      end
+
     {Bandit,
-     plug: {Mead.MCP.Server.Plug, [configuration: configuration]},
+     plug: {Mead.Gateway, mcp: mcp_plug, deck: nil},
      scheme: :http,
-     ip: configuration.address,
-     port: configuration.port,
-     thousand_island_options: connection_limits(configuration.maximum_connections),
+     ip: listener.address,
+     port: listener.port,
+     thousand_island_options: connection_limits(listener.maximum_connections),
      startup_log: false}
   end
 

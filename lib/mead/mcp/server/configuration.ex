@@ -67,6 +67,28 @@ defmodule Mead.MCP.Server.Configuration do
     end
   end
 
+  @doc """
+  Reads only the listener settings (`:port`, `:address`, `:maximum_connections`), which are valid
+  with or without a token, so the shared listener can start for the deck alone.
+  """
+  @spec listener(term()) ::
+          {:ok,
+           %{
+             port: 0..65_535,
+             address: :inet.ip4_address(),
+             maximum_connections: pos_integer()
+           }}
+          | {:error, String.t()}
+  def listener(settings) do
+    with :ok <- check_shape(settings),
+         :ok <- check_keys(settings),
+         {:ok, port} <- fetch_port(settings),
+         {:ok, address} <- fetch_address(settings),
+         {:ok, maximum_connections} <- fetch_maximum_connections(settings) do
+      {:ok, %{port: port, address: address, maximum_connections: maximum_connections}}
+    end
+  end
+
   @doc "Whether `presented` is the configured token, compared in constant time."
   @spec token_matches?(t(), term()) :: boolean()
   def token_matches?(%__MODULE__{token_digest: digest}, presented) when is_binary(presented) do
