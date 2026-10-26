@@ -290,7 +290,10 @@ defmodule Mead do
   removes it and forgets its ledger aggregate.
   """
   @spec stop_session(String.t()) :: :ok | {:error, :not_found}
-  def stop_session(session_id), do: Pool.stop_session(session_id)
+  def stop_session(session_id) do
+    Mead.Deck.ChannelSupervisor.stop(session_id)
+    Pool.stop_session(session_id)
+  end
 
   @doc """
   Stops a session if it runs, removes its stored conversation and forgets its ledger aggregate.
@@ -300,15 +303,26 @@ defmodule Mead do
   @spec delete_session(String.t()) :: :ok | {:error, :not_found | {:persistence, term()}}
   def delete_session(session_id) do
     exclusive(session_id, fn ->
+      Mead.Deck.ChannelSupervisor.stop(session_id)
       stopped = Pool.stop_session(session_id) == :ok
       Mead.Ledger.forget(session_id)
       directory = Store.directory()
       stored = directory != nil and Store.exists?(directory, session_id)
 
-      with :ok <- delete_file(directory, session_id) do
+      with :ok <- delete_file(directory, session_id),
+           :ok <- delete_events(directory, session_id) do
         if stopped or stored, do: :ok, else: {:error, :not_found}
       end
     end)
+  end
+
+  defp delete_events(nil, _session_id), do: :ok
+
+  defp delete_events(directory, session_id) do
+    case Mead.Deck.EventLog.delete(directory, session_id) do
+      :ok -> :ok
+      {:error, reason} -> {:error, {:persistence, reason}}
+    end
   end
 
   defp delete_file(nil, _session_id), do: :ok

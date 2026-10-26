@@ -15,7 +15,7 @@ defmodule Mead.ApplicationTest do
   # may not be registered yet.
   defp running_server, do: wait_until(fn -> Process.whereis(Mead.MCP.Server) end)
 
-  test "the root supervisor starts the ledger, the registry, the turn supervisor, the pool, the MCP hub, the deck tickets, and the MCP server in that order" do
+  test "the root supervisor starts the ledger, the registry, the turn supervisor, the pool, the deck channels, the MCP hub, the deck tickets, and the MCP server in that order" do
     child_ids =
       Mead.Supervisor
       |> Supervisor.which_children()
@@ -27,6 +27,7 @@ defmodule Mead.ApplicationTest do
              Mead.Registry,
              Mead.TurnSupervisor,
              Mead.Session.Pool,
+             Mead.Deck.ChannelSupervisor,
              Mead.MCP.Hub,
              Mead.Deck.Tickets,
              Mead.MCP.Server
