@@ -16,6 +16,8 @@ defmodule Mead.Provider.Ollama do
   credentials. A refused connection is `{:transport, :econnrefused}`, which means Ollama is not
   running.
 
+  `converse_stream/4` posts with `stream: true` and reads the answer line by line, calling `on_delta` with each piece of text; it returns what `converse/3` would, built by the same parser.
+
   `converse/3` also sends `tools` (omitted from the request when the list is empty) in the function form Ollama expects, and returns the text of the answer followed by one `tool_use` block per tool call. Ollama gives a tool call no id, so the provider synthesizes `call_1`, `call_2`, and so on, in order of appearance; a tool result is matched back to its tool name through the assistant message right before it. A model that does not support tools answers HTTP 400, which becomes `:tools_unsupported` when tools were sent; there is no retry without tools, so the turn fails.
   """
 
@@ -40,6 +42,14 @@ defmodule Mead.Provider.Ollama do
     with {:ok, settings} <- validate_options(options),
          {:ok, response} <- request(messages, tools, settings) do
       parse(response)
+    end
+  end
+
+  @impl true
+  def converse_stream(messages, tools, options, on_delta) when is_function(on_delta, 1) do
+    with {:ok, settings} <- validate_options(options),
+         {:ok, response} <- stream_request(messages, tools, settings, on_delta) do
+      finish_stream(response)
     end
   end
 
@@ -74,9 +84,21 @@ defmodule Mead.Provider.Ollama do
     )
   end
 
-  defp request(messages, tools, settings) do
+  defp request(messages, tools, settings), do: post(messages, tools, settings, false, [])
+
+  defp stream_request(messages, tools, settings, on_delta) do
+    stream_options = [
+      into: fn {:data, data}, {request, response} ->
+        {:cont, {request, ingest(response, data, on_delta)}}
+      end
+    ]
+
+    post(messages, tools, settings, true, stream_options)
+  end
+
+  defp post(messages, tools, settings, stream?, extra_request_options) do
     body =
-      %{model: settings.model, stream: false, messages: encode_messages(messages)}
+      %{model: settings.model, stream: stream?, messages: encode_messages(messages)}
       |> put_tools(tools)
 
     request_options =
@@ -86,6 +108,7 @@ defmodule Mead.Provider.Ollama do
         receive_timeout: settings.receive_timeout,
         retry: false
       ]
+      |> Keyword.merge(extra_request_options)
       |> Keyword.merge(settings.extra_options)
 
     case Req.post(request_options) do
@@ -93,7 +116,7 @@ defmodule Mead.Provider.Ollama do
         {:ok, response}
 
       {:ok, %Req.Response{status: status, body: error_body}} ->
-        {:error, failure_reason(status, error_body, tools)}
+        {:error, failure_reason(status, decode_error_body(error_body), tools)}
 
       {:error, %Req.TransportError{reason: :timeout}} ->
         {:error, :timeout}
@@ -120,6 +143,16 @@ defmodule Mead.Provider.Ollama do
   end
 
   defp failure_reason(status, _body, _tools), do: {:http_status, status}
+
+  # A streamed failure leaves its body as the raw text the into-callback collected.
+  defp decode_error_body(body) when is_binary(body) do
+    case Jason.decode(body) do
+      {:ok, decoded} -> decoded
+      {:error, _reason} -> body
+    end
+  end
+
+  defp decode_error_body(body), do: body
 
   defp encode_messages(messages) do
     {encoded, _names} = Enum.flat_map_reduce(messages, %{}, &encode_message/2)
@@ -229,4 +262,87 @@ defmodule Mead.Provider.Ollama do
   defp parse_text(""), do: {:ok, []}
   defp parse_text(text) when is_binary(text), do: {:ok, [%{type: :text, text: text}]}
   defp parse_text(_other), do: :error
+
+  # --- streaming ---------------------------------------------------------------------------------
+  #
+  # Each line of the body is a JSON object. The lines are folded into the body a `stream: false`
+  # call would have returned and that body goes through `parse/1`, so both paths agree on every
+  # edge. After a bad line nothing more is read, so `on_delta` is never called again.
+
+  defp ingest(%Req.Response{status: 200} = response, data, on_delta) do
+    state = Req.Response.get_private(response, :stream, new_stream())
+    {lines, rest} = split_complete_lines(state.buffer <> data)
+
+    state =
+      Enum.reduce(lines, %{state | buffer: rest}, fn line, current ->
+        fold_line(current, line, on_delta)
+      end)
+
+    Req.Response.put_private(response, :stream, state)
+  end
+
+  defp ingest(%Req.Response{body: body} = response, data, _on_delta) do
+    %{response | body: if(is_binary(body), do: body <> data, else: data)}
+  end
+
+  defp new_stream do
+    %{buffer: "", text: "", tool_calls: [], final: nil, malformed: false}
+  end
+
+  defp split_complete_lines(text) do
+    parts = String.split(text, "\n")
+    {Enum.drop(parts, -1), List.last(parts)}
+  end
+
+  defp fold_line(%{malformed: true} = state, _line, _on_delta), do: state
+  defp fold_line(%{final: final} = state, _line, _on_delta) when final != nil, do: state
+
+  defp fold_line(state, line, on_delta) do
+    case String.trim(line) do
+      "" -> state
+      trimmed -> fold_object(state, Jason.decode(trimmed), on_delta)
+    end
+  end
+
+  defp fold_object(state, {:ok, %{"message" => message} = object}, on_delta)
+       when is_map(message) do
+    content = Map.get(message, "content")
+
+    state =
+      if is_binary(content) and content != "" do
+        on_delta.(content)
+        %{state | text: state.text <> content}
+      else
+        state
+      end
+
+    state =
+      case Map.get(message, "tool_calls") do
+        calls when is_list(calls) -> %{state | tool_calls: state.tool_calls ++ calls}
+        _none -> state
+      end
+
+    if Map.get(object, "done") == true, do: %{state | final: object}, else: state
+  end
+
+  defp fold_object(state, _not_a_chat_line, _on_delta), do: %{state | malformed: true}
+
+  defp finish_stream(%Req.Response{status: 200} = response) do
+    state = Req.Response.get_private(response, :stream, new_stream())
+
+    if state.malformed or state.final == nil do
+      {:error, :malformed_response}
+    else
+      message = %{"content" => state.text}
+
+      message =
+        if state.tool_calls == [],
+          do: message,
+          else: Map.put(message, "tool_calls", state.tool_calls)
+
+      parse(%{response | body: Map.put(state.final, "message", message)})
+    end
+  end
+
+  defp finish_stream(%Req.Response{status: status}), do: {:error, {:http_status, status}}
 end
