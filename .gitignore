@@ -17,3 +17,6 @@
 
 # ExUnit @tag :tmp_dir output
 /tmp/
+
+# Erlang VM crash dumps
+erl_crash.dump
