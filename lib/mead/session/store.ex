@@ -358,7 +358,9 @@ defmodule Mead.Session.Store do
     if valid_session_id?(session_id), do: :ok, else: {:error, :invalid_session_id}
   end
 
-  defp valid_session_id?(session_id) do
+  @doc false
+  @spec valid_session_id?(term()) :: boolean()
+  def valid_session_id?(session_id) do
     is_binary(session_id) and Regex.match?(@session_id_shape, session_id)
   end
 
