@@ -61,6 +61,24 @@ defmodule Mead.Test.DeckHandler do
     end
   end
 
+  # "choose <id>,<id>,..." puts a question with those options (labelled "Label <id>") and answers
+  # "chose <id>" or "no choice <reason>".
+  def handle_turn(_history, "choose " <> identifiers, options) do
+    {module, context} = Keyword.fetch!(options, :interaction)
+    option_ids = String.split(identifiers, ",")
+
+    choice = %{
+      tool_call_id: "ask-1",
+      prompt: "Which one?",
+      options: Enum.map(option_ids, &%{id: &1, label: "Label " <> &1})
+    }
+
+    case module.ask_choice(context, choice) do
+      {:ok, option_id} -> {:ok, "chose " <> option_id}
+      {:error, reason} -> {:ok, "no choice #{reason}"}
+    end
+  end
+
   def handle_turn(_history, "telemetry " <> numbers, options) do
     [input_tokens, output_tokens] = numbers |> String.split(" ") |> Enum.map(&String.to_integer/1)
 

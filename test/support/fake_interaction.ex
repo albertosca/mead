@@ -21,6 +21,18 @@ defmodule Mead.Test.FakeInteraction do
     end)
   end
 
+  # Answers come from the same script as the permission requests: `{:ok, id}` or `{:error, reason}`,
+  # `{:error, :no_answer}` once it runs out.
+  @impl true
+  def ask_choice(context, choice) do
+    send(context.test_pid, {:ask_choice, choice})
+
+    Agent.get_and_update(context.script, fn
+      [answer | rest] -> {answer, rest}
+      [] -> {{:error, :no_answer}, []}
+    end)
+  end
+
   @impl true
   def register_call(context, tool_call_id, pid) do
     send(context.test_pid, {:register_call, tool_call_id, pid})

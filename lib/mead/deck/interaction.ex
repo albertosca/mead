@@ -16,6 +16,10 @@ defmodule Mead.Deck.Interaction do
     do: GenServer.call(channel, {:permission_request, request}, :infinity)
 
   @impl true
+  def ask_choice(%{channel: channel}, choice),
+    do: GenServer.call(channel, {:choice_request, choice}, :infinity)
+
+  @impl true
   def register_call(%{channel: channel}, tool_call_id, pid),
     do: GenServer.call(channel, {:register_call, tool_call_id, pid}, :infinity)
 

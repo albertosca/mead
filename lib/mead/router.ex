@@ -35,6 +35,7 @@ defmodule Mead.Router do
 
   @behaviour Mead.Session.TurnHandler
 
+  alias Mead.Router.AskUser
   alias Mead.Router.Classifier
   alias Mead.Session.Turn
 
@@ -145,10 +146,18 @@ defmodule Mead.Router do
   # Tools are offered on either route, and only through a provider that can carry them.
   defp tools_for_turn(provider, options, hub) do
     if Code.ensure_loaded?(provider) and function_exported?(provider, :converse, 3) do
-      hub.tools_for(options)
+      add_ask_user(hub.tools_for(options), options)
     else
       []
     end
+  end
+
+  # `ask_user` rides along only when the turn already has tools: a turn with none stays a plain
+  # completion, so a model without tool support is not turned away just for the built-in.
+  defp add_ask_user([], _options), do: []
+
+  defp add_ask_user(tools, options) do
+    if Keyword.has_key?(options, :interaction), do: tools ++ [AskUser.tool()], else: tools
   end
 
   defp converse_loop(provider, provider_options, messages, tools, options, hub) do
@@ -229,8 +238,39 @@ defmodule Mead.Router do
   # about, and reported, and a denied call never reaches the hub.
   defp run_tool_for_turn(context, tool_use) do
     case Keyword.get(context.options, :interaction) do
-      nil -> run_tool(context, tool_use)
-      interaction -> run_tool_with_interaction(context, interaction, tool_use)
+      nil ->
+        run_tool(context, tool_use)
+
+      interaction ->
+        if tool_use.name == AskUser.name(),
+          do: run_ask_user(interaction, tool_use),
+          else: run_tool_with_interaction(context, interaction, tool_use)
+    end
+  end
+
+  defp run_ask_user({module, interaction_context}, %{id: id, input: input} = tool_use) do
+    with {:ok, question} <- AskUser.validate(input),
+         choice = %{tool_call_id: id, prompt: question.prompt, options: question.options},
+         {:ok, option_id} <- module.ask_choice(interaction_context, choice),
+         %{label: label} <- Enum.find(question.options, &(&1.id == option_id)) do
+      %{
+        type: :tool_result,
+        tool_use_id: id,
+        content: "The person chose: #{label}",
+        is_error: false
+      }
+    else
+      {:error, :expired} ->
+        error_result(tool_use, "The person did not choose in time.")
+
+      {:error, :no_answer} ->
+        error_result(tool_use, "The person could not be asked.")
+
+      {:error, reason} when is_binary(reason) ->
+        error_result(tool_use, "The ask_user arguments are invalid: #{reason}.")
+
+      _unknown_option ->
+        error_result(tool_use, "The person could not be asked.")
     end
   end
 

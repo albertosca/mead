@@ -35,6 +35,20 @@ defmodule Mead.Router.Interaction do
               :allow | {:deny, :rejected | :expired}
   @callback tool_updated(context :: term(), update()) :: :ok
 
+  @type choice :: %{
+          tool_call_id: String.t(),
+          prompt: String.t(),
+          options: [%{id: String.t(), label: String.t()}]
+        }
+
+  @doc """
+  Puts a multiple-choice question (the `ask_user` tool) to the person. Returns the `id` of the
+  option they picked, `{:error, :expired}` when the time ran out and `{:error, :no_answer}` when
+  nobody could answer. Like `request_permission/2` it may block until there is an answer.
+  """
+  @callback ask_choice(context :: term(), choice()) ::
+              {:ok, String.t()} | {:error, :expired | :no_answer}
+
   @doc """
   Called once an allowed tool call is running in its own process, before the `:in_progress`
   update, so whoever can cancel the call (by killing `pid`) knows which process to kill.
@@ -46,7 +60,8 @@ defmodule Mead.Router.Interaction do
   def valid?({module, _context}) when is_atom(module) do
     Code.ensure_loaded?(module) and function_exported?(module, :request_permission, 2) and
       function_exported?(module, :tool_updated, 2) and
-      function_exported?(module, :register_call, 3)
+      function_exported?(module, :register_call, 3) and
+      function_exported?(module, :ask_choice, 2)
   end
 
   def valid?(_other), do: false

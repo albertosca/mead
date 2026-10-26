@@ -113,8 +113,8 @@ defmodule Mead.Deck.Channel do
     log
     |> EventLog.read_after(0)
     |> Enum.reduce(%{}, fn
-      %{"type" => "permission.resolved", "sequence" => sequence, "payload" => payload},
-      resolved ->
+      %{"type" => type, "sequence" => sequence, "payload" => payload}, resolved
+      when type in ["permission.resolved", "choice.resolved"] ->
         Map.put(resolved, payload["request_id"], sequence)
 
       _other, resolved ->
@@ -128,13 +128,22 @@ defmodule Mead.Deck.Channel do
     open =
       state.log
       |> EventLog.read_after(0)
-      |> Enum.filter(&(&1["type"] == "permission.requested"))
+      |> Enum.filter(&(&1["type"] in ["permission.requested", "choice.requested"]))
       |> Enum.reject(&Map.has_key?(state.resolved, &1["payload"]["request_id"]))
 
     Enum.reduce_while(open, {:ok, state}, fn envelope, {:ok, current} ->
       payload = envelope["payload"]
 
-      case emit_resolved(current, payload["request_id"], payload["action"], "expired", %{}) do
+      outcome =
+        case envelope["type"] do
+          "permission.requested" ->
+            emit_resolved(current, payload["request_id"], payload["action"], "expired", %{})
+
+          "choice.requested" ->
+            emit_choice_resolved(current, payload["request_id"], nil, %{})
+        end
+
+      case outcome do
         {:ok, next} -> {:cont, {:ok, next}}
         {:error, reason} -> {:halt, {:error, {:event_log, reason}}}
       end
@@ -242,6 +251,8 @@ defmodule Mead.Deck.Channel do
     end
   end
 
+  def handle_call({:choice_request, choice}, from, state), do: ask_choice(state, from, choice)
+
   @impl GenServer
   def handle_cast({:client_message, socket, message}, state) do
     if Map.has_key?(state.sockets, socket) do
@@ -272,8 +283,26 @@ defmodule Mead.Deck.Channel do
          state
        ) do
     cond do
-      Map.has_key?(state.pending, request_id) ->
+      match?(%{kind: :permission}, Map.get(state.pending, request_id)) ->
         answer_pending(state, socket, request_id, option_id)
+
+      Map.has_key?(state.resolved, request_id) ->
+        resend(state, socket, Map.fetch!(state.resolved, request_id))
+        {:noreply, state}
+
+      true ->
+        {:noreply, state}
+    end
+  end
+
+  defp handle_client_message(
+         {:choice_respond, %{request_id: request_id, option_id: option_id}},
+         socket,
+         state
+       ) do
+    cond do
+      match?(%{kind: :choice}, Map.get(state.pending, request_id)) ->
+        answer_choice(state, socket, request_id, option_id)
 
       Map.has_key?(state.resolved, request_id) ->
         resend(state, socket, Map.fetch!(state.resolved, request_id))
@@ -332,6 +361,7 @@ defmodule Mead.Deck.Channel do
         Session.Server.pause_clock(state.session_id)
 
         entry = %{
+          kind: :permission,
           from: from,
           action: action(request),
           monitor: Process.monitor(requester),
@@ -347,6 +377,54 @@ defmodule Mead.Deck.Channel do
 
       {:error, reason} ->
         stop_for_log_failure(reason, state)
+    end
+  end
+
+  defp ask_choice(state, {requester, _tag} = from, choice) do
+    request_id = new_request_id()
+
+    payload = %{
+      "request_id" => request_id,
+      "tool_call_id" => choice.tool_call_id,
+      "prompt" => choice.prompt,
+      "options" => Enum.map(choice.options, &%{"id" => &1.id, "label" => &1.label})
+    }
+
+    case emit(state, "choice.requested", payload) do
+      {:ok, state, _envelope} ->
+        Session.Server.pause_clock(state.session_id)
+
+        entry = %{
+          kind: :choice,
+          from: from,
+          option_ids: Enum.map(choice.options, & &1.id),
+          monitor: Process.monitor(requester),
+          timer:
+            Process.send_after(
+              self(),
+              {:request_deadline, request_id},
+              state.configuration.permission_timeout_ms
+            )
+        }
+
+        {:noreply, %{state | pending: Map.put(state.pending, request_id, entry)}}
+
+      {:error, reason} ->
+        stop_for_log_failure(reason, state)
+    end
+  end
+
+  defp answer_choice(state, socket, request_id, option_id) do
+    if option_id in state.pending[request_id].option_ids,
+      do: settle(state, request_id, option_id, {:ok, option_id}, device_of(state, socket)),
+      else: {:noreply, state}
+  end
+
+  # A pending request whose time is up or whose asker died: nobody answered.
+  defp expire(state, request_id) do
+    case state.pending[request_id].kind do
+      :permission -> settle(state, request_id, "expired", {:deny, :expired}, %{})
+      :choice -> settle(state, request_id, nil, {:error, :expired}, %{})
     end
   end
 
@@ -372,7 +450,13 @@ defmodule Mead.Deck.Channel do
     Process.demonitor(entry.monitor, [:flush])
     state = %{state | pending: pending}
 
-    case emit_resolved(state, request_id, entry.action, outcome, extra) do
+    resolution =
+      case entry.kind do
+        :permission -> emit_resolved(state, request_id, entry.action, outcome, extra)
+        :choice -> emit_choice_resolved(state, request_id, outcome, extra)
+      end
+
+    case resolution do
       {:ok, state} ->
         Session.Server.resume_clock(state.session_id)
         GenServer.reply(entry.from, answer)
@@ -380,6 +464,26 @@ defmodule Mead.Deck.Channel do
 
       {:error, reason} ->
         stop_for_log_failure(reason, state)
+    end
+  end
+
+  defp emit_choice_resolved(state, request_id, option_id, extra) do
+    payload =
+      Map.merge(
+        %{
+          "request_id" => request_id,
+          "option_id" => option_id,
+          "decided_at" => DateTime.to_iso8601(DateTime.utc_now())
+        },
+        extra
+      )
+
+    case emit(state, "choice.resolved", payload) do
+      {:ok, state, envelope} ->
+        {:ok, %{state | resolved: Map.put(state.resolved, request_id, envelope["sequence"])}}
+
+      {:error, reason} ->
+        {:error, reason}
     end
   end
 
@@ -513,7 +617,7 @@ defmodule Mead.Deck.Channel do
 
   def handle_info({:request_deadline, request_id}, state) do
     if Map.has_key?(state.pending, request_id) do
-      settle(state, request_id, "expired", {:deny, :expired}, %{})
+      expire(state, request_id)
     else
       {:noreply, state}
     end
@@ -522,7 +626,7 @@ defmodule Mead.Deck.Channel do
   def handle_info({:DOWN, reference, :process, pid, _reason}, state) do
     case Enum.find(state.pending, fn {_id, entry} -> entry.monitor == reference end) do
       {request_id, _entry} ->
-        settle(state, request_id, "expired", {:deny, :expired}, %{})
+        expire(state, request_id)
 
       nil ->
         {:noreply,
