@@ -52,7 +52,7 @@ defmodule Mead.MCP.Server.DispatcherTest do
     assert reply(request(1, "ping"))["result"] == %{}
   end
 
-  test "tools/list offers the eight tools" do
+  test "tools/list offers the nine tools" do
     response = reply(request(1, "tools/list"))
 
     assert Enum.map(response["result"]["tools"], & &1["name"]) ==
@@ -64,7 +64,8 @@ defmodule Mead.MCP.Server.DispatcherTest do
                "resume_session",
                "delete_session",
                "list_sessions",
-               "compact_session"
+               "compact_session",
+               "usage"
              ]
   end
 

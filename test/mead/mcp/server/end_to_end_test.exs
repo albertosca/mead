@@ -70,9 +70,9 @@ defmodule Mead.MCP.Server.EndToEndTest do
   @ping JSON.encode!(%{"jsonrpc" => "2.0", "id" => 1, "method" => "ping"})
   @json {"content-type", "application/json"}
 
-  test "the handshake publishes the eight tools", context do
+  test "the handshake publishes the nine tools", context do
     assert {:ok, tools, _servers} = Catalog.snapshot(context.catalog)
-    assert length(tools) == 8
+    assert length(tools) == 9
   end
 
   test "a full cycle: start, submit, read the history, stop", context do
@@ -93,6 +93,41 @@ defmodule Mead.MCP.Server.EndToEndTest do
 
     assert {:ok, %{content: "unknown session", is_error: true}} =
              call(context, "submit_turn", %{"session_id" => session_id, "input" => "again"})
+  end
+
+  test "usage reads what a session spent, before and after it stops", context do
+    assert {:ok, %{content: session_id, is_error: false}} = call(context, "start_session", %{})
+    on_exit(fn -> Mead.delete_session(session_id) end)
+
+    :telemetry.execute(
+      [:mead, :router, :route],
+      %{
+        duration: System.convert_time_unit(7, :millisecond, :native),
+        input_tokens: 5,
+        output_tokens: 3
+      },
+      %{
+        route: :cloud,
+        route_source: :classified,
+        provider: Mead.Test.FakeProvider,
+        status: :ok,
+        session_id: session_id
+      }
+    )
+
+    assert {:ok, %{content: before_stop, is_error: false}} =
+             call(context, "usage", %{"session_id" => session_id})
+
+    assert %{"turns" => 1, "input_tokens" => 5, "output_tokens" => 3} =
+             JSON.decode!(before_stop)
+
+    assert {:ok, %{content: "stopped"}} =
+             call(context, "stop_session", %{"session_id" => session_id})
+
+    assert {:ok, %{content: after_stop, is_error: false}} =
+             call(context, "usage", %{"session_id" => session_id})
+
+    assert after_stop == before_stop
   end
 
   test "a tool failure does not break the connection", context do

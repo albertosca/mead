@@ -1,8 +1,8 @@
 defmodule Mead.MCP.Server.Tools do
   @moduledoc """
-  The eight tools the MCP server offers: `start_session`, `submit_turn`, `history`,
-  `stop_session`, `resume_session`, `delete_session`, `list_sessions`, and `compact_session`.
-  They are the only code of the server that touches the runtime, and they do it only through the
+  The nine tools the MCP server offers: `start_session`, `submit_turn`, `history`,
+  `stop_session`, `resume_session`, `delete_session`, `list_sessions`, `compact_session`, and
+  `usage`. They are the only code of the server that touches the runtime, and they do it only through the
   public `Mead` API.
 
   A tool never raises for what a client can send. Arguments of the wrong type come back as
@@ -17,6 +17,7 @@ defmodule Mead.MCP.Server.Tools do
   # long; one hour is far beyond any real turn. The runtime itself accepts up to the longest delay
   # `Process.send_after/3` allows, for an operator who needs more.
   @maximum_turn_timeout 3_600_000
+  @maximum_recent 100
   @routes %{"auto" => :auto, "local" => :local, "cloud" => :cloud}
   @inspect_options [limit: 50, printable_limit: 1_000]
 
@@ -103,6 +104,27 @@ defmodule Mead.MCP.Server.Tools do
         "description" =>
           "Rewrites a stored conversation in its shortest form, without losing a turn, and returns the bytes before and after.",
         "inputSchema" => session_schema()
+      },
+      %{
+        "name" => "usage",
+        "description" =>
+          "Reads what the ledger counted: the totals over every route, the totals per route and provider, and the most recent turns, or the totals of one session when session_id is given.",
+        "inputSchema" => %{
+          "type" => "object",
+          "properties" => %{
+            "session_id" => %{
+              "type" => "string",
+              "description" => "Only the totals of this session."
+            },
+            "recent" => %{
+              "type" => "integer",
+              "minimum" => 0,
+              "maximum" => @maximum_recent,
+              "description" =>
+                "How many of the latest turns to include, newest first; defaults to 20. Ignored with session_id."
+            }
+          }
+        }
       }
     ]
   end
@@ -134,6 +156,7 @@ defmodule Mead.MCP.Server.Tools do
   def call("delete_session", arguments, _context), do: delete_session(arguments)
   def call("list_sessions", _arguments, _context), do: list_sessions()
   def call("compact_session", arguments, _context), do: compact_session(arguments)
+  def call("usage", arguments, _context), do: usage(arguments)
   def call(_name, _arguments, _context), do: {:error, :unknown_tool}
 
   defp start_session(arguments) do
@@ -317,6 +340,86 @@ defmodule Mead.MCP.Server.Tools do
   defp compact_failure(:not_found), do: "unknown session"
   defp compact_failure(:corrupt_history), do: "the stored conversation is damaged"
   defp compact_failure(_other), do: "the conversation could not be compacted"
+
+  defp usage(arguments) do
+    case Map.fetch(arguments, "session_id") do
+      :error -> overall_usage(arguments)
+      {:ok, session_id} when is_binary(session_id) -> session_usage(session_id)
+      {:ok, _other} -> invalid("session_id must be a string")
+    end
+  end
+
+  defp session_usage(session_id) do
+    case Mead.session_usage(session_id) do
+      {:ok, totals} ->
+        {:ok, success(JSON.encode!(Map.put(counters(totals), "session_id", session_id)))}
+
+      {:error, :not_found} ->
+        {:ok, failure("unknown session or no turn counted yet")}
+    end
+  catch
+    :exit, _reason -> {:ok, failure("the ledger is not available")}
+  end
+
+  defp overall_usage(arguments) do
+    with {:ok, recent} <- fetch_recent(arguments) do
+      usage = Mead.usage(recent: recent)
+
+      body = %{
+        "totals" => Map.put(counters(usage.totals), "dropped", usage.totals.dropped),
+        "routes" => Enum.map(usage.routes, &route_entry/1),
+        "recent" => Enum.map(usage.recent, &recent_entry/1)
+      }
+
+      {:ok, success(JSON.encode!(body))}
+    end
+  catch
+    :exit, _reason -> {:ok, failure("the ledger is not available")}
+  end
+
+  defp fetch_recent(arguments) do
+    case Map.fetch(arguments, "recent") do
+      :error ->
+        {:ok, 20}
+
+      {:ok, recent} when is_integer(recent) and recent >= 0 and recent <= @maximum_recent ->
+        {:ok, recent}
+
+      {:ok, _other} ->
+        invalid("recent must be an integer from 0 to #{@maximum_recent}")
+    end
+  end
+
+  defp counters(totals) do
+    %{
+      "turns" => totals.turns,
+      "failures" => totals.failures,
+      "input_tokens" => totals.input_tokens,
+      "output_tokens" => totals.output_tokens,
+      "duration_ms" => totals.duration_ms
+    }
+  end
+
+  defp route_entry(entry) do
+    Map.merge(counters(entry), %{
+      "route" => Atom.to_string(entry.route),
+      "provider" => inspect(entry.provider)
+    })
+  end
+
+  defp recent_entry(entry) do
+    %{
+      "session_id" => entry.session_id,
+      "route" => Atom.to_string(entry.route),
+      "route_source" => Atom.to_string(entry.route_source),
+      "provider" => inspect(entry.provider),
+      "status" => Atom.to_string(entry.status),
+      "input_tokens" => entry.input_tokens,
+      "output_tokens" => entry.output_tokens,
+      "duration_ms" => entry.duration_ms,
+      "at" => entry.at |> DateTime.from_unix!(:millisecond) |> DateTime.to_iso8601()
+    }
+  end
 
   defp session_entry(entry) do
     %{

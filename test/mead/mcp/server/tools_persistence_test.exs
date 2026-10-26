@@ -35,7 +35,7 @@ defmodule Mead.MCP.Server.ToolsPersistenceTest do
     session_id
   end
 
-  test "the server offers eight tools, the new ones last" do
+  test "the server offers nine tools, the new ones last" do
     assert Enum.map(Tools.definitions(), & &1["name"]) ==
              [
                "start_session",
@@ -45,7 +45,8 @@ defmodule Mead.MCP.Server.ToolsPersistenceTest do
                "resume_session",
                "delete_session",
                "list_sessions",
-               "compact_session"
+               "compact_session",
+               "usage"
              ]
 
     resume = Enum.find(Tools.definitions(), &(&1["name"] == "resume_session"))
