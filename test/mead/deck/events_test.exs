@@ -36,6 +36,23 @@ defmodule Mead.Deck.EventsTest do
                Events.decode_client(frame("session.resume", %{"last_sequence" => 42}))
     end
 
+    test "session.resume carries an optional device_id" do
+      assert {:ok, {:session_resume, %{last_sequence: 1, device_id: nil}}} =
+               Events.decode_client(frame("session.resume", %{"last_sequence" => 1}))
+
+      assert {:ok, {:session_resume, %{device_id: "phone-7"}}} =
+               Events.decode_client(
+                 frame("session.resume", %{"last_sequence" => 1, "device_id" => "phone-7"})
+               )
+
+      for bad <- ["", 5, nil, String.duplicate("d", 1_000)] do
+        assert {:error, :invalid_payload} =
+                 Events.decode_client(
+                   frame("session.resume", %{"last_sequence" => 1, "device_id" => bad})
+                 )
+      end
+    end
+
     test "policy.set maps every level and nothing else" do
       for {wire, level} <- [
             {"ask_always", :ask_always},

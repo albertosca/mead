@@ -27,7 +27,7 @@ defmodule Mead.Deck.Events do
           | {:permission_respond, %{request_id: String.t(), option_id: String.t()}}
           | {:choice_respond, %{request_id: String.t(), option_id: String.t()}}
           | {:tool_call_cancel, %{tool_call_id: String.t()}}
-          | {:session_resume, %{last_sequence: non_neg_integer()}}
+          | {:session_resume, %{last_sequence: non_neg_integer(), device_id: String.t() | nil}}
           | {:permission_forget, %{tool: String.t()}}
           | {:policy_set, %{level: :ask_always | :ask_for_risky | :allow_all}}
 
@@ -117,9 +117,16 @@ defmodule Mead.Deck.Events do
     end
   end
 
-  defp validate("session.resume", %{"last_sequence" => last_sequence})
-       when is_integer(last_sequence) and last_sequence >= 0,
-       do: {:ok, {:session_resume, %{last_sequence: last_sequence}}}
+  defp validate("session.resume", %{"last_sequence" => last_sequence} = payload)
+       when is_integer(last_sequence) and last_sequence >= 0 do
+    case device_id(payload) do
+      {:ok, device_id} ->
+        {:ok, {:session_resume, %{last_sequence: last_sequence, device_id: device_id}}}
+
+      :error ->
+        {:error, :invalid_payload}
+    end
+  end
 
   defp validate("permission.forget", %{"tool" => tool}) do
     case identifier(tool) do
@@ -145,6 +152,10 @@ defmodule Mead.Deck.Events do
       :error -> {:error, :invalid_payload}
     end
   end
+
+  # The device names itself by an opaque identifier it keeps across reconnects; absent is fine.
+  defp device_id(%{"device_id" => value}), do: identifier(value)
+  defp device_id(_payload), do: {:ok, nil}
 
   defp identifier(value)
        when is_binary(value) and byte_size(value) > 0 and

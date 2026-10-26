@@ -78,10 +78,10 @@ defmodule Mead.Deck.Socket do
   def handle_info(_message, state), do: {:ok, state}
 
   defp handle_message(
-         {:session_resume, %{last_sequence: last_sequence}},
+         {:session_resume, %{last_sequence: last_sequence, device_id: device_id}},
          %{resumed: false} = state
        ) do
-    Channel.resume(state.channel, self(), last_sequence)
+    Channel.resume(state.channel, self(), last_sequence, device_id)
     schedule_heartbeat(state)
     {:ok, %{state | resumed: true}}
   catch

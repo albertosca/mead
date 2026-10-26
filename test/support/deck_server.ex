@@ -74,6 +74,16 @@ defmodule Mead.Test.DeckServer do
     })
   end
 
+  @doc "Like `open/2`, with the `device_id` the client names itself by."
+  def open_as(server, ticket, device_id) do
+    {:ok, client} = WebSocketClient.connect(server.port, "/deck/socket?ticket=" <> ticket)
+
+    WebSocketClient.send_json(client, %{
+      "type" => "session.resume",
+      "payload" => %{"last_sequence" => 0, "device_id" => device_id}
+    })
+  end
+
   @doc "Sends `prompt.send` with a fresh message id."
   def send_prompt(client, text, message_id \\ nil) do
     WebSocketClient.send_json(client, %{

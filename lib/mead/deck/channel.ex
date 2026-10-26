@@ -77,9 +77,9 @@ defmodule Mead.Deck.Channel do
   snapshot, and replays every sequenced event after `last_sequence`. All inside one call, so no
   live event can reach the socket before its snapshot.
   """
-  @spec resume(GenServer.server(), pid(), non_neg_integer()) :: :ok
-  def resume(channel, socket, last_sequence),
-    do: GenServer.call(channel, {:resume, socket, last_sequence})
+  @spec resume(GenServer.server(), pid(), non_neg_integer(), String.t() | nil) :: :ok
+  def resume(channel, socket, last_sequence, device_id \\ nil),
+    do: GenServer.call(channel, {:resume, socket, last_sequence, device_id})
 
   @doc "Hands a validated client message from `socket` to the channel; unattached sockets are ignored."
   @spec client_message(GenServer.server(), pid(), Events.client_message()) :: :ok
@@ -299,8 +299,8 @@ defmodule Mead.Deck.Channel do
   end
 
   @impl GenServer
-  def handle_call({:resume, socket, last_sequence}, _from, state) do
-    state = monitor_socket(state, socket)
+  def handle_call({:resume, socket, last_sequence, device_id}, _from, state) do
+    state = monitor_socket(state, socket, device_id)
     current = EventLog.last_sequence(state.log)
 
     send(socket, {:deck_event, Events.encode(snapshot(state, current))})
@@ -926,14 +926,15 @@ defmodule Mead.Deck.Channel do
     {:stop, {:shutdown, {:log_failed, reason}}, state}
   end
 
-  defp monitor_socket(state, socket) do
+  # A device that names itself keeps that name; one that does not is numbered as it resumes.
+  defp monitor_socket(state, socket, device_id) do
     if Map.has_key?(state.sockets, socket) do
       state
     else
       %{
         state
         | sockets: Map.put(state.sockets, socket, Process.monitor(socket)),
-          devices: Map.put(state.devices, socket, "device-#{state.next_device}"),
+          devices: Map.put(state.devices, socket, device_id || "device-#{state.next_device}"),
           next_device: state.next_device + 1
       }
     end

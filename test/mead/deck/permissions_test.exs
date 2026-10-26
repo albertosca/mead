@@ -164,6 +164,25 @@ defmodule Mead.Deck.PermissionsTest do
     assert List.last(events)["payload"]["text"] == "allowed"
   end
 
+  test "a decision is attributed to the device_id the client resumed with", %{
+    directory: directory
+  } do
+    server = start_server(directory)
+    %{"ticket" => ticket, "session_id" => session_id} = DeckServer.ticket(server)
+    on_exit(fn -> Mead.stop_session(session_id) end)
+    client = DeckServer.open_as(server, ticket, "phone-7")
+    {client, _snapshot} = WebSocketClient.receive_type(client, "session.snapshot")
+
+    client = DeckServer.send_prompt(client, "ask effect files__write_file /a")
+    {client, events} = events_until(client, "permission.requested")
+    request_id = List.last(events)["payload"]["request_id"]
+
+    client = respond(client, request_id, "allow_once")
+    {_client, after_answer} = events_until(client, "text.delta")
+
+    assert hd(after_answer)["payload"]["decided_by_device"] == "phone-7"
+  end
+
   test "allow_once resolves allowed and runs the call", %{directory: directory} do
     {client, _session_id, _snapshot} = connect(start_server(directory))
     client = DeckServer.send_prompt(client, "ask effect files__write_file /a")
