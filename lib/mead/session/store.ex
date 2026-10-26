@@ -65,6 +65,35 @@ defmodule Mead.Session.Store do
   end
 
   @doc """
+  Returns how many of the newest turns a conversation keeps when its file is compacted, or `nil`
+  for all of them, which is the default.
+
+  `config :mead, :storage, max_turns:` sets it. It is the one setting that makes compaction drop
+  turns, so it is off unless asked for; anything but `nil` or a positive integer raises
+  `ArgumentError`.
+  """
+  @spec max_turns() :: pos_integer() | nil
+  def max_turns do
+    case Application.get_env(:mead, :storage) do
+      storage when is_list(storage) -> storage |> Keyword.get(:max_turns) |> validate_max_turns()
+      _unset_or_invalid -> nil
+    end
+  end
+
+  defp validate_max_turns(nil), do: nil
+  defp validate_max_turns(count) when is_integer(count) and count > 0, do: count
+
+  defp validate_max_turns(other) do
+    raise ArgumentError,
+          "config :mead, :storage, max_turns must be a positive integer, got: #{inspect(other)}"
+  end
+
+  @doc "The newest `maximum` of `turns` (chronological order), or all of them when it is `nil`."
+  @spec window([Mead.Session.Turn.t()], pos_integer() | nil) :: [Mead.Session.Turn.t()]
+  def window(turns, nil), do: turns
+  def window(turns, maximum), do: Enum.take(turns, -maximum)
+
+  @doc """
   Returns the size in bytes a live session's file may reach before it is compacted.
 
   Defaults to one mebibyte; `config :mead, :storage, compact_after_bytes:` sets it. Anything but

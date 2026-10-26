@@ -35,6 +35,31 @@ defmodule Mead.CompactionTest do
     session_id
   end
 
+  test "resume keeps only the newest max_turns turns when the setting is on", %{
+    directory: directory
+  } do
+    session_id = session_with_turns(8)
+    Mead.stop_session(session_id)
+    Application.put_env(:mead, :storage, directory: directory, max_turns: 3)
+
+    assert {:ok, ^session_id} = Mead.resume_session(session_id)
+    {:ok, history} = Mead.history(session_id)
+
+    assert Enum.map(history, & &1.input) == ["question 6", "question 7", "question 8"]
+    {:ok, stored} = Store.load(directory, session_id)
+    assert Enum.map(stored, & &1.input) == ["question 6", "question 7", "question 8"]
+  end
+
+  test "compact_session on a stopped session applies max_turns too", %{directory: directory} do
+    session_id = session_with_turns(8)
+    Mead.stop_session(session_id)
+    Application.put_env(:mead, :storage, directory: directory, max_turns: 2)
+
+    assert {:ok, _sizes} = Mead.compact_session(session_id)
+    {:ok, stored} = Store.load(directory, session_id)
+    assert Enum.map(stored, & &1.input) == ["question 7", "question 8"]
+  end
+
   test "resume compacts the file and the history is identical", %{directory: directory} do
     session_id = session_with_turns(10)
     {:ok, history} = Mead.history(session_id)

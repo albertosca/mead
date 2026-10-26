@@ -24,7 +24,8 @@ defmodule Mead.Session.Supervisor do
   @impl true
   def init(options) do
     children = [
-      {History, Keyword.take(options, [:session_id, :directory, :resume, :compact_after_bytes])},
+      {History,
+       Keyword.take(options, [:session_id, :directory, :resume, :compact_after_bytes, :max_turns])},
       {Server, options}
     ]
 

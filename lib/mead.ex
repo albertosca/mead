@@ -74,7 +74,7 @@ defmodule Mead do
       else
         with {:ok, recovered} <- Store.recover(directory, session_id) do
           # Interrupted before compacting, so the file is already what the history would write.
-          turns = Enum.map(recovered, &Turn.interrupt/1)
+          turns = recovered |> Enum.map(&Turn.interrupt/1) |> Store.window(Store.max_turns())
           compact_quietly(directory, session_id, turns)
           launch(session_id, options, resume: turns)
         end
@@ -118,7 +118,8 @@ defmodule Mead do
           end)
           |> validate_turn_timeout!(),
         directory: Store.directory(),
-        compact_after_bytes: Store.compact_after_bytes()
+        compact_after_bytes: Store.compact_after_bytes(),
+        max_turns: Store.max_turns()
       ] ++ extra
 
     case Pool.start_session(session_options) do
@@ -260,7 +261,7 @@ defmodule Mead do
   @doc """
   Rewrites the stored conversation as one record per turn and returns the bytes before and after.
 
-  Nothing is lost: `history/1` and `resume_session/2` see the same turns. A running session is
+  Nothing is lost, unless `config :mead, :storage, max_turns:` is set, in which case only that many of the newest turns are kept: `history/1` and `resume_session/2` see the same turns. A running session is
   compacted from memory, a stopped one from its file. Returns `{:error, :not_found}` without
   storage, for an id that is not a session id, and when no file exists yet,
   `{:error, :corrupt_history}` for a damaged file, which is left as it is, and
@@ -285,7 +286,7 @@ defmodule Mead do
       end
     else
       with {:ok, turns} <- Store.recover(directory, session_id) do
-        Store.compact(directory, session_id, turns)
+        Store.compact(directory, session_id, Store.window(turns, Store.max_turns()))
       end
     end
   end

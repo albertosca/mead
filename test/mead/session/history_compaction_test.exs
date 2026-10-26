@@ -58,6 +58,43 @@ defmodule Mead.Session.HistoryCompactionTest do
     assert length(loaded) == 42
   end
 
+  test "an explicit compaction keeps only the newest max_turns turns, in memory and on disk",
+       context do
+    start_history(context, max_turns: 5)
+    for index <- 1..12, do: run_turn(context, index)
+    assert length(History.all(context.session_id)) == 12
+
+    assert {:ok, _sizes} = History.compact(context.session_id)
+
+    expected = for index <- 8..12, do: "question #{index}"
+    assert Enum.map(History.all(context.session_id), & &1.input) == expected
+    {:ok, stored} = Store.load(context.directory, context.session_id)
+    assert Enum.map(stored, & &1.input) == expected
+
+    run_turn(context, 13)
+    {:ok, stored} = Store.load(context.directory, context.session_id)
+    assert List.last(stored).input == "question 13"
+    assert length(stored) == 6
+  end
+
+  test "the size-triggered compaction drops the oldest turns beyond max_turns", context do
+    start_history(context, compact_after_bytes: 2_000, max_turns: 10)
+    for index <- 1..60, do: run_turn(context, index)
+
+    inputs = Enum.map(History.all(context.session_id), & &1.input)
+    assert List.last(inputs) == "question 60"
+    refute "question 1" in inputs
+    assert length(inputs) < 60
+  end
+
+  test "without max_turns nothing is ever dropped", context do
+    start_history(context, [])
+    for index <- 1..12, do: run_turn(context, index)
+
+    assert {:ok, _sizes} = History.compact(context.session_id)
+    assert length(History.all(context.session_id)) == 12
+  end
+
   test "rewrites rarely, not on every turn", context do
     start_history(context, compact_after_bytes: 1_000)
 

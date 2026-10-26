@@ -35,6 +35,30 @@ defmodule Mead.Session.StoreDirectoryTest do
     end
   end
 
+  test "max_turns/0 is unlimited unless configured" do
+    Application.delete_env(:mead, :storage)
+    assert Store.max_turns() == nil
+
+    Application.put_env(:mead, :storage, directory: "/var/lib/mead")
+    assert Store.max_turns() == nil
+
+    Application.put_env(:mead, :storage, directory: "/var/lib/mead", max_turns: 200)
+    assert Store.max_turns() == 200
+
+    Application.put_env(:mead, :storage, directory: "/var/lib/mead", max_turns: nil)
+    assert Store.max_turns() == nil
+  end
+
+  test "max_turns/0 refuses anything but a positive integer" do
+    for invalid <- [0, -1, 1.5, "100", :all] do
+      Application.put_env(:mead, :storage, directory: "/var/lib/mead", max_turns: invalid)
+
+      assert_raise ArgumentError, ~r/max_turns must be a positive integer/, fn ->
+        Store.max_turns()
+      end
+    end
+  end
+
   test "compact_after_bytes/0 defaults to one mebibyte" do
     Application.delete_env(:mead, :storage)
     assert Store.compact_after_bytes() == 1_048_576

@@ -31,7 +31,8 @@ defmodule Mead.Session.History do
 
   `:directory` is where to write (or `nil`), `:resume` is a list of turns in chronological
   order to start from, and `:compact_after_bytes` is the file size from which the file is
-  compacted (absent means never).
+  compacted (absent means never). `:max_turns` is how many of the newest turns a compaction keeps
+  (absent means all).
   """
   @spec start_link(keyword()) :: Agent.on_start()
   def start_link(options) do
@@ -39,6 +40,7 @@ defmodule Mead.Session.History do
     directory = Keyword.get(options, :directory)
     resume = Keyword.get(options, :resume, [])
     compact_after_bytes = Keyword.get(options, :compact_after_bytes)
+    turn_limit = Keyword.get(options, :max_turns)
 
     Agent.start_link(
       fn ->
@@ -49,6 +51,7 @@ defmodule Mead.Session.History do
           readable: readable,
           directory: directory,
           compact_after_bytes: compact_after_bytes,
+          max_turns: turn_limit,
           floor: stored_size(directory, session_id)
         }
       end,
@@ -162,9 +165,11 @@ defmodule Mead.Session.History do
     do: {{:error, :corrupt_history}, state}
 
   defp compact_now(state, session_id) do
-    case Store.compact(state.directory, session_id, Enum.reverse(state.turns)) do
+    kept = state.turns |> Enum.reverse() |> Store.window(state.max_turns)
+
+    case Store.compact(state.directory, session_id, kept) do
       {:ok, %{bytes_after: bytes_after}} = result ->
-        {result, %{state | floor: bytes_after}}
+        {result, %{state | turns: Enum.reverse(kept), floor: bytes_after}}
 
       {:error, :not_found} = error ->
         {error, state}
