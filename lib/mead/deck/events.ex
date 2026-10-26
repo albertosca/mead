@@ -12,7 +12,8 @@ defmodule Mead.Deck.Events do
 
   @server_event_types ~w(
     session.snapshot prompt.accepted text.delta tool_call.updated permission.requested
-    permission.resolved choice.requested choice.resolved metric.updated policy.updated heartbeat
+    permission.resolved choice.requested choice.resolved turn.failed metric.updated policy.updated
+    heartbeat
   )
 
   @policy_levels %{

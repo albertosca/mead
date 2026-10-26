@@ -174,7 +174,7 @@ defmodule Mead.Deck.EventsTest do
   describe "the server event vocabulary" do
     test "is pinned to the deck contract" do
       assert Events.server_event_types() ==
-               ~w(session.snapshot prompt.accepted text.delta tool_call.updated permission.requested permission.resolved choice.requested choice.resolved metric.updated policy.updated heartbeat)
+               ~w(session.snapshot prompt.accepted text.delta tool_call.updated permission.requested permission.resolved choice.requested choice.resolved turn.failed metric.updated policy.updated heartbeat)
     end
 
     test "policy level names round trip" do

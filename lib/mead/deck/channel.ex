@@ -101,6 +101,7 @@ defmodule Mead.Deck.Channel do
              policy_level: derive_policy_level(log, configuration.default_policy_level),
              pending: %{},
              calls: %{},
+             open_cards: %{},
              resolved: resolved_requests(log)
            }) do
       {:ok, state}
@@ -235,7 +236,7 @@ defmodule Mead.Deck.Channel do
     }
 
     case emit(state, "tool_call.updated", payload) do
-      {:ok, state, _envelope} -> {:reply, :ok, finish_call(state, update)}
+      {:ok, state, _envelope} -> {:reply, :ok, finish_call(state, update, turn_id)}
       {:error, reason} -> stop_for_log_failure(reason, state)
     end
   end
@@ -354,11 +355,19 @@ defmodule Mead.Deck.Channel do
 
   defp handle_client_message(_message, _socket, state), do: {:noreply, state}
 
-  defp finish_call(state, %{status: status, tool_call_id: tool_call_id})
-       when status in [:completed, :failed],
-       do: %{state | calls: Map.delete(state.calls, tool_call_id)}
+  # `open_cards` remembers every tool card that has not reached a final status, so a turn that ends
+  # underneath a running call can close it.
+  defp finish_call(state, %{status: status, tool_call_id: tool_call_id}, _turn_id)
+       when status in [:completed, :failed] do
+    %{
+      state
+      | calls: Map.delete(state.calls, tool_call_id),
+        open_cards: Map.delete(state.open_cards, tool_call_id)
+    }
+  end
 
-  defp finish_call(state, _update), do: state
+  defp finish_call(state, %{tool_call_id: tool_call_id, title: title}, turn_id),
+    do: %{state | open_cards: Map.put(state.open_cards, tool_call_id, {turn_id, title})}
 
   defp approve_by_policy(state, request) do
     request_id = new_request_id()
@@ -663,13 +672,61 @@ defmodule Mead.Deck.Channel do
   def handle_info(_message, state), do: {:noreply, state}
 
   defp finish_turn(%{running: %{turn_id: turn_id}} = state, result) do
-    events = text_events(state.running, turn_id, result) ++ metric_events(state.session_id)
-
-    case emit_all(%{state | running: nil}, events) do
-      {:ok, state} -> continue(start_next_turn(state))
+    with {:ok, state} <- close_open_cards(state),
+         events = text_events(state.running, turn_id, result) ++ failure_events(turn_id, result),
+         events = events ++ metric_events(state.session_id),
+         {:ok, state} <- emit_all(%{state | running: nil}, events) do
+      continue(start_next_turn(state))
+    else
       {:error, reason} -> stop_for_log_failure(reason, state)
     end
   end
+
+  # A tool still running when its turn ends (timeout, crash) is killed and its card is closed as
+  # failed, so no card stays "running" and no cancel waits for a confirmation that never comes.
+  defp close_open_cards(state) do
+    Enum.reduce_while(state.open_cards, {:ok, state}, fn {tool_call_id, {turn_id, title}},
+                                                         {:ok, state} ->
+      case Map.fetch(state.calls, tool_call_id) do
+        {:ok, pid} -> Process.exit(pid, :kill)
+        :error -> :ok
+      end
+
+      payload = %{
+        "tool_call_id" => tool_call_id,
+        "turn_id" => turn_id,
+        "title" => title,
+        "status" => "failed",
+        "current_step" => "turn ended",
+        "progress" => nil,
+        "cancellable" => false
+      }
+
+      case emit(state, "tool_call.updated", payload) do
+        {:ok, state, _envelope} ->
+          {:cont,
+           {:ok,
+            %{
+              state
+              | calls: Map.delete(state.calls, tool_call_id),
+                open_cards: Map.delete(state.open_cards, tool_call_id)
+            }}}
+
+        {:error, reason} ->
+          {:halt, {:error, reason}}
+      end
+    end)
+  end
+
+  defp failure_events(turn_id, {:error, reason}),
+    do: [{"turn.failed", %{"turn_id" => turn_id, "reason" => failure_reason(reason)}}]
+
+  defp failure_events(_turn_id, _result), do: []
+
+  # Only the name of an atom reason is sent; anything else could carry what the model or a tool said.
+  defp failure_reason({:failed, reason}), do: failure_reason(reason)
+  defp failure_reason(reason) when is_atom(reason), do: Atom.to_string(reason)
+  defp failure_reason(_reason), do: "failed"
 
   # A turn that streamed already sent its text piece by piece; the whole of it is not sent again.
   defp text_events(%{streamed: true}, _turn_id, _result), do: []

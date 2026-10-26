@@ -286,10 +286,14 @@ defmodule Mead.Deck.ChannelTest do
     assert types(collect(4)) == ~w(prompt.accepted text.delta metric.updated metric.updated)
   end
 
-  test "a failed turn emits no text and the channel keeps working", %{channel: channel} do
+  test "a failed turn emits no text, says it failed and the channel keeps working",
+       %{channel: channel} do
     attach(channel)
 
-    for text <- ["error", "binary", "empty"] do
+    prompt(channel, "error")
+    assert types(collect(4)) == ~w(prompt.accepted turn.failed metric.updated metric.updated)
+
+    for text <- ["binary", "empty"] do
       prompt(channel, text)
 
       assert types(collect(3)) == ~w(prompt.accepted metric.updated metric.updated)
