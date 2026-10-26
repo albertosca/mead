@@ -34,6 +34,12 @@ defmodule Mead.Test.FakeInteraction do
   end
 
   @impl true
+  def text_delta(context, text) do
+    send(context.test_pid, {:text_delta, text})
+    :ok
+  end
+
+  @impl true
   def register_call(context, tool_call_id, pid) do
     send(context.test_pid, {:register_call, tool_call_id, pid})
     :ok

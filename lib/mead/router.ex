@@ -128,7 +128,7 @@ defmodule Mead.Router do
       messages = build_messages(history, input)
 
       case tools_for_turn(provider, options, hub) do
-        [] -> complete_once(provider, provider_options, messages)
+        [] -> complete_once(provider, provider_options, messages, options)
         tools -> converse_loop(provider, provider_options, messages, tools, options, hub)
       end
     else
@@ -136,10 +136,43 @@ defmodule Mead.Router do
     end
   end
 
-  defp complete_once(provider, provider_options, messages) do
+  defp complete_once(provider, provider_options, messages, options) do
+    case streaming_callback(provider, options) do
+      nil -> complete_plain(provider, provider_options, messages)
+      on_delta -> complete_streamed(provider, provider_options, messages, on_delta)
+    end
+  end
+
+  defp complete_plain(provider, provider_options, messages) do
     case provider.complete(messages, provider_options) do
       {:ok, %{text: text, usage: usage}} -> outcome({:ok, text}, provider, usage)
       {:error, reason} -> outcome({:error, reason}, provider)
+    end
+  end
+
+  # A streaming provider answers a tool-less turn through `converse_stream/4` with no tools, which
+  # gives the same text and usage `complete/2` would.
+  defp complete_streamed(provider, provider_options, messages, on_delta) do
+    case provider.converse_stream(messages, [], provider_options, on_delta) do
+      {:ok, %{content: content, usage: usage}} ->
+        case for(%{type: :text, text: text} <- content, do: text) do
+          [] -> outcome({:error, :malformed_response}, provider)
+          texts -> outcome({:ok, Enum.join(texts)}, provider, usage)
+        end
+
+      {:error, reason} ->
+        outcome({:error, reason}, provider)
+    end
+  end
+
+  # Streaming needs somebody to show the fragments to (an interaction) and a provider that can.
+  defp streaming_callback(provider, options) do
+    with {module, interaction_context} <- Keyword.get(options, :interaction),
+         true <-
+           Code.ensure_loaded?(provider) and function_exported?(provider, :converse_stream, 4) do
+      fn text -> module.text_delta(interaction_context, text) end
+    else
+      _not_streaming -> nil
     end
   end
 
@@ -166,15 +199,28 @@ defmodule Mead.Router do
       provider_options: provider_options,
       tools: tools,
       options: options,
-      hub: hub
+      hub: hub,
+      on_delta: streaming_callback(provider, options)
     }
 
     {result, progress} = loop(context, messages, %{calls: 0, tool_calls: 0, usage: no_usage()})
     outcome(result, provider, progress.usage, progress.tool_calls)
   end
 
+  defp converse(%{on_delta: nil} = context, messages),
+    do: context.provider.converse(messages, context.tools, context.provider_options)
+
+  defp converse(context, messages) do
+    context.provider.converse_stream(
+      messages,
+      context.tools,
+      context.provider_options,
+      context.on_delta
+    )
+  end
+
   defp loop(context, messages, progress) do
-    case context.provider.converse(messages, context.tools, context.provider_options) do
+    case converse(context, messages) do
       {:ok, %{content: content, stop_reason: :tool_use, usage: usage}} ->
         progress = add_call(progress, usage)
 

@@ -42,6 +42,13 @@ defmodule Mead.Router.Interaction do
         }
 
   @doc """
+  Called with each fragment of text a streaming provider produces while it answers, in order. The
+  fragments are a preview of the answer the turn returns; a provider that cannot stream never
+  calls it.
+  """
+  @callback text_delta(context :: term(), text :: String.t()) :: :ok
+
+  @doc """
   Puts a multiple-choice question (the `ask_user` tool) to the person. Returns the `id` of the
   option they picked, `{:error, :expired}` when the time ran out and `{:error, :no_answer}` when
   nobody could answer. Like `request_permission/2` it may block until there is an answer.
@@ -61,7 +68,8 @@ defmodule Mead.Router.Interaction do
     Code.ensure_loaded?(module) and function_exported?(module, :request_permission, 2) and
       function_exported?(module, :tool_updated, 2) and
       function_exported?(module, :register_call, 3) and
-      function_exported?(module, :ask_choice, 2)
+      function_exported?(module, :ask_choice, 2) and
+      function_exported?(module, :text_delta, 2)
   end
 
   def valid?(_other), do: false

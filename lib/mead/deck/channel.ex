@@ -251,6 +251,28 @@ defmodule Mead.Deck.Channel do
     end
   end
 
+  # A fragment of the streamed answer. A late one (its turn is over) is dropped; text that is not
+  # valid UTF-8 cannot travel in a JSON frame and is dropped too, as the final text is.
+  def handle_call({:text_delta, turn_id, text}, _from, state) do
+    case state.running do
+      %{turn_id: ^turn_id} = running when is_binary(text) and text != "" ->
+        if String.valid?(text) do
+          case emit(state, "text.delta", %{"turn_id" => turn_id, "text" => text}) do
+            {:ok, state, _envelope} ->
+              {:reply, :ok, %{state | running: Map.put(running, :streamed, true)}}
+
+            {:error, reason} ->
+              stop_for_log_failure(reason, state)
+          end
+        else
+          {:reply, :ok, state}
+        end
+
+      _late_or_empty ->
+        {:reply, :ok, state}
+    end
+  end
+
   def handle_call({:choice_request, choice}, from, state), do: ask_choice(state, from, choice)
 
   @impl GenServer
@@ -641,7 +663,7 @@ defmodule Mead.Deck.Channel do
   def handle_info(_message, state), do: {:noreply, state}
 
   defp finish_turn(%{running: %{turn_id: turn_id}} = state, result) do
-    events = text_events(turn_id, result) ++ metric_events(state.session_id)
+    events = text_events(state.running, turn_id, result) ++ metric_events(state.session_id)
 
     case emit_all(%{state | running: nil}, events) do
       {:ok, state} -> continue(start_next_turn(state))
@@ -649,13 +671,16 @@ defmodule Mead.Deck.Channel do
     end
   end
 
-  defp text_events(turn_id, {:ok, output}) when is_binary(output) and output != "" do
+  # A turn that streamed already sent its text piece by piece; the whole of it is not sent again.
+  defp text_events(%{streamed: true}, _turn_id, _result), do: []
+
+  defp text_events(_running, turn_id, {:ok, output}) when is_binary(output) and output != "" do
     if String.valid?(output),
       do: [{"text.delta", %{"turn_id" => turn_id, "text" => output}}],
       else: []
   end
 
-  defp text_events(_turn_id, _result), do: []
+  defp text_events(_running, _turn_id, _result), do: []
 
   defp metric_events(session_id) do
     totals =
