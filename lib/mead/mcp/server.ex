@@ -113,13 +113,17 @@ defmodule Mead.MCP.Server do
       end
 
     {Bandit,
-     plug: {Mead.Gateway, mcp: mcp_plug, deck: deck_plug},
-     scheme: :http,
-     ip: listener.address,
-     port: listener.port,
-     thousand_island_options: connection_limits(listener.maximum_connections),
-     startup_log: false}
+     [
+       plug: {Mead.Gateway, mcp: mcp_plug, deck: deck_plug},
+       ip: listener.address,
+       port: listener.port,
+       thousand_island_options: connection_limits(listener.maximum_connections),
+       startup_log: false
+     ] ++ scheme_options(listener.tls)}
   end
+
+  defp scheme_options(nil), do: [scheme: :http]
+  defp scheme_options(tls), do: [scheme: :https] ++ tls
 
   # Thousand Island limits connections per acceptor, so the total is acceptors times the limit of
   # each; a limit that is not a multiple of the acceptors is rounded up to one. A connection over

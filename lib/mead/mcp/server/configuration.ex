@@ -22,9 +22,22 @@ defmodule Mead.MCP.Server.Configuration do
     * `:maximum_connections` - how many connections the listener serves at once, rounded up to a
       multiple of 10 from 10 on; a connection over the limit is closed after about a second
       without room. A positive integer; defaults to 250.
+    * `:certfile` and `:keyfile` - paths to a PEM certificate chain and its private key. Both
+      together make the listener speak HTTPS (and WSS for the deck); either alone is an error;
+      without them it speaks plain HTTP. The files are not read here, only the shape is checked,
+      so a missing file stops the listener at boot with the TLS library's own message.
   """
 
-  @allowed_keys [:token, :port, :address, :allow_effect, :allowed_origins, :maximum_connections]
+  @allowed_keys [
+    :token,
+    :port,
+    :address,
+    :allow_effect,
+    :allowed_origins,
+    :maximum_connections,
+    :certfile,
+    :keyfile
+  ]
   @default_port 4040
   @default_address {127, 0, 0, 1}
   @default_maximum_connections 250
@@ -78,7 +91,8 @@ defmodule Mead.MCP.Server.Configuration do
              port: 0..65_535,
              address: :inet.ip4_address(),
              allowed_origins: [String.t()],
-             maximum_connections: pos_integer()
+             maximum_connections: pos_integer(),
+             tls: nil | [certfile: Path.t(), keyfile: Path.t()]
            }}
           | {:error, String.t()}
   def listener(settings) do
@@ -87,13 +101,15 @@ defmodule Mead.MCP.Server.Configuration do
          {:ok, port} <- fetch_port(settings),
          {:ok, address} <- fetch_address(settings),
          {:ok, allowed_origins} <- fetch_allowed_origins(settings),
-         {:ok, maximum_connections} <- fetch_maximum_connections(settings) do
+         {:ok, maximum_connections} <- fetch_maximum_connections(settings),
+         {:ok, tls} <- fetch_tls(settings) do
       {:ok,
        %{
          port: port,
          address: address,
          allowed_origins: allowed_origins,
-         maximum_connections: maximum_connections
+         maximum_connections: maximum_connections,
+         tls: tls
        }}
     end
   end
@@ -168,6 +184,24 @@ defmodule Mead.MCP.Server.Configuration do
     case Keyword.get(settings, :maximum_connections, @default_maximum_connections) do
       value when is_integer(value) and value > 0 -> {:ok, value}
       _other -> {:error, "maximum_connections must be a positive integer"}
+    end
+  end
+
+  defp fetch_tls(settings) do
+    case {Keyword.get(settings, :certfile), Keyword.get(settings, :keyfile)} do
+      {nil, nil} ->
+        {:ok, nil}
+
+      {certfile, keyfile} when is_binary(certfile) and is_binary(keyfile) ->
+        if certfile != "" and keyfile != "",
+          do: {:ok, [certfile: certfile, keyfile: keyfile]},
+          else: {:error, "certfile and keyfile must be non-empty paths"}
+
+      {certfile, keyfile} when is_nil(certfile) or is_nil(keyfile) ->
+        {:error, "certfile and keyfile must be set together"}
+
+      _other ->
+        {:error, "certfile and keyfile must be non-empty paths"}
     end
   end
 
