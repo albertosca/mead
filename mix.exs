@@ -8,7 +8,7 @@ defmodule Mead.MixProject do
       elixir: "~> 1.20",
       elixirc_paths: elixirc_paths(Mix.env()),
       start_permanent: Mix.env() == :prod,
-      test_coverage: [summary: [threshold: 90]],
+      test_coverage: [summary: [threshold: 93]],
       deps: deps()
     ]
   end
