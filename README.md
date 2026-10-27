@@ -1,5 +1,7 @@
 🇺🇸 [English](README.md) · 🇧🇷 [Português](README.pt.md)
 
+[![CI](https://github.com/albertosca/mead/actions/workflows/ci.yml/badge.svg)](https://github.com/albertosca/mead/actions/workflows/ci.yml) [![Lint](https://github.com/albertosca/mead/actions/workflows/lint.yml/badge.svg)](https://github.com/albertosca/mead/actions/workflows/lint.yml)
+
 # mead
 
 **Smart LLM Router & Cost-Aware Agent Runtime built on the BEAM / OTP.**
@@ -13,8 +15,8 @@
 `mead` forms the core engine of a decoupled three-repository personal assistance platform:
 
 * **`mead` (this repository):** Core Elixir/OTP agent runtime, hybrid cost-aware scheduler (local Ollama vs. cloud providers), and concurrent MCP Hub.
-* **[`agent-swarm-deck`](../agent-swarm-deck):** Multiplatform Flutter client featuring an Action-First conversational stream (interactive approval cards, live progress tracking, structured selection).
-* **[`open-butler`](../open-butler):** Personal assistant domain application providing high-level operational workflows (daily routines, email sweeping, calendar organization) and safe local execution bridges.
+* **`agent-swarm-deck`:** Multiplatform Flutter client featuring an Action-First conversational stream (interactive approval cards, live progress tracking, structured selection).
+* **`open-butler`:** Personal assistant domain application providing high-level operational workflows (daily routines, email sweeping, calendar organization) and safe local execution bridges.
 
 ---
 

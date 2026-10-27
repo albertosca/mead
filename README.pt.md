@@ -1,5 +1,7 @@
 🇧🇷 [Português](README.pt.md) · 🇺🇸 [English](README.md)
 
+[![CI](https://github.com/albertosca/mead/actions/workflows/ci.yml/badge.svg)](https://github.com/albertosca/mead/actions/workflows/ci.yml) [![Lint](https://github.com/albertosca/mead/actions/workflows/lint.yml/badge.svg)](https://github.com/albertosca/mead/actions/workflows/lint.yml)
+
 # mead
 
 **Roteador Inteligente de LLMs & Runtime de Agentes Consciente de Custos construído sobre a BEAM / OTP.**
@@ -13,8 +15,8 @@ O `mead` é um motor de orquestração tolerante a falhas projetado para gerenci
 O `mead` forma o núcleo de execução de uma plataforma desacoplada em três repositórios:
 
 * **`mead` (este repositório):** Motor central em Elixir/OTP, agendador híbrido com corte de custos (Ollama local vs. provedores de nuvem) e Hub MCP concorrente.
-* **[`agent-swarm-deck`](../agent-swarm-deck):** Cliente multiplataforma em Flutter com interface *Action-First* (cards interativos de aprovação, barras de progresso ao vivo, modais estruturados).
-* **[`open-butler`](../open-butler):** Aplicação de domínio do assistente pessoal com regras de automação (rotinas diárias, triagem de e-mail, organização de agenda) e ponte segura para scripts locais.
+* **`agent-swarm-deck`:** Cliente multiplataforma em Flutter com interface *Action-First* (cards interativos de aprovação, barras de progresso ao vivo, modais estruturados).
+* **`open-butler`:** Aplicação de domínio do assistente pessoal com regras de automação (rotinas diárias, triagem de e-mail, organização de agenda) e ponte segura para scripts locais.
 
 ---
 
