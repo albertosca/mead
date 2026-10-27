@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 300" role="img" aria-labelledby="t d" font-family="ui-sans-serif, system-ui, sans-serif" font-size="14">
+  <title id="t">How a turn travels through mead</title>
+  <desc id="d">A client sends a prompt to a supervised session. The router classifies it as local or cloud, calls Ollama or Anthropic, and may loop through the MCP hub, whose policy asks the person before any effect tool runs. The ledger counts every turn.</desc>
+  <rect width="760" height="300" fill="#16161a"/>
+  <defs><marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="#a8a8b4"/></marker></defs>
+  <g fill="#202026" stroke="#a8a8b4" stroke-width="1.5">
+    <rect x="20" y="115" width="120" height="60" rx="8"/>
+    <rect x="190" y="115" width="140" height="60" rx="8"/>
+    <rect x="380" y="115" width="120" height="60" rx="8"/>
+    <rect x="560" y="30" width="180" height="56" rx="8"/>
+    <rect x="560" y="205" width="180" height="56" rx="8"/>
+    <rect x="380" y="225" width="120" height="50" rx="8" stroke-dasharray="5 4"/>
+    <rect x="190" y="30" width="140" height="50" rx="8" stroke-dasharray="5 4"/>
+  </g>
+  <g fill="#ececf1" text-anchor="middle">
+    <text x="80" y="140">Client</text><text x="80" y="160" fill="#9a9aa6" font-size="12">deck / MCP / API</text>
+    <text x="260" y="140">Session</text><text x="260" y="160" fill="#9a9aa6" font-size="12">supervised, isolated</text>
+    <text x="440" y="140">Router</text><text x="440" y="160" fill="#9a9aa6" font-size="12">local or cloud</text>
+    <text x="650" y="55">Ollama</text><text x="650" y="75" fill="#9a9aa6" font-size="12">local, zero cost</text>
+    <text x="650" y="230">Anthropic</text><text x="650" y="250" fill="#9a9aa6" font-size="12">cloud, deep reasoning</text>
+    <text x="440" y="247">MCP hub</text><text x="440" y="265" fill="#9a9aa6" font-size="12">deny by default</text>
+    <text x="260" y="52">Event log</text><text x="260" y="70" fill="#9a9aa6" font-size="12">written before sent</text>
+  </g>
+  <g stroke="#a8a8b4" stroke-width="1.5" fill="none" marker-end="url(#a)">
+    <path d="M140 145H188"/><path d="M330 145H378"/>
+    <path d="M500 135L558 70"/><path d="M500 155L558 220"/>
+    <path d="M440 177V223"/><path d="M260 113V82"/>
+  </g>
+  <text x="380" y="292" fill="#b79cff" font-size="12" text-anchor="middle">every turn is counted by the ledger; an effect tool waits for the person's answer</text>
+</svg>
