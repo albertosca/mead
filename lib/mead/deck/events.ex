@@ -65,6 +65,35 @@ defmodule Mead.Deck.Events do
   def parse_policy_level(name) when is_binary(name), do: Map.fetch(@policy_levels, name)
   def parse_policy_level(_name), do: :error
 
+  @doc """
+  Reads where an SSE stream resumes from its query parameters and `Last-Event-ID` header values.
+
+  `last_sequence` in the query wins over the header; when either is present it must be a plain
+  non-negative decimal (at most 15 digits), and a bad one is an error even if the other is fine.
+  Neither means the start of the log. `device_id` is optional and must be an identifier.
+  """
+  @spec parse_resume_position(map(), [String.t()]) ::
+          {:ok, %{last_sequence: non_neg_integer(), device_id: String.t() | nil}} | :error
+  def parse_resume_position(query_params, last_event_ids) do
+    with {:ok, last_sequence} <- position(query_params, last_event_ids),
+         {:ok, device_id} <- device_id(query_params) do
+      {:ok, %{last_sequence: last_sequence, device_id: device_id}}
+    end
+  end
+
+  defp position(%{"last_sequence" => value}, _last_event_ids), do: sequence(value)
+  defp position(_query_params, []), do: {:ok, 0}
+  defp position(_query_params, [value]), do: sequence(value)
+  defp position(_query_params, _several), do: :error
+
+  defp sequence(value) when is_binary(value) do
+    if Regex.match?(~r/\A[0-9]{1,15}\z/, value),
+      do: {:ok, String.to_integer(value)},
+      else: :error
+  end
+
+  defp sequence(_value), do: :error
+
   @spec decode_client(term()) :: {:ok, client_message()} | {:error, decode_error()}
   def decode_client(frame) when is_binary(frame) and byte_size(frame) > @maximum_frame_bytes,
     do: {:error, :too_large}

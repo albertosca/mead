@@ -449,6 +449,16 @@ When a turn has an interaction and at least one other tool, the router offers th
 * A turn that ends in an error emits `turn.failed {turn_id, reason}`. A stream cut off midway keeps its fragments and then fails. Tool cards still open at that moment are killed and closed as `failed`.
 * A tool process also ends when the router that started it dies.
 
+### Server-sent events fallback
+
+For a client that cannot hold a WebSocket (a proxy that strips the upgrade, a platform without one), the same channel is reachable over HTTP. `GET /deck/events?ticket=T[&last_sequence=N][&device_id=D]` redeems a ticket exactly like the socket does and answers with a `text/event-stream` (`cache-control: no-store`, `x-accel-buffering: no`, `connection: close`). The resume position may also come as the `Last-Event-ID` header; the query wins, and a malformed value is a 400 that does not burn the ticket.
+
+* The first event is `event: connected` with `{"connection_token", "session_id"}`. Every other event is unnamed: `data:` is the same envelope the WebSocket carries and `id:` is its sequence, so a reconnecting browser sends `Last-Event-ID` on its own. Heartbeats carry no `id`.
+* The client sends messages with `POST /deck/messages`, `Authorization: Bearer <connection_token>` and the exact body of a WebSocket client message. The answer is 202 with an empty body, 400 with `{"error": reason}` (`session.resume` is refused with `resume_not_accepted`, because the position is chosen when the stream opens), 401, 403 for a foreign Origin, or 413 over `maximum_frame_bytes`.
+* To resume, open a new stream with a new ticket and `last_sequence`. When the session stops the stream ends with `event: closed`, and so it does when the server shuts down.
+* A client that vanished is noticed by a failed write, at the latest one heartbeat later; the stream then detaches from the channel synchronously (`Channel.detach/2`) and drops its connection token.
+* There are no CORS headers, as everywhere else in the deck transport, so a browser must reach it from the same origin (for example through a reverse proxy).
+
 ### Recovery
 
 Each turn ends with one `tokens_out` metric that carries its `turn_id`. A new channel uses it to find the prompts that never finished in the log.

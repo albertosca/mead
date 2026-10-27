@@ -1,6 +1,6 @@
 defmodule Mead.Deck.Plug do
   @moduledoc """
-  The HTTP side of the deck: the two routes under `/deck`.
+  The HTTP side of the deck: the routes under `/deck`.
 
     * `POST /deck/ticket` - with the deck bearer token, creates a session (no body) or attaches to
       one (`{"session_id": "<uuid>"}`: running, or stopped with a stored history that is resumed)
@@ -8,6 +8,10 @@ defmodule Mead.Deck.Plug do
       lived, so the token never travels in a URL.
     * `GET /deck/socket?ticket=...` - redeems the ticket and upgrades to a WebSocket served by
       `Mead.Deck.Socket`.
+    * `GET /deck/events?ticket=...` - redeems the ticket and streams the same events as
+      Server-Sent Events (`Mead.Deck.EventStream`), for a network where a WebSocket cannot pass.
+    * `POST /deck/messages` - a client message for such a stream, authorised by the
+      `connection_token` the stream announces first.
 
   Each check runs only if the previous ones passed: the route (404, or 405 with `allow`), the
   bearer token on the ticket route (401, checked in constant time before the body is read), the
@@ -33,6 +37,8 @@ defmodule Mead.Deck.Plug do
 
   alias Mead.Deck.ChannelSupervisor
   alias Mead.Deck.Configuration
+  alias Mead.Deck.EventStream
+  alias Mead.Deck.Events
   alias Mead.Deck.Tickets
   alias Mead.Session
   alias Mead.Session.Store
@@ -68,11 +74,29 @@ defmodule Mead.Deck.Plug do
     |> upgrade(settings)
   end
 
+  def call(%Plug.Conn{path_info: ["deck", "events"], method: "GET"} = conn, settings) do
+    conn
+    |> require_origin(settings)
+    |> open_stream(settings)
+  end
+
+  def call(%Plug.Conn{path_info: ["deck", "messages"], method: "POST"} = conn, settings) do
+    conn
+    |> require_origin(settings)
+    |> deliver_message()
+  end
+
   def call(%Plug.Conn{path_info: ["deck", "ticket"]} = conn, _settings),
     do: reject(conn, 405, "method not allowed", [{"allow", "POST"}])
 
   def call(%Plug.Conn{path_info: ["deck", "socket"]} = conn, _settings),
     do: reject(conn, 405, "method not allowed", [{"allow", "GET"}])
+
+  def call(%Plug.Conn{path_info: ["deck", "events"]} = conn, _settings),
+    do: reject(conn, 405, "method not allowed", [{"allow", "GET"}])
+
+  def call(%Plug.Conn{path_info: ["deck", "messages"]} = conn, _settings),
+    do: reject(conn, 405, "method not allowed", [{"allow", "POST"}])
 
   def call(conn, _settings), do: reject(conn, 404, "not found")
 
@@ -194,24 +218,77 @@ defmodule Mead.Deck.Plug do
   end
 
   defp redeem_and_upgrade(conn, settings) do
+    case redeem(conn, settings) do
+      {:ok, session_id, channel} ->
+        upgrade_to_socket(conn, session_id, channel, settings)
+
+      {:refused, conn} ->
+        conn
+    end
+  end
+
+  # Redeems the ticket of the request and finds or starts the channel of its session; a refusal
+  # comes back as the finished response.
+  defp redeem(conn, settings) do
     with {:ok, session_id} <- Tickets.consume(settings.tickets, conn.query_params["ticket"]),
          {:ok, channel} <- ensure_channel(session_id, settings) do
-      conn
-      |> WebSockAdapter.upgrade(
-        Mead.Deck.Socket,
-        %{channel: channel, session_id: session_id, configuration: settings.configuration},
-        max_frame_size: @transport_frame_limit_bytes,
-        # A deck that waits for a long turn sends nothing for minutes; the heartbeat from the
-        # server, not an idle timer on the client, is what shows a connection is alive.
-        timeout: :infinity,
-        compress: false
-      )
-      |> halt()
+      {:ok, session_id, channel}
     else
-      :error -> reject(conn, 401, "unauthorized", [{"www-authenticate", "Bearer"}])
-      {:error, :session_not_found} -> reject(conn, 404, "session not found")
-      {:error, _reason} -> reject(conn, 500, "could not open the channel")
+      :error -> {:refused, reject(conn, 401, "unauthorized", [{"www-authenticate", "Bearer"}])}
+      {:error, :session_not_found} -> {:refused, reject(conn, 404, "session not found")}
+      {:error, _reason} -> {:refused, reject(conn, 500, "could not open the channel")}
     end
+  end
+
+  # A bad resume position is refused before the ticket is redeemed, so it cannot burn a ticket.
+  defp open_stream(%Plug.Conn{halted: true} = conn, _settings), do: conn
+
+  defp open_stream(conn, settings) do
+    conn = fetch_query_params(conn)
+
+    case Events.parse_resume_position(conn.query_params, get_req_header(conn, "last-event-id")) do
+      {:ok, position} ->
+        case redeem(conn, settings) do
+          {:ok, session_id, channel} ->
+            stream =
+              Map.merge(position, %{
+                session_id: session_id,
+                channel: channel,
+                configuration: settings.configuration
+              })
+
+            EventStream.stream(conn, stream)
+
+          {:refused, conn} ->
+            conn
+        end
+
+      :error ->
+        reject(conn, 400, "invalid resume position")
+    end
+  end
+
+  defp deliver_message(%Plug.Conn{halted: true} = conn), do: conn
+
+  defp deliver_message(conn) do
+    case EventStream.message(conn) do
+      {:ok, conn} -> conn
+      :unauthorized -> reject(conn, 401, "unauthorized", [{"www-authenticate", "Bearer"}])
+    end
+  end
+
+  defp upgrade_to_socket(conn, session_id, channel, settings) do
+    conn
+    |> WebSockAdapter.upgrade(
+      Mead.Deck.Socket,
+      %{channel: channel, session_id: session_id, configuration: settings.configuration},
+      max_frame_size: @transport_frame_limit_bytes,
+      # A deck that waits for a long turn sends nothing for minutes; the heartbeat from the
+      # server, not an idle timer on the client, is what shows a connection is alive.
+      timeout: :infinity,
+      compress: false
+    )
+    |> halt()
   end
 
   defp ensure_channel(session_id, settings) do

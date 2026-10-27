@@ -230,4 +230,40 @@ defmodule Mead.Deck.EventsTest do
       assert Events.parse_policy_level(nil) == :error
     end
   end
+
+  describe "parse_resume_position/2" do
+    test "defaults to the start of the log and no device name" do
+      assert {:ok, %{last_sequence: 0, device_id: nil}} = Events.parse_resume_position(%{}, [])
+    end
+
+    test "reads last_sequence from the query, else from Last-Event-ID, the query winning" do
+      assert {:ok, %{last_sequence: 7}} =
+               Events.parse_resume_position(%{"last_sequence" => "7"}, [])
+
+      assert {:ok, %{last_sequence: 9}} = Events.parse_resume_position(%{}, ["9"])
+
+      assert {:ok, %{last_sequence: 7}} =
+               Events.parse_resume_position(%{"last_sequence" => "7"}, ["9"])
+    end
+
+    test "a bad position is an error even when the other source is fine" do
+      for bad <- ["", "-1", "1.5", "abc", "+5", " 5", "5 ", String.duplicate("9", 16)] do
+        assert :error = Events.parse_resume_position(%{"last_sequence" => bad}, []), bad
+        assert :error = Events.parse_resume_position(%{}, [bad]), bad
+        assert :error = Events.parse_resume_position(%{"last_sequence" => bad}, ["3"]), bad
+      end
+
+      assert :error = Events.parse_resume_position(%{"last_sequence" => ["1"]}, [])
+      assert :error = Events.parse_resume_position(%{}, ["1", "2"])
+    end
+
+    test "device_id is an identifier or an error" do
+      assert {:ok, %{device_id: "phone-1"}} =
+               Events.parse_resume_position(%{"device_id" => "phone-1"}, [])
+
+      for bad <- ["", String.duplicate("a", 129), ["a"], %{"a" => "b"}] do
+        assert :error = Events.parse_resume_position(%{"device_id" => bad}, [])
+      end
+    end
+  end
 end

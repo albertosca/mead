@@ -81,6 +81,13 @@ defmodule Mead.Deck.Channel do
   def resume(channel, socket, last_sequence, device_id \\ nil),
     do: GenServer.call(channel, {:resume, socket, last_sequence, device_id})
 
+  @doc """
+  Detaches `socket`: once this returns, no event is sent to it any more. A socket that was never
+  attached, or is already gone, is fine.
+  """
+  @spec detach(GenServer.server(), pid()) :: :ok
+  def detach(channel, socket), do: GenServer.call(channel, {:detach, socket})
+
   @doc "Hands a validated client message from `socket` to the channel; unattached sockets are ignored."
   @spec client_message(GenServer.server(), pid(), Events.client_message()) :: :ok
   def client_message(channel, socket, message),
@@ -312,6 +319,18 @@ defmodule Mead.Deck.Channel do
     end
 
     {:reply, :ok, state}
+  end
+
+  def handle_call({:detach, socket}, _from, state) do
+    case Map.pop(state.sockets, socket) do
+      {nil, _sockets} ->
+        {:reply, :ok, state}
+
+      {reference, sockets} ->
+        Process.demonitor(reference, [:flush])
+        devices = Map.delete(state.devices, socket)
+        {:reply, :ok, %{state | sockets: sockets, devices: devices}}
+    end
   end
 
   def handle_call(:policy_level, _from, state), do: {:reply, state.policy_level, state}
