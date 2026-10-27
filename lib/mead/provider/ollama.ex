@@ -9,6 +9,7 @@ defmodule Mead.Provider.Ollama do
     * `:base_url` - where Ollama listens; defaults to `http://localhost:11434`.
     * `:receive_timeout` - milliseconds to wait for the answer; defaults to 25 seconds, below the
       default turn timeout so a slow server reports its own reason first.
+    * `:keep_alive` - how long Ollama keeps the model in memory after a request, as a duration string such as `"30m"` or a number of seconds (`-1` is forever); left out of the request by default, so the server's own setting applies. The first request after a model was unloaded pays the load, which took 28 s for a 2 GB model and is longer than the default `:receive_timeout`; a deployment that cannot afford that sets `:keep_alive` and raises `:receive_timeout` together with the turn timeout.
     * `:req_options` - extra options merged into the `Req` request, used by tests to stub the
       network.
 
@@ -63,18 +64,28 @@ defmodule Mead.Provider.Ollama do
          base_url when is_binary(base_url) <- Keyword.get(options, :base_url, @default_base_url),
          true <- http_url?(base_url),
          receive_timeout when is_integer(receive_timeout) and receive_timeout > 0 <-
-           Keyword.get(options, :receive_timeout, @default_receive_timeout) do
+           Keyword.get(options, :receive_timeout, @default_receive_timeout),
+         {:ok, keep_alive} <- validate_keep_alive(Keyword.get(options, :keep_alive, :unset)) do
       {:ok,
        %{
          model: model,
          base_url: base_url,
          receive_timeout: receive_timeout,
+         keep_alive: keep_alive,
          extra_options: extra_options
        }}
     else
       _invalid -> {:error, :invalid_options}
     end
   end
+
+  defp validate_keep_alive(:unset), do: {:ok, :unset}
+
+  defp validate_keep_alive(duration) when is_binary(duration) and duration != "",
+    do: {:ok, duration}
+
+  defp validate_keep_alive(seconds) when is_integer(seconds), do: {:ok, seconds}
+  defp validate_keep_alive(_invalid), do: :error
 
   # Ollama's own `OLLAMA_HOST` convention is a bare `127.0.0.1:11434`, which Req refuses by raising.
   defp http_url?(url) do
@@ -83,6 +94,9 @@ defmodule Mead.Provider.Ollama do
       URI.parse(url)
     )
   end
+
+  defp put_keep_alive(body, :unset), do: body
+  defp put_keep_alive(body, keep_alive), do: Map.put(body, :keep_alive, keep_alive)
 
   defp request(messages, tools, settings), do: post(messages, tools, settings, false, [])
 
@@ -100,6 +114,7 @@ defmodule Mead.Provider.Ollama do
     body =
       %{model: settings.model, stream: stream?, messages: encode_messages(messages)}
       |> put_tools(tools)
+      |> put_keep_alive(settings.keep_alive)
 
     request_options =
       [

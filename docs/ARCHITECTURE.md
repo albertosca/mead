@@ -63,7 +63,7 @@ flowchart LR
     TurnHandler --> Ledger["Mead.Ledger - Token Usage"]
 ```
 
-* **Local Executor:** Handles zero-cost tasks with full privacy (command parsing, email categorization, status checks). It is an Ollama model, chosen by the operator with the required `:model` option, and it may call MCP tools under the same policy as the cloud executor; a model without tool support fails the turn with `:tools_unsupported`.
+* **Local Executor:** Handles zero-cost tasks with full privacy (command parsing, email categorization, status checks). It is an Ollama model, chosen by the operator with the required `:model` option, and it may call MCP tools under the same policy as the cloud executor; a model without tool support fails the turn with `:tools_unsupported`. The first request after Ollama unloaded the model pays the load (28 s for a 2 GB model in a real run), longer than the default 25 s `:receive_timeout`, so a deployment sets the optional `:keep_alive` (sent to Ollama as is) and raises `:receive_timeout` together with the turn timeout.
 * **Cloud Executor:** Handles complex multi-step reasoning, ambiguous disambiguation, and creative synthesis.
 * **Turn Handler:** Returns the model's text and usage to the session. The deck does not receive structured cards: `Mead.Deck.Channel` turns each finished turn into typed events (`text.delta` as the answer streams, `metric.updated` when it ends), see section 9.
 

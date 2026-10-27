@@ -84,6 +84,26 @@ defmodule Mead.Provider.OllamaTest do
            }
   end
 
+  test "keep_alive is sent when given and left out otherwise" do
+    stub_capturing()
+    Ollama.complete(@messages, options(keep_alive: "30m"))
+    assert_received {:request, _method, _path, %{"keep_alive" => "30m"}}
+
+    Ollama.complete(@messages, options(keep_alive: 3_600))
+    assert_received {:request, _method, _path, %{"keep_alive" => 3_600}}
+
+    Ollama.complete(@messages, options())
+    assert_received {:request, _method, _path, body}
+    refute Map.has_key?(body, "keep_alive")
+  end
+
+  test "a keep_alive that is neither a duration string nor a number of seconds is refused" do
+    for invalid <- ["", 0.5, :forever, nil, %{}] do
+      assert {:error, :invalid_options} =
+               Ollama.complete(@messages, options(keep_alive: invalid))
+    end
+  end
+
   test "posts to the configured base url, with or without a trailing slash" do
     test_pid = self()
 
