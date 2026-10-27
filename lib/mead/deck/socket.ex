@@ -83,7 +83,8 @@ defmodule Mead.Deck.Socket do
        ) do
     Channel.resume(state.channel, self(), last_sequence, device_id)
     schedule_heartbeat(state)
-    {:ok, %{state | resumed: true}}
+    # The call above is the channel's time, not the client's silence, so the idle clock restarts.
+    {:ok, touch(%{state | resumed: true})}
   catch
     :exit, _reason -> {:stop, :normal, {1011, "session closed"}, state}
   end
