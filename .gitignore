@@ -25,3 +25,5 @@ erl_crash.dump
 /cover/
 .docs-build/
 site/
+/doc/
+/mead-*.tar
