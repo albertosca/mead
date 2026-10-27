@@ -86,8 +86,6 @@ Each conversation is a `Mead.Session.Supervisor` started by `Mead.Session.Pool`.
 * A handler that raises, exits, returns garbage, or exceeds the turn timeout fails only that turn, with the status `failed` or `timeout`.
 * A server death takes its running task with it.
 
-The full design is in `docs/superpowers/specs/2026-10-17-session-skeleton-design.md`.
-
 ## 4. Router Internals
 
 ### Choosing the slot
@@ -117,8 +115,6 @@ A provider may also export `converse_stream/4`.
 * When the turn has an interaction and the provider can stream, the router passes it a callback that reaches `text_delta/2`. The text of every model call in a tool loop is then streamed.
 * The turn's output is the text of every call joined with a blank line. That is also the separator the stream carries, so a replay shows what the live view showed.
 
-The full design is in `docs/superpowers/specs/2026-10-17-model-router-design.md`.
-
 ## 5. Ledger Internals
 
 ### What it records
@@ -141,12 +137,6 @@ With a storage directory, the ledger also appends every counted turn, every forg
 * At boot the ledger replays the journal before it attaches the handler. A torn tail is cut with a warning, and a damaged file is set aside as `ledger.journal.corrupt`.
 * When the file passes `ledger_journal_max_bytes` (default 1 MiB), it is rewritten as one checkpoint built from the journal itself, never from the live tables, so no event is counted twice.
 * The ledger is the first root child, so a crash of the ledger itself restores its numbers from the journal instead of wiping them.
-
-### Designs
-
-* Ledger: `docs/superpowers/specs/2026-10-18-token-ledger-design.md`.
-* Journal: `docs/superpowers/specs/2026-10-25-ledger-persistence-design.md`.
-* Read side: `docs/superpowers/specs/2026-10-25-usage-tool-design.md`.
 
 ## 6. MCP Hub Internals
 
@@ -205,8 +195,6 @@ When the provider of the chosen slot implements `converse/3` (on either route) a
 * The whole loop runs inside the turn timeout, so a conversation that uses tools may need a `:turn_timeout` above the default of 30 seconds.
 
 **Known limit:** the HTTP transport has been exercised only against a test double, not a real remote server.
-
-The full design is in `docs/superpowers/specs/2026-10-22-mcp-hub-design.md`.
 
 ## 7. MCP Server Internals
 
@@ -354,8 +342,6 @@ Compaction keeps every turn unless `config :mead, :storage, max_turns: N` is set
 * The file still grows with the number of turns (compaction only halves it).
 * The rollback itself can fail on a dying disk.
 * The ledger is journaled in its own file, not in the session files.
-
-The full design is in `docs/superpowers/specs/2026-10-24-persistence-design.md`, and compaction in `docs/superpowers/specs/2026-10-25-compaction-design.md`.
 
 ## 9. Deck Transport Internals
 

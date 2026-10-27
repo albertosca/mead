@@ -27,3 +27,6 @@ erl_crash.dump
 site/
 /doc/
 /mead-*.tar
+
+# Internal specs, plans and logs live in the private project-docs store
+docs/superpowers
