@@ -20,3 +20,6 @@
 
 # Erlang VM crash dumps
 erl_crash.dump
+
+# mix test --cover output
+/cover/
