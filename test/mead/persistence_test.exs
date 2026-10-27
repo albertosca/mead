@@ -74,9 +74,14 @@ defmodule Mead.PersistenceTest do
 
       assert_receive {:handler_started, handler}
       File.chmod!(file_of(directory, session_id), 0o400)
-      send(handler, :release)
 
-      log = capture_log(fn -> assert Task.await(task) == {:ok, "released"} end)
+      # The release is inside the capture: the server logs the failed write as soon as the
+      # handler is released, which can be before a capture that starts afterwards.
+      log =
+        capture_log(fn ->
+          send(handler, :release)
+          assert Task.await(task) == {:ok, "released"}
+        end)
 
       assert log =~ "could not record the history"
       assert {:ok, [%Turn{status: :ok, output: "released"}]} = Mead.history(session_id)
