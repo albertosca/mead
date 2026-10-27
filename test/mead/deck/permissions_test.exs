@@ -90,6 +90,11 @@ defmodule Mead.Deck.PermissionsTest do
     assert payload["action"] =~ "list_directory"
     assert payload["action"] =~ "files"
     assert payload["details"] == ["argument: /a"]
+
+    assert payload["detail_items"] == [
+             %{"key" => "argument", "value" => "/a", "label" => "Argument"}
+           ]
+
     assert is_binary(payload["request_id"]) and is_binary(payload["expires_at"])
 
     assert payload["options"] == [

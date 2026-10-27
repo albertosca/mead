@@ -47,13 +47,13 @@ defmodule Mead.Deck.Channel do
   require Logger
 
   alias Mead.Deck.Configuration
+  alias Mead.Deck.Details
   alias Mead.Deck.EventLog
   alias Mead.Deck.Events
   alias Mead.Session
   alias Mead.Session.Store
 
   @protocol_version 1
-  @maximum_detail_characters 2_000
   @permission_options [
     %{"option_id" => "allow_once", "label" => "Allow once", "kind" => "allow_once"},
     %{
@@ -674,7 +674,8 @@ defmodule Mead.Deck.Channel do
       "request_id" => request_id,
       "action" => action(request),
       "risk_level" => if(request.class == :effect, do: "high", else: "low"),
-      "details" => details(request.arguments),
+      "details" => Details.lines(request.arguments),
+      "detail_items" => Details.items(request.arguments),
       "options" => @permission_options,
       "expires_at" => DateTime.to_iso8601(expires_at)
     }
@@ -683,23 +684,6 @@ defmodule Mead.Deck.Channel do
   defp tool_key(request), do: "#{request.server}__#{request.tool}"
 
   defp action(request), do: "Run #{request.tool} on the #{request.server} server"
-
-  defp details(arguments) when is_map(arguments) do
-    arguments
-    |> Enum.map(fn {key, value} -> {render(key), value} end)
-    |> Enum.sort()
-    |> Enum.map(fn {key, value} -> key <> ": " <> truncate(render(value)) end)
-  end
-
-  defp details(arguments), do: ["arguments: " <> truncate(render(arguments))]
-
-  defp render(value) when is_binary(value) do
-    if String.valid?(value), do: value, else: inspect(value)
-  end
-
-  defp render(value), do: inspect(value, printable_limit: @maximum_detail_characters)
-
-  defp truncate(text), do: String.slice(text, 0, @maximum_detail_characters)
 
   defp new_request_id,
     do: "request-" <> Base.url_encode64(:crypto.strong_rand_bytes(9), padding: false)
