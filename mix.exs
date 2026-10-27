@@ -29,7 +29,14 @@ defmodule Mead.MixProject do
   defp docs do
     [
       main: "readme",
-      extras: ["README.md", "docs/ARCHITECTURE.md"]
+      extras: [
+        "README.md",
+        "README.pt.md",
+        "docs/ARCHITECTURE.md",
+        "CONTRIBUTING.md",
+        "SECURITY.md",
+        "LICENSE"
+      ]
     ]
   end
 

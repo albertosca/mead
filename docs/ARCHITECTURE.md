@@ -188,7 +188,7 @@ A result longer than 50 000 characters is truncated with a marker, and non-text 
 
 ### The tool loop
 
-When the provider of the chosen slot implements `converse/3` (on either route) and the policy shows at least one tool, `Mead.Router` runs a loop of up to eight provider calls through the optional `Mead.Provider.converse/3`.
+When the provider of the chosen slot implements `converse/3` (on either route) and the policy shows at least one tool, `Mead.Router` runs a loop of up to eight provider calls through the optional callback `c:Mead.Provider.converse/3`.
 
 * Tool errors, denials, and unknown tools go back to the model as error results. They never fail the turn.
 * The route event carries the sum of the tokens of every call and a `tool_calls` count.
