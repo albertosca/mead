@@ -23,3 +23,5 @@ erl_crash.dump
 
 # mix test --cover output
 /cover/
+.docs-build/
+site/

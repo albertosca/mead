@@ -1,0 +1,36 @@
+site_name: mead
+site_url: https://albertosca.github.io/mead/pt/
+site_description: Runtime para assistentes baseados em LLM sobre Elixir/OTP.
+repo_url: https://github.com/albertosca/mead
+docs_dir: guide/pt
+site_dir: .docs-build/pt
+theme:
+  name: material
+  language: pt
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      toggle:
+        icon: material/weather-night
+        name: Mudar para o modo escuro
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      toggle:
+        icon: material/weather-sunny
+        name: Mudar para o modo claro
+  features:
+    - navigation.tabs
+extra:
+  alternate:
+    - name: English
+      link: https://albertosca.github.io/mead/
+      lang: en
+    - name: Português
+      link: https://albertosca.github.io/mead/pt/
+      lang: pt
+nav:
+  - Início: index.md
+  - Início rápido: quickstart.md
+  - Router e providers: router.md
+  - MCP: mcp.md
+  - Persistência e ledger: persistence.md

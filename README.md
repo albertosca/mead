@@ -4,7 +4,7 @@
 
 Runtime for LLM-backed assistants on Elixir/OTP: supervised sessions, a local/cloud model router, and an MCP client and server.
 
-Built by Alberto Cavalcanti · [Connect on LinkedIn](https://www.linkedin.com/in/albertosca/) · [Architecture](docs/ARCHITECTURE.md)
+Built by Alberto Cavalcanti · [Connect on LinkedIn](https://www.linkedin.com/in/albertosca/) · [Docs](https://albertosca.github.io/mead/) · [Architecture](docs/ARCHITECTURE.md)
 
 <!-- facts -->890+ tests in CI · 93%+ coverage gate · Anthropic and Ollama providers · MCP client and server · MIT<!-- /facts -->
 
