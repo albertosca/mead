@@ -83,6 +83,91 @@ defmodule Mead.Deck.ChoicesTest do
     assert List.last(answer)["payload"]["text"] == "chose b"
   end
 
+  defp answer_with_text(client, request_id, text) do
+    WebSocketClient.send_json(client, %{
+      "type" => "choice.respond",
+      "payload" => %{"request_id" => request_id, "text" => text}
+    })
+  end
+
+  defp ask_free(client) do
+    client = DeckServer.send_prompt(client, "choosefree a,b")
+    {client, events} = events_until(client, "choice.requested")
+    {client, List.last(events)["payload"]}
+  end
+
+  test "a request that allows free text says so, and the typed answer settles it", %{
+    directory: directory
+  } do
+    {client, _session_id} = connect(start_server(directory))
+    {client, requested} = ask_free(client)
+    assert requested["allow_free_text"] == true
+
+    client = answer_with_text(client, requested["request_id"], "neither, call me")
+    {client, resolved} = events_until(client, "choice.resolved")
+    payload = List.last(resolved)["payload"]
+    assert payload["request_id"] == requested["request_id"]
+    assert payload["option_id"] == nil
+    assert payload["text"] == "neither, call me"
+    assert payload["decided_by_device"] =~ "device-"
+
+    {_client, answer} = events_until(client, "text.delta")
+    assert List.last(answer)["payload"]["text"] == "typed neither, call me"
+  end
+
+  test "a request that does not allow free text carries no flag and ignores typed text", %{
+    directory: directory
+  } do
+    {client, _session_id} = connect(start_server(directory))
+    {client, requested} = ask(client)
+    refute Map.has_key?(requested, "allow_free_text")
+
+    client = answer_with_text(client, requested["request_id"], "sneaky")
+    assert {client, :timeout} = WebSocketClient.receive_json(client, 200)
+
+    client = choose(client, requested["request_id"], "a")
+    {_client, resolved} = events_until(client, "choice.resolved")
+    payload = List.last(resolved)["payload"]
+    assert payload["option_id"] == "a"
+    refute Map.has_key?(payload, "text")
+  end
+
+  test "a repeated typed answer re-sends the first resolved, text included", %{
+    directory: directory
+  } do
+    server = start_server(directory)
+    {first, session_id} = connect(server)
+    {second, _session_id} = connect(server, session_id)
+    {first, requested} = ask_free(first)
+
+    first = answer_with_text(first, requested["request_id"], "first words")
+    {first, _events} = events_until(first, "choice.resolved")
+    {second, _events} = events_until(second, "choice.resolved")
+    {first, _events} = events_until(first, "metric.updated")
+    {second, _events} = events_until(second, "metric.updated")
+
+    second = answer_with_text(second, requested["request_id"], "second words")
+    {_second, resent} = events_until(second, "choice.resolved")
+    assert List.last(resent)["payload"]["text"] == "first words"
+    refute "choice.resolved" in types_until_quiet(first)
+  end
+
+  test "the typed text is kept in the event log and never in the logger", %{
+    directory: directory
+  } do
+    {client, session_id} = connect(start_server(directory))
+    {client, requested} = ask_free(client)
+
+    log =
+      capture_log(fn ->
+        client = answer_with_text(client, requested["request_id"], "PRIVATEWORDS")
+        {_client, _events} = events_until(client, "text.delta")
+      end)
+
+    refute log =~ "PRIVATEWORDS"
+    assert File.read!(Path.join(directory, session_id <> ".events")) =~ "PRIVATEWORDS"
+  end
+
   test "an option that was not offered and an unknown request are ignored", %{
     directory: directory
   } do

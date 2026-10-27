@@ -322,15 +322,15 @@ defmodule Mead.Router do
 
   defp run_ask_user({module, interaction_context}, %{id: id, input: input} = tool_use) do
     with {:ok, question} <- AskUser.validate(input),
-         choice = %{tool_call_id: id, prompt: question.prompt, options: question.options},
-         {:ok, option_id} <- module.ask_choice(interaction_context, choice),
-         %{label: label} <- Enum.find(question.options, &(&1.id == option_id)) do
-      %{
-        type: :tool_result,
-        tool_use_id: id,
-        content: "The person chose: #{label}",
-        is_error: false
-      }
+         choice = %{
+           tool_call_id: id,
+           prompt: question.prompt,
+           options: question.options,
+           allow_free_text: question.allow_free_text
+         },
+         {:ok, answer} <- module.ask_choice(interaction_context, choice),
+         {:ok, content} <- describe_answer(question, answer) do
+      %{type: :tool_result, tool_use_id: id, content: content, is_error: false}
     else
       {:error, :expired} ->
         error_result(tool_use, "The person did not choose in time.")
@@ -345,6 +345,20 @@ defmodule Mead.Router do
         error_result(tool_use, "The person could not be asked.")
     end
   end
+
+  # A typed answer counts only for a question that allowed it, so an interaction cannot hand the
+  # model words the person was never invited to give.
+  defp describe_answer(%{allow_free_text: true}, {:text, text}),
+    do: {:ok, "The person answered: #{text}"}
+
+  defp describe_answer(question, option_id) when is_binary(option_id) do
+    case Enum.find(question.options, &(&1.id == option_id)) do
+      %{label: label} -> {:ok, "The person chose: #{label}"}
+      nil -> :unknown_option
+    end
+  end
+
+  defp describe_answer(_question, _answer), do: :unknown_option
 
   defp run_tool_with_interaction(context, {module, interaction_context}, tool_use) do
     update = fn status, overrides ->

@@ -23,6 +23,25 @@ defmodule Mead.Deck.EventsTest do
                Events.decode_client(frame("choice.respond", payload))
     end
 
+    test "choice.respond with a free text answer" do
+      payload = %{"request_id" => "r-1", "text" => "  neither, call me  "}
+
+      assert {:ok, {:choice_respond, %{request_id: "r-1", text: "  neither, call me  "} = answer}} =
+               Events.decode_client(frame("choice.respond", payload))
+
+      refute Map.has_key?(answer, :option_id)
+    end
+
+    test "a free text answer of exactly 4096 bytes is accepted" do
+      text = String.duplicate("é", 2_048)
+      assert byte_size(text) == 4_096
+
+      assert {:ok, {:choice_respond, %{text: ^text}}} =
+               Events.decode_client(
+                 frame("choice.respond", %{"request_id" => "r", "text" => text})
+               )
+    end
+
     test "tool_call.cancel" do
       assert {:ok, {:tool_call_cancel, %{tool_call_id: "t-1"}}} =
                Events.decode_client(frame("tool_call.cancel", %{"tool_call_id" => "t-1"}))
@@ -90,6 +109,14 @@ defmodule Mead.Deck.EventsTest do
         {"permission.respond", %{"request_id" => "r"}},
         {"permission.respond", %{"option_id" => "o"}},
         {"choice.respond", %{"request_id" => "", "option_id" => "o"}},
+        {"choice.respond", %{"request_id" => "r"}},
+        {"choice.respond", %{"request_id" => "r", "option_id" => "o", "text" => "t"}},
+        {"choice.respond", %{"request_id" => "r", "text" => ""}},
+        {"choice.respond", %{"request_id" => "r", "text" => "  \n\t "}},
+        {"choice.respond", %{"request_id" => "r", "text" => 5}},
+        {"choice.respond", %{"request_id" => "r", "text" => nil}},
+        {"choice.respond", %{"request_id" => "", "text" => "t"}},
+        {"choice.respond", %{"request_id" => "r", "text" => String.duplicate("é", 2_049)}},
         {"tool_call.cancel", %{}},
         {"tool_call.cancel", %{"tool_call_id" => 3}},
         {"session.resume", %{}},

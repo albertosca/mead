@@ -426,14 +426,10 @@ defmodule Mead.Deck.Channel do
     end
   end
 
-  defp handle_client_message(
-         {:choice_respond, %{request_id: request_id, option_id: option_id}},
-         socket,
-         state
-       ) do
+  defp handle_client_message({:choice_respond, %{request_id: request_id} = answer}, socket, state) do
     cond do
       match?(%{kind: :choice}, Map.get(state.pending, request_id)) ->
-        answer_choice(state, socket, request_id, option_id)
+        answer_choice(state, socket, request_id, answer)
 
       Map.has_key?(state.resolved, request_id) ->
         resend(state, socket, Map.fetch!(state.resolved, request_id))
@@ -542,6 +538,9 @@ defmodule Mead.Deck.Channel do
       "options" => Enum.map(choice.options, &%{"id" => &1.id, "label" => &1.label})
     }
 
+    allow_free_text = Map.get(choice, :allow_free_text, false)
+    payload = if allow_free_text, do: Map.put(payload, "allow_free_text", true), else: payload
+
     case emit(state, "choice.requested", payload) do
       {:ok, state, _envelope} ->
         Session.Server.pause_clock(state.session_id)
@@ -550,6 +549,7 @@ defmodule Mead.Deck.Channel do
           kind: :choice,
           from: from,
           option_ids: Enum.map(choice.options, & &1.id),
+          allow_free_text: allow_free_text,
           monitor: Process.monitor(requester),
           timer:
             Process.send_after(
@@ -566,9 +566,17 @@ defmodule Mead.Deck.Channel do
     end
   end
 
-  defp answer_choice(state, socket, request_id, option_id) do
+  defp answer_choice(state, socket, request_id, %{option_id: option_id}) do
     if option_id in state.pending[request_id].option_ids,
       do: settle(state, request_id, option_id, {:ok, option_id}, device_of(state, socket)),
+      else: {:noreply, state}
+  end
+
+  # Typed words settle only a request that invited them.
+  defp answer_choice(state, socket, request_id, %{text: text}) do
+    if state.pending[request_id].allow_free_text,
+      do:
+        settle(state, request_id, {:text, text}, {:ok, {:text, text}}, device_of(state, socket)),
       else: {:noreply, state}
   end
 
@@ -625,15 +633,14 @@ defmodule Mead.Deck.Channel do
     end
   end
 
-  defp emit_choice_resolved(state, request_id, option_id, extra) do
+  defp emit_choice_resolved(state, request_id, outcome, extra) do
     payload =
       Map.merge(
         %{
           "request_id" => request_id,
-          "option_id" => option_id,
           "decided_at" => DateTime.to_iso8601(DateTime.utc_now())
         },
-        extra
+        Map.merge(extra, choice_outcome(outcome))
       )
 
     case emit(state, "choice.resolved", payload) do
@@ -644,6 +651,9 @@ defmodule Mead.Deck.Channel do
         {:error, reason}
     end
   end
+
+  defp choice_outcome({:text, text}), do: %{"option_id" => nil, "text" => text}
+  defp choice_outcome(option_id), do: %{"option_id" => option_id}
 
   defp emit_resolved(state, request_id, action, outcome, extra) do
     payload =

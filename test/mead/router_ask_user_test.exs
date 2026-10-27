@@ -49,6 +49,16 @@ defmodule Mead.RouterAskUserTest do
                AskUser.validate(input)
     end
 
+    test "allow_free_text defaults to false and accepts only a boolean" do
+      assert {:ok, %{allow_free_text: false}} = AskUser.validate(@question)
+
+      assert {:ok, %{allow_free_text: true}} =
+               AskUser.validate(Map.put(@question, "allow_free_text", true))
+
+      assert {:error, reason} = AskUser.validate(Map.put(@question, "allow_free_text", "yes"))
+      assert reason =~ "allow_free_text"
+    end
+
     @invalid [
       {"one option", %{"prompt" => "?", "options" => [%{"id" => "a", "label" => "A"}]}},
       {"seven options",
@@ -153,6 +163,22 @@ defmodule Mead.RouterAskUserTest do
 
       assert options == [%{id: "a", label: "Alpha"}, %{id: "b", label: "Beta"}]
       assert %{content: "The person chose: Beta", is_error: false} = result_after_ask()
+    end
+
+    test "a free text answer reaches the model when the question allowed it" do
+      input = Map.put(@question, "allow_free_text", true)
+      assert {:ok, "fake reply"} = route(ask_steps(input), [{:ok, {:text, "neither, call me"}}])
+
+      assert_received {:ask_choice, %{allow_free_text: true}}
+
+      assert %{content: "The person answered: neither, call me", is_error: false} =
+               result_after_ask()
+    end
+
+    test "a free text answer to a question that did not allow it is an error result" do
+      route(ask_steps(@question), [{:ok, {:text, "sneaky"}}])
+      assert_received {:ask_choice, %{allow_free_text: false}}
+      assert %{is_error: true} = result_after_ask()
     end
 
     test "an expired question is an error result" do

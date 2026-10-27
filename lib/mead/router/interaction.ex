@@ -38,7 +38,8 @@ defmodule Mead.Router.Interaction do
   @type choice :: %{
           tool_call_id: String.t(),
           prompt: String.t(),
-          options: [%{id: String.t(), label: String.t()}]
+          options: [%{id: String.t(), label: String.t()}],
+          allow_free_text: boolean()
         }
 
   @doc """
@@ -50,11 +51,12 @@ defmodule Mead.Router.Interaction do
 
   @doc """
   Puts a multiple-choice question (the `ask_user` tool) to the person. Returns the `id` of the
-  option they picked, `{:error, :expired}` when the time ran out and `{:error, :no_answer}` when
+  option they picked, `{:text, words}` when the question set `allow_free_text` and they answered
+  in their own words, `{:error, :expired}` when the time ran out and `{:error, :no_answer}` when
   nobody could answer. Like `request_permission/2` it may block until there is an answer.
   """
   @callback ask_choice(context :: term(), choice()) ::
-              {:ok, String.t()} | {:error, :expired | :no_answer}
+              {:ok, String.t() | {:text, String.t()}} | {:error, :expired | :no_answer}
 
   @doc """
   Called once an allowed tool call is running in its own process, before the `:in_progress`

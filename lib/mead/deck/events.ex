@@ -9,6 +9,7 @@ defmodule Mead.Deck.Events do
 
   @maximum_frame_bytes 65_536
   @maximum_identifier_bytes 128
+  @maximum_answer_bytes 4_096
 
   @server_event_types ~w(
     session.snapshot prompt.accepted text.delta tool_call.updated permission.requested
@@ -26,6 +27,7 @@ defmodule Mead.Deck.Events do
           {:prompt_send, %{client_message_id: String.t(), text: String.t()}}
           | {:permission_respond, %{request_id: String.t(), option_id: String.t()}}
           | {:choice_respond, %{request_id: String.t(), option_id: String.t()}}
+          | {:choice_respond, %{request_id: String.t(), text: String.t()}}
           | {:tool_call_cancel, %{tool_call_id: String.t()}}
           | {:session_resume, %{last_sequence: non_neg_integer(), device_id: String.t() | nil}}
           | {:permission_forget, %{tool: String.t()}}
@@ -107,8 +109,21 @@ defmodule Mead.Deck.Events do
   defp validate("permission.respond", %{"request_id" => request_id, "option_id" => option_id}),
     do: respond(:permission_respond, request_id, option_id)
 
+  # Exactly one of `option_id` and `text`: a person either picks an option or answers in words.
+  defp validate("choice.respond", %{"option_id" => _option, "text" => _text}),
+    do: {:error, :invalid_payload}
+
   defp validate("choice.respond", %{"request_id" => request_id, "option_id" => option_id}),
     do: respond(:choice_respond, request_id, option_id)
+
+  defp validate("choice.respond", %{"request_id" => request_id, "text" => text}) do
+    with {:ok, request_id} <- identifier(request_id),
+         true <- answer_text?(text) do
+      {:ok, {:choice_respond, %{request_id: request_id, text: text}}}
+    else
+      _invalid -> {:error, :invalid_payload}
+    end
+  end
 
   defp validate("tool_call.cancel", %{"tool_call_id" => tool_call_id}) do
     case identifier(tool_call_id) do
@@ -152,6 +167,9 @@ defmodule Mead.Deck.Events do
       :error -> {:error, :invalid_payload}
     end
   end
+
+  defp answer_text?(text),
+    do: is_binary(text) and String.trim(text) != "" and byte_size(text) <= @maximum_answer_bytes
 
   # The device names itself by an opaque identifier it keeps across reconnects; absent is fine.
   defp device_id(%{"device_id" => value}), do: identifier(value)

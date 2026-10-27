@@ -63,21 +63,12 @@ defmodule Mead.Test.DeckHandler do
 
   # "choose <id>,<id>,..." puts a question with those options (labelled "Label <id>") and answers
   # "chose <id>" or "no choice <reason>".
-  def handle_turn(_history, "choose " <> identifiers, options) do
-    {module, context} = Keyword.fetch!(options, :interaction)
-    option_ids = String.split(identifiers, ",")
+  def handle_turn(_history, "choose " <> identifiers, options),
+    do: ask_choice(identifiers, false, options)
 
-    choice = %{
-      tool_call_id: "ask-1",
-      prompt: "Which one?",
-      options: Enum.map(option_ids, &%{id: &1, label: "Label " <> &1})
-    }
-
-    case module.ask_choice(context, choice) do
-      {:ok, option_id} -> {:ok, "chose " <> option_id}
-      {:error, reason} -> {:ok, "no choice #{reason}"}
-    end
-  end
+  # Same as "choose", but the person may also answer in their own words ("typed <text>").
+  def handle_turn(_history, "choosefree " <> identifiers, options),
+    do: ask_choice(identifiers, true, options)
 
   def handle_turn(_history, "telemetry " <> numbers, options) do
     [input_tokens, output_tokens] = numbers |> String.split(" ") |> Enum.map(&String.to_integer/1)
@@ -107,5 +98,23 @@ defmodule Mead.Test.DeckHandler do
     end
 
     :ok
+  end
+
+  defp ask_choice(identifiers, allow_free_text, options) do
+    {module, context} = Keyword.fetch!(options, :interaction)
+    option_ids = String.split(identifiers, ",")
+
+    choice = %{
+      tool_call_id: "ask-1",
+      prompt: "Which one?",
+      options: Enum.map(option_ids, &%{id: &1, label: "Label " <> &1}),
+      allow_free_text: allow_free_text
+    }
+
+    case module.ask_choice(context, choice) do
+      {:ok, {:text, text}} -> {:ok, "typed " <> text}
+      {:ok, option_id} -> {:ok, "chose " <> option_id}
+      {:error, reason} -> {:ok, "no choice #{reason}"}
+    end
   end
 end

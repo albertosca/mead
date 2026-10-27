@@ -438,6 +438,7 @@ When a turn has an interaction and at least one other tool, the router offers th
 * The router answers it itself. It is never gated by the policy and never sent to the hub. MCP tool names always contain `__`, so no server can shadow it.
 * The channel emits `choice.requested`, pauses the clock like a permission, and the first valid `choice.respond` wins.
 * `permission_timeout_ms` resolves it with no option, and the model then reads "The person did not choose in time."
+* The model may set `allow_free_text: true`. The request then carries `allow_free_text: true`, and `choice.respond` takes exactly one of `option_id` and `text` (a non-blank text of at most 4 096 bytes). A text answer to a request that did not allow it is ignored. `choice.resolved` then has `option_id: null` and the `text`, and the model reads "The person answered: ...". The text is kept in the event log, so a reconnect replays it, and is never written to the logger.
 * A turn whose provider cannot be asked gets "The person could not be asked."
 
 ### Streaming and cancellation
