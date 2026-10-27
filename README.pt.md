@@ -2,20 +2,21 @@
 
 # mead
 
-[![CI](https://github.com/albertosca/mead/actions/workflows/ci.yml/badge.svg)](https://github.com/albertosca/mead/actions/workflows/ci.yml) [![Lint](https://github.com/albertosca/mead/actions/workflows/lint.yml/badge.svg)](https://github.com/albertosca/mead/actions/workflows/lint.yml) [![Coverage: 93%+](https://img.shields.io/badge/coverage-93%25%2B-brightgreen)](https://github.com/albertosca/mead/actions/workflows/ci.yml) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE) [![Elixir 1.20+](https://img.shields.io/badge/Elixir-1.20%2B-4B275F.svg)](mix.exs)
+[![CI](https://github.com/albertosca/mead/actions/workflows/ci.yml/badge.svg)](https://github.com/albertosca/mead/actions/workflows/ci.yml) [![Lint](https://github.com/albertosca/mead/actions/workflows/lint.yml/badge.svg)](https://github.com/albertosca/mead/actions/workflows/lint.yml) [![Coverage: 93%+](https://img.shields.io/badge/coverage-93%25%2B-brightgreen)](https://github.com/albertosca/mead/actions/workflows/ci.yml) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE) [![Elixir 1.20+](https://img.shields.io/badge/Elixir-1.20%2B-4B275F.svg)](mix.exs) [![Hex.pm](https://img.shields.io/hexpm/v/mead.svg)](https://hex.pm/packages/mead)
 
 Runtime para assistentes baseados em LLM sobre Elixir/OTP: sessões supervisionadas, um router de modelos local/nuvem e cliente e servidor MCP.
 
 ## Início rápido
 
-Requer Elixir 1.20+ sobre Erlang/OTP 29.
+Requer Elixir 1.20+ sobre Erlang/OTP 29. Adicione o mead às dependências no `mix.exs`:
 
+```elixir
+def deps do
+  [{:mead, "~> 0.1"}]
+end
 ```
-git clone https://github.com/albertosca/mead.git
-cd mead
-mix deps.get
-mix test
-```
+
+Para trabalhar no próprio mead, veja o [CONTRIBUTING.md](CONTRIBUTING.md).
 
 O handler de turno padrão repete o texto, então uma sessão roda sem chave de API (`iex -S mix`):
 

@@ -1,13 +1,14 @@
 # Início rápido
 
-Requer Elixir 1.20+ sobre Erlang/OTP 29.
+Requer Elixir 1.20+ sobre Erlang/OTP 29. Adicione o mead às dependências no `mix.exs`:
 
+```elixir
+def deps do
+  [{:mead, "~> 0.1"}]
+end
 ```
-git clone https://github.com/albertosca/mead.git
-cd mead
-mix deps.get
-mix test
-```
+
+Para trabalhar no próprio mead, veja o [CONTRIBUTING.md](https://github.com/albertosca/mead/blob/main/CONTRIBUTING.md).
 
 ## Rodar uma sessão
 
