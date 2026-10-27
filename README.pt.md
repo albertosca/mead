@@ -2,13 +2,9 @@
 
 # mead
 
-Runtime para assistentes baseados em LLM sobre Elixir/OTP: sessões supervisionadas, um router de modelos local/nuvem e cliente e servidor MCP.
-
-Feito por Alberto Cavalcanti · [Conecte no LinkedIn](https://www.linkedin.com/in/albertosca/) · [Docs](https://albertosca.github.io/mead/pt/) · [Arquitetura](docs/ARCHITECTURE.md)
-
-<!-- facts -->890+ testes no CI · gate de cobertura de 93%+ · providers Anthropic e Ollama · cliente e servidor MCP · MIT<!-- /facts -->
-
 [![CI](https://github.com/albertosca/mead/actions/workflows/ci.yml/badge.svg)](https://github.com/albertosca/mead/actions/workflows/ci.yml) [![Lint](https://github.com/albertosca/mead/actions/workflows/lint.yml/badge.svg)](https://github.com/albertosca/mead/actions/workflows/lint.yml) [![Coverage: 93%+](https://img.shields.io/badge/coverage-93%25%2B-brightgreen)](https://github.com/albertosca/mead/actions/workflows/ci.yml) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE) [![Elixir 1.20+](https://img.shields.io/badge/Elixir-1.20%2B-4B275F.svg)](mix.exs)
+
+Runtime para assistentes baseados em LLM sobre Elixir/OTP: sessões supervisionadas, um router de modelos local/nuvem e cliente e servidor MCP.
 
 ## Início rápido
 
@@ -84,3 +80,7 @@ Veja o [CONTRIBUTING.md](CONTRIBUTING.md) e o [SECURITY.md](SECURITY.md) para re
 ## Licença
 
 MIT © Alberto Cavalcanti
+
+---
+
+Feito por Alberto Cavalcanti · [Conecte no LinkedIn](https://www.linkedin.com/in/albertosca/) · [Docs](https://albertosca.github.io/mead/pt/) · [Arquitetura](docs/ARCHITECTURE.md)
