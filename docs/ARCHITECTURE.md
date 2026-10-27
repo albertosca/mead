@@ -71,65 +71,404 @@ flowchart LR
 
 ## 3. Session Internals
 
-Each conversation is a `Mead.Session.Supervisor` started by `Mead.Session.Pool`. It supervises two processes with a `rest_for_one` strategy: `Mead.Session.History`, an agent holding the turns, and `Mead.Session.Server`, which orchestrates them. Because the history starts first, a crashed server restarts with the same session id and the same history, and a turn that was running is marked `interrupted`. A server that crashes more than three times in five seconds takes its whole pair down and that conversation is gone; neighbouring conversations are never affected.
+### Structure
 
-A turn runs in a task under `Mead.TurnSupervisor`, linked to the server, which traps exits. A handler that raises, exits, returns garbage, or exceeds the turn timeout fails only that turn (`failed` or `timeout`), and a server death takes its running task with it. The full design is in `docs/superpowers/specs/2026-10-17-session-skeleton-design.md`.
+Each conversation is a `Mead.Session.Supervisor` started by `Mead.Session.Pool`. It supervises two processes with a `rest_for_one` strategy:
+
+* `Mead.Session.History`: an agent that holds the turns.
+* `Mead.Session.Server`: orchestrates the conversation.
+
+### Failure handling
+
+* The history starts first, so a crashed server restarts with the same session id and the same history. A turn that was running is marked `interrupted`.
+* A server that crashes more than three times in five seconds takes its whole pair down, and that conversation is gone. Neighbouring conversations are never affected.
+* A turn runs in a task under `Mead.TurnSupervisor`, linked to the server, which traps exits.
+* A handler that raises, exits, returns garbage, or exceeds the turn timeout fails only that turn, with the status `failed` or `timeout`.
+* A server death takes its running task with it.
+
+The full design is in `docs/superpowers/specs/2026-10-17-session-skeleton-design.md`.
 
 ## 4. Router Internals
 
-`Mead.Router.route/4` takes the forced route or asks `Mead.Router.Classifier`, which is a pure function that sends a turn to the local model only when the input is short, the history is light, and it asks for triage or formatting without asking for reasoning; any doubt goes to the cloud. The route names a slot holding a `{provider, options}` pair implementing `Mead.Provider`. A turn routed to an empty slot fails with `:local_unavailable` or `:cloud_unavailable` and is never sent to the other slot. Only completed text turns are replayed to the provider as history. A failed turn replies `{:error, {:failed, reason}}`. The full design is in `docs/superpowers/specs/2026-10-17-model-router-design.md`. A provider may also export `converse_stream/4` (Anthropic reads server-sent events through `Mead.Provider.ServerSentEvents`, Ollama reads one JSON object per line); both fold the stream into the body a plain call returns and parse it the same way, so a streamed turn and a plain turn give the same result. When the turn has an interaction and the provider can stream, the router passes it a callback that reaches `text_delta/2`, so the text of every model call in a tool loop is streamed, and the turn's output is the text of every call joined with a blank line, which is also the separator the stream carries, so a replay shows what the live view showed.
+### Choosing the slot
+
+`Mead.Router.route/4` takes the forced route, or asks `Mead.Router.Classifier`. The classifier is a pure function. It sends a turn to the local model only when all three hold:
+
+* the input is short;
+* the history is light;
+* the turn asks for triage or formatting without asking for reasoning.
+
+Any doubt goes to the cloud.
+
+### Slots and providers
+
+The route names a slot, and a slot holds a `{provider, options}` pair that implements `Mead.Provider`.
+
+* A turn routed to an empty slot fails with `:local_unavailable` or `:cloud_unavailable`. It is never sent to the other slot.
+* Only completed text turns are replayed to the provider as history.
+* A failed turn replies `{:error, {:failed, reason}}`.
+
+### Streaming
+
+A provider may also export `converse_stream/4`.
+
+* Anthropic reads server-sent events through `Mead.Provider.ServerSentEvents`. Ollama reads one JSON object per line.
+* Both fold the stream into the body a plain call returns and parse it the same way, so a streamed turn and a plain turn give the same result.
+* When the turn has an interaction and the provider can stream, the router passes it a callback that reaches `text_delta/2`. The text of every model call in a tool loop is then streamed.
+* The turn's output is the text of every call joined with a blank line. That is also the separator the stream carries, so a replay shows what the live view showed.
+
+The full design is in `docs/superpowers/specs/2026-10-17-model-router-design.md`.
 
 ## 5. Ledger Internals
 
-`Mead.Session.Server` adds `session_id` to the options it passes to the handler, and `Mead.Router` puts it in the metadata of `[:mead, :router, :route]`. `Mead.Ledger` owns two public ETS tables and attaches a `:telemetry` handler that validates each event and updates counter rows atomically with `:ets.update_counter`, in the process that emitted the event; an event it cannot read is counted as `dropped` and the handler never raises, because `:telemetry` detaches a handler that does. Totals are kept per session and per `{route, provider}`, and the last 100 turns sit in a ring. A turn that is killed by the turn timeout, or whose provider raises, emits no event and so is not counted; its `timeout` or `failed` status is only in the session history. `Mead.stop_session/1` keeps the session row, so a resumed conversation returns with what it already spent; `Mead.delete_session/1` forgets the row while the route totals keep what it added. With a storage directory the ledger also appends every counted turn, every forget and every dropped event to `ledger.journal` (the record framing of the session files, in `Mead.Session.Record`), in batches of 100 events or 50 ms written by the ledger process so a turn never waits for the disk; at boot it replays the journal before attaching the handler, a torn tail is cut with a warning and a damaged file is set aside as `ledger.journal.corrupt`. When the file passes `ledger_journal_max_bytes` (default 1 MiB) it is rewritten as one checkpoint built from the journal itself, never from the live tables, so no event is counted twice. The ledger is the first root child so that a crash of the ledger itself restores its numbers from the journal instead of wiping them. The full design is in `docs/superpowers/specs/2026-10-18-token-ledger-design.md`, and the journal in `docs/superpowers/specs/2026-10-25-ledger-persistence-design.md`, and its read side in `docs/superpowers/specs/2026-10-25-usage-tool-design.md`. The accessors read the tables from `:persistent_term`, so a ledger that is stuck on the disk does not block them.
+### What it records
 
+`Mead.Session.Server` adds `session_id` to the options it passes to the handler, and `Mead.Router` puts it in the metadata of `[:mead, :router, :route]`.
+
+`Mead.Ledger` owns two public ETS tables and attaches a `:telemetry` handler. The handler validates each event and updates counter rows atomically with `:ets.update_counter`, in the process that emitted the event.
+
+* An event it cannot read is counted as `dropped`. The handler never raises, because `:telemetry` detaches a handler that does.
+* Totals are kept per session and per `{route, provider}`. The last 100 turns sit in a ring.
+* A turn killed by the turn timeout, or whose provider raises, emits no event and so is not counted. Its `timeout` or `failed` status is only in the session history.
+* `Mead.stop_session/1` keeps the session row, so a resumed conversation returns with what it already spent. `Mead.delete_session/1` forgets the row, while the route totals keep what it added.
+* The accessors read the tables from `:persistent_term`, so a ledger that is stuck on the disk does not block them.
+
+### The journal
+
+With a storage directory, the ledger also appends every counted turn, every forget and every dropped event to `ledger.journal`. The file uses the record framing of the session files (`Mead.Session.Record`).
+
+* Writes go in batches of 100 events or 50 ms, made by the ledger process, so a turn never waits for the disk.
+* At boot the ledger replays the journal before it attaches the handler. A torn tail is cut with a warning, and a damaged file is set aside as `ledger.journal.corrupt`.
+* When the file passes `ledger_journal_max_bytes` (default 1 MiB), it is rewritten as one checkpoint built from the journal itself, never from the live tables, so no event is counted twice.
+* The ledger is the first root child, so a crash of the ledger itself restores its numbers from the journal instead of wiping them.
+
+### Designs
+
+* Ledger: `docs/superpowers/specs/2026-10-18-token-ledger-design.md`.
+* Journal: `docs/superpowers/specs/2026-10-25-ledger-persistence-design.md`.
+* Read side: `docs/superpowers/specs/2026-10-25-usage-tool-design.md`.
 
 ## 6. MCP Hub Internals
 
-`config :mead, :mcp, servers: [...]` lists the MCP servers, each with a transport (`{:stdio, command:, arguments:}` or `{:http, url:, headers:}`) and the tools the operator allows, each with a class declared in the configuration: `:read` or `:effect`. `Mead.MCP.Configuration` validates it when the application starts and refuses a typo instead of silently granting or denying the wrong tool. The class is never read from the server: a tool the server offers and the configuration does not list does not exist for the model, whatever the server says about itself.
+### Configuration
 
-`Mead.MCP.Connection` is one process per server. It owns a transport (`Mead.MCP.Transport.Stdio` runs a child process over a `Port`; `Mead.MCP.Transport.Http` posts each message with `Req` and reads a JSON or event-stream answer), performs the handshake with the pinned protocol version, follows the tool list across pages, publishes the tools in `Mead.MCP.Catalog`, and refreshes them on a `tools/list_changed` notification. A transport that cannot start, closes, or dies does not crash the connection: it removes its tools, fails its pending callers with `:connection_lost`, and retries after 1, 2, 5, 15, then 30 seconds, so a missing command cannot become a restart loop that takes the application down. When a call's caller dies or its timer runs out, the connection sends `notifications/cancelled` with the request id so the server can stop the work; the server may ignore it, and a late answer is dropped. A refresh the server never answers is abandoned after the handshake timeout and reconnects. What a server says about a tool is bounded before the model sees it: descriptions are cut at 2 000 characters, and a schema that is not an object or is over 20 000 bytes becomes the permissive default. An HTTP response over 4 MiB fails its request with `:response_too_large`, and the configuration refuses a tool whose `server__tool` name the model could never be shown. Stopping a stdio transport closes the child's stdin and then signals the child, because closing the port alone does not end it.
+`config :mead, :mcp, servers: [...]` lists the MCP servers. Each entry has:
 
-`Mead.MCP.Policy` decides what the model sees: `:read` tools always, `:effect` tools only when the turn passes `tools: :effect`, and anything else exactly as the default. The model sees a tool as `server__tool`; `call_tool/4` authorizes the name again before any server is contacted, so a tool the model was not shown cannot run. A result longer than 50 000 characters is truncated with a marker, and non-text content becomes a placeholder.
+* a transport: `{:stdio, command:, arguments:}` or `{:http, url:, headers:}`;
+* the tools the operator allows, each with a class declared in the configuration: `:read` or `:effect`.
 
-When the provider of the chosen slot implements `converse/3`, on either route, and the policy shows at least one tool, `Mead.Router` runs a loop of up to eight provider calls through the optional `Mead.Provider.converse/3`: tool errors, denials, and unknown tools go back to the model as error results and never fail the turn. The route event carries the sum of the tokens of every call and a `tool_calls` count. The whole loop runs inside the turn timeout, so a conversation that uses tools may need a `:turn_timeout` above the default of 30 seconds. The HTTP transport has been exercised only against a test double, not a real remote server. The full design is in `docs/superpowers/specs/2026-10-22-mcp-hub-design.md`.
+`Mead.MCP.Configuration` validates it when the application starts and refuses a typo instead of silently granting or denying the wrong tool.
+
+The class is never read from the server. A tool the server offers and the configuration does not list does not exist for the model, whatever the server says about itself.
+
+### Connections
+
+`Mead.MCP.Connection` is one process per server. It owns a transport:
+
+* `Mead.MCP.Transport.Stdio` runs a child process over a `Port`.
+* `Mead.MCP.Transport.Http` posts each message with `Req` and reads a JSON or event-stream answer.
+
+The connection performs the handshake with the pinned protocol version, follows the tool list across pages, publishes the tools in `Mead.MCP.Catalog`, and refreshes them on a `tools/list_changed` notification.
+
+**When something goes wrong**
+
+* A transport that cannot start, closes, or dies does not crash the connection. It removes its tools, fails its pending callers with `:connection_lost`, and retries after 1, 2, 5, 15, then 30 seconds. A missing command therefore cannot become a restart loop that takes the application down.
+* When a call's caller dies or its timer runs out, the connection sends `notifications/cancelled` with the request id so the server can stop the work. The server may ignore it, and a late answer is dropped.
+* A refresh the server never answers is abandoned after the handshake timeout, and the connection reconnects.
+* Stopping a stdio transport closes the child's stdin and then signals the child, because closing the port alone does not end it.
+
+**Bounds on what a server says**
+
+* Descriptions are cut at 2 000 characters.
+* A schema that is not an object, or is over 20 000 bytes, becomes the permissive default.
+* An HTTP response over 4 MiB fails its request with `:response_too_large`.
+* The configuration refuses a tool whose `server__tool` name the model could never be shown.
+
+### Policy
+
+`Mead.MCP.Policy` decides what the model sees:
+
+* `:read` tools are always shown.
+* `:effect` tools are shown only when the turn passes `tools: :effect`.
+* Anything else is exactly the default.
+
+The model sees a tool as `server__tool`. `call_tool/4` authorizes the name again before any server is contacted, so a tool the model was not shown cannot run.
+
+A result longer than 50 000 characters is truncated with a marker, and non-text content becomes a placeholder.
+
+### The tool loop
+
+When the provider of the chosen slot implements `converse/3` (on either route) and the policy shows at least one tool, `Mead.Router` runs a loop of up to eight provider calls through the optional `Mead.Provider.converse/3`.
+
+* Tool errors, denials, and unknown tools go back to the model as error results. They never fail the turn.
+* The route event carries the sum of the tokens of every call and a `tool_calls` count.
+* The whole loop runs inside the turn timeout, so a conversation that uses tools may need a `:turn_timeout` above the default of 30 seconds.
+
+**Known limit:** the HTTP transport has been exercised only against a test double, not a real remote server.
+
+The full design is in `docs/superpowers/specs/2026-10-22-mcp-hub-design.md`.
 
 ## 7. MCP Server Internals
 
-`config :mead, :mcp_server, token: "...", port: 4040, address: {127, 0, 0, 1}, allow_effect: false, allowed_origins: [], maximum_connections: 250` turns the server on; adding `certfile: "cert.pem", keyfile: "key.pem"` (both or neither) makes the one listener speak HTTPS, and WSS for the deck, with no plain-HTTP port left open. Without a `token` nothing listens and one info line says so; an invalid setting stops the application at boot with a message that never contains the token. `Mead.MCP.Server.Configuration` validates it and keeps only a SHA-256 digest of the token, which its `Inspect` hides.
+### Turning it on
 
-The endpoint is `POST /mcp` (MCP Streamable HTTP, protocol version 2025-06-18), stateless: no `mcp-session-id` is assigned, `GET /mcp` is 405, a notification is 202, and every other message gets one JSON object. `Mead.MCP.Server.Plug` runs its checks in a fixed order and answers the first failure: route (404, 405), bearer token (401, constant time, before the body is read), `Origin` when present (loopback or listed in `allowed_origins`, else 403, the DNS rebinding protection), content type (415), body of at most 1 MiB (413), then decoding (400; a batch is refused). A bug in the dispatcher becomes a generic 500 whose log line names only the exception module, because a crash report can print the `Authorization` header.
+```elixir
+config :mead, :mcp_server,
+  token: "...",
+  port: 4040,
+  address: {127, 0, 0, 1},
+  allow_effect: false,
+  allowed_origins: [],
+  maximum_connections: 250
+```
 
-`Mead.MCP.Server.Dispatcher` is pure: it answers `initialize`, `ping`, `tools/list`, and `tools/call`, with `-32601` for an unknown method and `-32602` for params of the wrong type. `Mead.MCP.Server.Tools` offers `start_session`, `submit_turn`, `history`, `stop_session`, `resume_session`, `delete_session`, `list_sessions`, `compact_session`, and `usage`, and calls only the public `Mead` API. `usage` reads the ledger through `Mead.usage/1` and `Mead.session_usage/2`: the totals over every route with the dropped count, the totals per route and provider, and the latest 0 to 100 turns (20 by default), or the totals of one session (the three parts are separate reads, not one snapshot, so a turn counted meanwhile may show in only some of them); providers are shown as module names and times as ISO 8601, and a ledger that is not running is an error result. A tool that fails while running (an unknown session, a failed turn, a timeout) is a result with `isError: true` and a fixed message, never a stack trace or provider text. `submit_turn` holds the request until the turn ends, bounded by the session's `turn_timeout`, which a client may set to at most one hour in `start_session`; a client that disconnects does not abort the turn. `tools: "effect"` is honoured only when the operator set `allow_effect: true`; otherwise nothing runs. The listener serves at most `maximum_connections` connections at once (rounded up to a multiple of 10 from 10 on) and closes one that finds no room after about a second, and the session pool refuses a session beyond `config :mead, :maximum_sessions` (default 1000) with `{:error, :max_children}`, which `start_session` reports as "the session could not be started". The root supervisor tolerates 10 restarts in 5 seconds.
+* Without a `token`, nothing listens and one info line says so.
+* An invalid setting stops the application at boot, with a message that never contains the token.
+* Adding `certfile: "cert.pem", keyfile: "key.pem"` (both or neither) makes the one listener speak HTTPS, and WSS for the deck. No plain-HTTP port is left open.
+* `Mead.MCP.Server.Configuration` validates the settings and keeps only a SHA-256 digest of the token, which its `Inspect` hides.
 
-Not part of this slice: WebSocket or SSE and any progress events, TLS, several tokens or roles, relaying the hub's own tools, `resources` and `prompts`, and IPv6 addresses. The 100 000 character input limit and the 1 MiB body limit are first values, not measured.
+### The endpoint
+
+The endpoint is `POST /mcp` (MCP Streamable HTTP, protocol version 2025-06-18). It is stateless: no `mcp-session-id` is assigned, `GET /mcp` is 405, a notification is 202, and every other message gets one JSON object.
+
+`Mead.MCP.Server.Plug` runs its checks in a fixed order and answers the first failure:
+
+| Order | Check | Failure |
+|---|---|---|
+| 1 | Route | 404, 405 |
+| 2 | Bearer token (constant time, before the body is read) | 401 |
+| 3 | `Origin`, when present: loopback or listed in `allowed_origins` (DNS rebinding protection) | 403 |
+| 4 | Content type | 415 |
+| 5 | Body of at most 1 MiB | 413 |
+| 6 | Decoding (a batch is refused) | 400 |
+
+A bug in the dispatcher becomes a generic 500. Its log line names only the exception module, because a crash report can print the `Authorization` header.
+
+### The dispatcher and the tools
+
+`Mead.MCP.Server.Dispatcher` is pure. It answers `initialize`, `ping`, `tools/list`, and `tools/call`, with `-32601` for an unknown method and `-32602` for params of the wrong type.
+
+`Mead.MCP.Server.Tools` offers nine tools and calls only the public `Mead` API:
+
+* `start_session`, `submit_turn`, `history`
+* `stop_session`, `resume_session`, `delete_session`
+* `list_sessions`, `compact_session`, `usage`
+
+**Details**
+
+* `usage` reads the ledger through `Mead.usage/1` and `Mead.session_usage/2`. It returns the totals over every route with the dropped count, the totals per route and provider, and the latest 0 to 100 turns (20 by default), or the totals of one session. The three parts are separate reads, not one snapshot, so a turn counted meanwhile may show in only some of them. Providers are shown as module names and times as ISO 8601. A ledger that is not running is an error result.
+* A tool that fails while running (an unknown session, a failed turn, a timeout) is a result with `isError: true` and a fixed message, never a stack trace or provider text.
+* `submit_turn` holds the request until the turn ends, bounded by the session's `turn_timeout`, which a client may set to at most one hour in `start_session`. A client that disconnects does not abort the turn.
+* `tools: "effect"` is honoured only when the operator set `allow_effect: true`. Otherwise nothing runs.
+
+### Limits
+
+* The listener serves at most `maximum_connections` connections at once (rounded up to a multiple of 10 from 10 on). It closes one that finds no room after about a second.
+* The session pool refuses a session beyond `config :mead, :maximum_sessions` (default 1000) with `{:error, :max_children}`, which `start_session` reports as "the session could not be started".
+* The root supervisor tolerates 10 restarts in 5 seconds.
+
+### Not in this slice
+
+* SSE and progress events, several tokens or roles, relaying the hub's own tools, `resources` and `prompts`, and IPv6 addresses. (The deck's WebSocket and TLS are described in section 9.)
+* The 100 000 character input limit and the 1 MiB body limit are first values, not measured.
 
 ## 8. Persistence Internals
 
-With `config :mead, :storage, directory: "..."` every session writes its turns through `Mead.Session.Store`, a plain module that is the only code touching the files. A session is one append-only file named after its id, a sequence of records `[4-byte length][4-byte CRC32 of the length][4-byte CRC32 of the payload][term_to_binary payload]`, each the encoding of one event: `{:append, turn}` when a turn starts, `{:replace_last, turn}` when the newest turn is closed, and `:interrupt` when turns still running became interrupted. Replaying the events rebuilds the list the history agent held. Without the setting nothing is written and `Mead.resume_session/2` answers `{:error, :not_found}`.
+### The files
 
-`Mead.Session.History` keeps the directory in its state. Only `append/2` is write-first: a turn that cannot be recorded is refused with `{:error, {:persistence, reason}}` before the handler starts and memory is left untouched. `update_last/2` and `mark_interrupted/1` always change memory and then try to write, because the caller already holds the answer; a failed write there is logged once and the reply is unchanged. A closed turn that never reached the disk comes back after a restart as an interrupted turn.
+With `config :mead, :storage, directory: "..."`, every session writes its turns through `Mead.Session.Store`. It is a plain module and the only code that touches the files.
 
-A record that is cut short or fails its payload checksum at the end of the file is what a crash during a write leaves, so it is dropped with a warning and `Mead.resume_session/2` cuts it off the file before the session writes again; the length has a checksum of its own, so a damaged header is never mistaken for a cut write. Damage anywhere else is `{:error, :corrupt_history}`, because a conversation with a hole in the middle is worse than none. Payloads are decoded without `:safe` so that a conversation holding a failed turn (an exception or atom from a module a fresh node has not loaded) can be resumed; the files are private (mode 0600), checksummed, and the directory must be trusted and single-writer. A session id becomes a file name only if it has the shape `Mead.UUID.generate/0` produces.
+A session is one append-only file named after its id. Each record has this layout:
 
-`Mead.resume_session/2` takes the options of `start_session/1` (the handler and the timeout are not stored), loads the file, and starts the pair with the stored turns; the server then marks the turns that were running as interrupted and records that. `Mead.stop_session/1` keeps the file, and `Mead.delete_session/1` removes it and the ledger aggregate. A write that fails is rolled back to the size the file had before it, and resuming and deleting the same id are serialised with a lock. Known limits: the file still grows with the number of turns (compaction only halves it), the rollback itself can fail on a dying disk, and the ledger is journaled in its own file, not in the session files. The full design is in `docs/superpowers/specs/2026-10-24-persistence-design.md`.
+```
+[4-byte length][4-byte CRC32 of the length][4-byte CRC32 of the payload][term_to_binary payload]
+```
 
-`Mead.list_sessions/0` lists the stored conversations newest first, each with its `:session_id`, the `:updated_at` of its file, and whether it `:running`. `Mead.Session.Store.list/1` reads only file names and times, never content, so its cost does not grow with the length of the conversations and a damaged file is listed like any other (it fails at resume). `Mead.Session.Pool.stop_session/1` returns only once the registry has released the id, so a stop followed at once by a resume or start of the same id cannot find the old entry.
+Each record is the encoding of one event:
 
-Every turn leaves two records, `{:append, turn}` when it starts and `{:replace_last, turn}` when it closes, so a file is about twice the size it needs. `Mead.Session.Store.compact/3` rewrites it as one `{:append, turn}` per turn into `<id>.log.tmp` (mode `0600`), syncs it, and renames it over the log; `Store.load/2` returns the same turns before and after, a crash leaves the old file or the new one, and a file that would not shrink is left alone. Compaction runs at three points: at `resume_session/2`, inside `History` once a live file reaches `compact_after_bytes` (default 1 MiB, under `config :mead, :storage`) and is also at least 1.5 times its size after the last compaction, which keeps the rewrite from happening on every turn, and on request through `Mead.compact_session/1` or the `compact_session` MCP tool. A failed compaction only logs a warning and never fails a turn, a resume or a stop. A resume marks the turns that were running as interrupted before it compacts, so a file that shrinks is already canonical after one resume; one with nothing to remove is left alone and the history writes the interrupt marker as before. The full design is in `docs/superpowers/specs/2026-10-25-compaction-design.md`. Compaction keeps every turn unless `config :mead, :storage, max_turns: N` is set: then the live compaction, the compaction at resume and `compact_session/1` keep only the newest N turns, in memory and in the file, and the older ones are gone (off by default, because it is the one setting that deletes conversation).
+* `{:append, turn}` when a turn starts;
+* `{:replace_last, turn}` when the newest turn is closed;
+* `:interrupt` when turns still running became interrupted.
+
+Replaying the events rebuilds the list the history agent held. Without the setting nothing is written, and `Mead.resume_session/2` answers `{:error, :not_found}`.
+
+### Writing
+
+`Mead.Session.History` keeps the directory in its state.
+
+* Only `append/2` is write-first. A turn that cannot be recorded is refused with `{:error, {:persistence, reason}}` before the handler starts, and memory is left untouched.
+* `update_last/2` and `mark_interrupted/1` always change memory and then try to write, because the caller already holds the answer. A failed write there is logged once and the reply is unchanged.
+* A closed turn that never reached the disk comes back after a restart as an interrupted turn.
+* A write that fails is rolled back to the size the file had before it.
+* Resuming and deleting the same id are serialised with a lock.
+
+### Reading and damage
+
+* A record that is cut short, or fails its payload checksum, at the end of the file is what a crash during a write leaves. It is dropped with a warning, and `Mead.resume_session/2` cuts it off the file before the session writes again.
+* The length has a checksum of its own, so a damaged header is never mistaken for a cut write.
+* Damage anywhere else is `{:error, :corrupt_history}`, because a conversation with a hole in the middle is worse than none.
+* Payloads are decoded without `:safe`, so that a conversation holding a failed turn (an exception or atom from a module a fresh node has not loaded) can be resumed. The files are private (mode 0600) and checksummed, and the directory must be trusted and single-writer.
+* A session id becomes a file name only if it has the shape `Mead.UUID.generate/0` produces.
+
+### Resume, stop and delete
+
+* `Mead.resume_session/2` takes the options of `start_session/1` (the handler and the timeout are not stored), loads the file, and starts the pair with the stored turns. The server then marks the turns that were running as interrupted and records that.
+* `Mead.stop_session/1` keeps the file.
+* `Mead.delete_session/1` removes the file and the ledger aggregate.
+* `Mead.Session.Pool.stop_session/1` returns only once the registry has released the id, so a stop followed at once by a resume or start of the same id cannot find the old entry.
+
+### Listing
+
+`Mead.list_sessions/0` lists the stored conversations newest first. Each entry has its `:session_id`, the `:updated_at` of its file, and whether it is `:running`.
+
+`Mead.Session.Store.list/1` reads only file names and times, never content. Its cost does not grow with the length of the conversations, and a damaged file is listed like any other (it fails at resume).
+
+### Compaction
+
+Every turn leaves two records, `{:append, turn}` when it starts and `{:replace_last, turn}` when it closes, so a file is about twice the size it needs.
+
+`Mead.Session.Store.compact/3` rewrites it as one `{:append, turn}` per turn:
+
+1. It writes `<id>.log.tmp` (mode `0600`).
+2. It syncs the file.
+3. It renames it over the log.
+
+`Store.load/2` returns the same turns before and after, a crash leaves the old file or the new one, and a file that would not shrink is left alone.
+
+Compaction runs at three points:
+
+* at `resume_session/2`;
+* inside `History`, once a live file reaches `compact_after_bytes` (default 1 MiB, under `config :mead, :storage`) and is also at least 1.5 times its size after the last compaction, which keeps the rewrite from happening on every turn;
+* on request, through `Mead.compact_session/1` or the `compact_session` MCP tool.
+
+A failed compaction only logs a warning. It never fails a turn, a resume or a stop.
+
+A resume marks the turns that were running as interrupted before it compacts, so a file that shrinks is already canonical after one resume. One with nothing to remove is left alone, and the history writes the interrupt marker as before.
+
+### Trimming old turns
+
+Compaction keeps every turn unless `config :mead, :storage, max_turns: N` is set. Then the live compaction, the compaction at resume and `compact_session/1` keep only the newest N turns, in memory and in the file, and the older ones are gone. It is off by default, because it is the one setting that deletes conversation.
+
+### Known limits
+
+* The file still grows with the number of turns (compaction only halves it).
+* The rollback itself can fail on a dying disk.
+* The ledger is journaled in its own file, not in the session files.
+
+The full design is in `docs/superpowers/specs/2026-10-24-persistence-design.md`, and compaction in `docs/superpowers/specs/2026-10-25-compaction-design.md`.
 
 ## 9. Deck Transport Internals
 
-`config :mead, :deck, token: "...", ticket_ttl_ms: 10_000, permission_timeout_ms: 120_000, heartbeat_ms: 15_000, idle_timeout_ms: 90_000, resume_deadline_ms: 10_000, queue_limit: 10, event_log_limit: 10_000, default_policy_level: :ask_for_risky` turns the deck on; the token is a secret separate from the MCP token, and without it no deck route exists. The deck shares the one `Bandit` listener of `Mead.MCP.Server` (port, address, `allowed_origins` and connection limit come from `:mcp_server`), which starts when either token is set, behind `Mead.Gateway`: the first path segment `deck` goes to `Mead.Deck.Plug`, everything else to the MCP plug.
+### Turning it on
 
-`POST /deck/ticket` takes the deck bearer token (checked in constant time before the body is read) and an optional `{"session_id": "<uuid>"}`: no id starts a session with `Mead.Router` as handler, a running id is reused, a stopped id with a stored history is resumed, anything else is 404. The answer is `{"ticket", "session_id", "expires_in_ms"}`. `GET /deck/socket?ticket=...` redeems the ticket (an atomic ETS take, so two attempts with one ticket upgrade at most one) and upgrades to a WebSocket served by `Mead.Deck.Socket`; a request that is not a valid upgrade is refused with 426 before the ticket is touched, and the `Origin` rule is the same as MCP's (`Mead.Origin`). The socket's first message must be `session.resume {last_sequence}` within `resume_deadline_ms`; it answers with an unsequenced `session.snapshot` and replays every sequenced event after `last_sequence` from the log.
+```elixir
+config :mead, :deck,
+  token: "...",
+  ticket_ttl_ms: 10_000,
+  permission_timeout_ms: 120_000,
+  heartbeat_ms: 15_000,
+  idle_timeout_ms: 90_000,
+  resume_deadline_ms: 10_000,
+  queue_limit: 10,
+  event_log_limit: 10_000,
+  default_policy_level: :ask_for_risky
+```
 
-`Mead.Deck.Channel` is the state: one process per session that owns the event sequence, the prompt queue and the running turn, so a reconnect or a second device finds the same state. Every sequenced event is appended to `<id>.events` (`Mead.Deck.EventLog`, mode 0600, one record per event on the session file framing, a torn tail cut on open) before anyone is sent it, and a log that cannot be written stops the channel. `prompt.send` is idempotent on `client_message_id`, prompts wait behind at most `queue_limit` others, and each turn runs through `Mead.submit_turn/3` with `route: :auto, tools: :effect`. When a turn ends and nothing is queued, a log longer than `event_log_limit` is compacted (`EventLog.compact/2`: the newest events stay, plus the latest `policy.updated`, rewritten through a temporary file and a rename); `session.snapshot` carries `first_sequence`, the lowest sequence a replay can start from, so a client resuming from an older one knows the middle is gone. A dropped prompt's `client_message_id` is forgotten, so a resend of that old message would be accepted again. `stop_session/1` keeps the event log, `delete_session/1` removes it.
+* The token is a secret separate from the MCP token. Without it, no deck route exists.
+* The deck shares the one `Bandit` listener of `Mead.MCP.Server`. Port, address, `allowed_origins` and the connection limit come from `:mcp_server`. The listener starts when either token is set.
+* `Mead.Gateway` sits in front: the first path segment `deck` goes to `Mead.Deck.Plug`, and everything else goes to the MCP plug.
 
-Permissions: each deck turn carries `Mead.Deck.Interaction`, so `Mead.Router` asks the channel before every tool call (`Mead.Router.Interaction`; a turn without one keeps the old path, and a denied call never reaches `Mead.MCP.Hub`). The tool's class decides the risk: `:read` is low and `:effect` is high. The policy level (`ask_always`, `ask_for_risky`, `allow_all`; the last `policy.updated` in the log, else `default_policy_level`) decides what happens: `allow_all` emits `permission.requested` and at once `permission.resolved` with `decided_by_policy`, `ask_for_risky` runs a `:read` call silently, and anything else emits `permission.requested` and waits. While it waits the turn clock is paused (`Mead.Session.Server.pause_clock/1`), the first valid `permission.respond` wins (`allow_once`, `allow_always` or `reject_once`, `decided_by_device` is the optional `device_id` the client sent in `session.resume`, else `device-<n>`, numbered per channel as sockets resume), a later answer gets the existing `permission.resolved` again on that socket alone, and `permission_timeout_ms` resolves it as `expired`. `allow_always` allows the call and remembers the tool as `<server>__<tool>`: its `permission.resolved` carries `remember`, the next request for that tool is allowed at once with `decided_by_rule` (under `allow_all` it stays `decided_by_policy`), the rules are rebuilt from the log (and kept through compaction), and `permission.forget {tool}` takes one back with a `permission.forgotten` event. A request whose asker died expires too, and a channel that starts with an unresolved request in its log expires it before serving anyone. Request details are the model's arguments cut at 2 000 characters each and are never logged.
+### Connecting
 
-A client frame that is binary, over 64 KiB, not JSON, not an object, of an unknown type or with an invalid payload is ignored and logged by reason only; more than 20 in a minute close the socket (1008). The transport itself bounds a frame at 1 MiB and closes the connection (1009) above that. A heartbeat goes out every `heartbeat_ms` whatever a turn is doing, followed by a WebSocket ping; any frame from the client (text, ping or pong) counts as activity, and a socket with none for `idle_timeout_ms` (default 90 000, must exceed `heartbeat_ms`) is closed with 1001 "idle". A client that answers pings by itself therefore never times out.
+1. **Ticket.** `POST /deck/ticket` takes the deck bearer token (checked in constant time before the body is read) and an optional `{"session_id": "<uuid>"}`.
+   * No id starts a session with `Mead.Router` as handler.
+   * A running id is reused.
+   * A stopped id with a stored history is resumed.
+   * Anything else is 404.
+   * The answer is `{"ticket", "session_id", "expires_in_ms"}`.
+2. **Socket.** `GET /deck/socket?ticket=...` redeems the ticket and upgrades to a WebSocket served by `Mead.Deck.Socket`.
+   * Redeeming is an atomic ETS take, so two attempts with one ticket upgrade at most one.
+   * A request that is not a valid upgrade is refused with 426 before the ticket is touched.
+   * The `Origin` rule is the same as MCP's (`Mead.Origin`).
+3. **Resume.** The socket's first message must be `session.resume {last_sequence}` within `resume_deadline_ms`. The server answers with an unsequenced `session.snapshot` and replays every sequenced event after `last_sequence` from the log.
 
-Questions: when a turn has an interaction and at least one other tool, the router offers the model a built-in `ask_user` tool (a prompt and 2 to 6 options). It is answered by the router itself, never gated by the policy and never sent to the hub; MCP tool names always contain `__`, so no server can shadow it. The channel emits `choice.requested`, pauses the clock like a permission, and the first valid `choice.respond` wins; `permission_timeout_ms` resolves it with no option, and the model then reads "The person did not choose in time." A turn whose provider cannot be asked gets "The person could not be asked."
+### The channel and the event log
 
-Streaming and cancellation: each fragment a streaming provider produces becomes a sequenced `text.delta`, and a turn that streamed does not emit its final text again. A provider that cannot stream still emits its whole answer as one `text.delta`. A running tool call is registered with the channel (`register_call/3`) so `tool_call.cancel` can stop it; the model sees the call as failed. Each finished turn emits two `metric.updated` events, `tokens_in` and `tokens_out`. The opt-in test `test/mead/deck/live_ollama_test.exs` (`mix test --include live`) drives the whole stack against a local `llama3.2:3b`. A turn that ends in an error emits `turn.failed {turn_id, reason}` (a stream cut off midway keeps its fragments and then fails), and tool cards still open at that moment are killed and closed as `failed`. Recovery: each turn ends with one `tokens_out` metric that carries its `turn_id`, so a new channel finds the prompts that never finished in the log; the first was running when the channel died and is reported as `turn.failed` with reason `interrupted` (its open tool cards closed as `failed`), and the ones behind it run again. A tool process also ends when the router that started it dies.
+`Mead.Deck.Channel` is the state: one process per session that owns the event sequence, the prompt queue and the running turn. A reconnect or a second device therefore finds the same state.
+
+* Every sequenced event is appended to `<id>.events` before anyone is sent it. The log is `Mead.Deck.EventLog`: mode 0600, one record per event on the session file framing, a torn tail cut on open. A log that cannot be written stops the channel.
+* `prompt.send` is idempotent on `client_message_id`.
+* Prompts wait behind at most `queue_limit` others.
+* Each turn runs through `Mead.submit_turn/3` with `route: :auto, tools: :effect`.
+* When a turn ends and nothing is queued, a log longer than `event_log_limit` is compacted. `EventLog.compact/2` keeps the newest events plus the latest `policy.updated`, rewritten through a temporary file and a rename.
+* `session.snapshot` carries `first_sequence`, the lowest sequence a replay can start from, so a client resuming from an older one knows the middle is gone.
+* A dropped prompt's `client_message_id` is forgotten, so a resend of that old message would be accepted again.
+* `stop_session/1` keeps the event log, and `delete_session/1` removes it.
+
+### Permissions
+
+Each deck turn carries `Mead.Deck.Interaction`, so `Mead.Router` asks the channel before every tool call (`Mead.Router.Interaction`). A turn without one keeps the old path. A denied call never reaches `Mead.MCP.Hub`.
+
+**Deciding**
+
+* The tool's class decides the risk: `:read` is low and `:effect` is high.
+* The policy level decides what happens. It is the last `policy.updated` in the log, else `default_policy_level`.
+
+| Policy level | What happens |
+|---|---|
+| `allow_all` | Emits `permission.requested` and at once `permission.resolved` with `decided_by_policy`. |
+| `ask_for_risky` | Runs a `:read` call silently. Anything else emits `permission.requested` and waits. |
+| `ask_always` | Emits `permission.requested` and waits. |
+
+**While a request waits**
+
+* The turn clock is paused (`Mead.Session.Server.pause_clock/1`).
+* The first valid `permission.respond` wins. Its answer is `allow_once`, `allow_always` or `reject_once`.
+* `decided_by_device` is the optional `device_id` the client sent in `session.resume`, else `device-<n>`, numbered per channel as sockets resume.
+* A later answer gets the existing `permission.resolved` again, on that socket alone.
+* `permission_timeout_ms` resolves the request as `expired`.
+* A request whose asker died expires too. A channel that starts with an unresolved request in its log expires it before serving anyone.
+
+**Remembering a choice**
+
+* `allow_always` allows the call and remembers the tool as `<server>__<tool>`. Its `permission.resolved` carries `remember`.
+* The next request for that tool is allowed at once with `decided_by_rule`. Under `allow_all` it stays `decided_by_policy`.
+* The rules are rebuilt from the log and kept through compaction.
+* `permission.forget {tool}` takes one back with a `permission.forgotten` event.
+
+Request details are the model's arguments cut at 2 000 characters each, and they are never logged.
+
+### Frames, heartbeat and idle timeout
+
+* A client frame that is binary, over 64 KiB, not JSON, not an object, of an unknown type or with an invalid payload is ignored and logged by reason only. More than 20 in a minute close the socket (1008).
+* The transport itself bounds a frame at 1 MiB and closes the connection (1009) above that.
+* A heartbeat goes out every `heartbeat_ms` whatever a turn is doing, followed by a WebSocket ping.
+* Any frame from the client (text, ping or pong) counts as activity. A socket with none for `idle_timeout_ms` (default 90 000, must exceed `heartbeat_ms`) is closed with 1001 "idle". A client that answers pings by itself therefore never times out.
+
+### Questions
+
+When a turn has an interaction and at least one other tool, the router offers the model a built-in `ask_user` tool (a prompt and 2 to 6 options).
+
+* The router answers it itself. It is never gated by the policy and never sent to the hub. MCP tool names always contain `__`, so no server can shadow it.
+* The channel emits `choice.requested`, pauses the clock like a permission, and the first valid `choice.respond` wins.
+* `permission_timeout_ms` resolves it with no option, and the model then reads "The person did not choose in time."
+* A turn whose provider cannot be asked gets "The person could not be asked."
+
+### Streaming and cancellation
+
+* Each fragment a streaming provider produces becomes a sequenced `text.delta`, and a turn that streamed does not emit its final text again. A provider that cannot stream still emits its whole answer as one `text.delta`.
+* A running tool call is registered with the channel (`register_call/3`), so `tool_call.cancel` can stop it. The model sees the call as failed.
+* Each finished turn emits two `metric.updated` events, `tokens_in` and `tokens_out`.
+* A turn that ends in an error emits `turn.failed {turn_id, reason}`. A stream cut off midway keeps its fragments and then fails. Tool cards still open at that moment are killed and closed as `failed`.
+* A tool process also ends when the router that started it dies.
+
+### Recovery
+
+Each turn ends with one `tokens_out` metric that carries its `turn_id`. A new channel uses it to find the prompts that never finished in the log.
+
+* The first of them was running when the channel died. It is reported as `turn.failed` with reason `interrupted`, and its open tool cards are closed as `failed`.
+* The ones behind it run again.
+
+### Live test
+
+The opt-in test `test/mead/deck/live_ollama_test.exs` (`mix test --include live`) drives the whole stack against a local `llama3.2:3b`.
