@@ -58,7 +58,7 @@ flowchart LR
     Msg["User Input"] --> Classifier{"Fast Classifier - Heuristic / Small Model"}
     Classifier -->|"Routine, Triage, Formatting"| LocalExec["Local Executor - Ollama"]
     Classifier -->|"Complex Reasoning, Synthesis"| CloudExec["Cloud Executor - Anthropic"]
-    LocalExec --> TurnHandler["Response Formatter & Action Cards"]
+    LocalExec --> TurnHandler["Response Formatter & Semantic Events"]
     CloudExec --> TurnHandler
     TurnHandler --> Ledger["Mead.Ledger - Token Usage"]
 ```
