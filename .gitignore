@@ -30,3 +30,4 @@ site/
 
 # Internal specs, plans and logs live in the private project-docs store
 docs/superpowers
+docs/ECOSYSTEM.md
