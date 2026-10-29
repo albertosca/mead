@@ -68,10 +68,6 @@ Persistence, the MCP hub and server, and the deck endpoint are each enabled by t
 | The ledger updates ETS in the emitting process | A turn killed by timeout emits no event and is not counted. |
 | History is never trimmed by default | The conversation file grows until you set `max_turns`. |
 
-## Related projects
-
-`agent-swarm-deck` is the Flutter client that talks to `mead` over the deck WebSocket, and `open-butler` holds the assistant's domain logic. Neither is needed to run `mead`.
-
 ## Contributing and security
 
 See [CONTRIBUTING.md](CONTRIBUTING.md), and [SECURITY.md](SECURITY.md) to report a vulnerability privately.

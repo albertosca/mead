@@ -68,10 +68,6 @@ Persistência, hub e servidor MCP e o endpoint do deck são ligados cada um por 
 | O ledger atualiza o ETS no processo que emitiu o evento | Um turno morto por timeout não emite evento e não é contado. |
 | O histórico nunca é cortado por padrão | O arquivo da conversa cresce até você definir `max_turns`. |
 
-## Projetos relacionados
-
-`agent-swarm-deck` é o cliente Flutter que fala com o `mead` pelo WebSocket do deck, e `open-butler` guarda a lógica de domínio do assistente. Nenhum dos dois é necessário para rodar o `mead`.
-
 ## Contribuir e segurança
 
 Veja o [CONTRIBUTING.md](CONTRIBUTING.md) e o [SECURITY.md](SECURITY.md) para reportar uma vulnerabilidade em privado.
