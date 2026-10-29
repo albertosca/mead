@@ -57,7 +57,7 @@ defmodule Mead.Deck.RecoveryTest do
 
   # Every sequenced event until `done` is true for one of them.
   defp events_until(client, done, collected \\ []) do
-    {client, envelope} = WebSocketClient.receive_json(client, 5_000)
+    {client, envelope} = WebSocketClient.receive_json(client, 15_000)
     assert is_map(envelope), "expected an event, got #{inspect(envelope)}"
 
     cond do

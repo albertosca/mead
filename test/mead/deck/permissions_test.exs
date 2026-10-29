@@ -39,7 +39,7 @@ defmodule Mead.Deck.PermissionsTest do
 
   # Every sequenced event up to and including the first of `type`, heartbeats left out.
   defp events_until(client, type, collected \\ []) do
-    {client, envelope} = WebSocketClient.receive_json(client, 3_000)
+    {client, envelope} = WebSocketClient.receive_json(client, 15_000)
     assert is_map(envelope), "expected an event before #{type}, got #{inspect(envelope)}"
 
     if envelope["type"] == "heartbeat" do

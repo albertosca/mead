@@ -41,7 +41,7 @@ defmodule Mead.Test.SseClient do
   The next event as `{client, event}`; `:timeout` when none arrived in time, `:closed` once the
   server has ended the stream and nothing is left to read. Comments (`: ...`) are skipped.
   """
-  def receive_event(client, timeout \\ 2_000) do
+  def receive_event(client, timeout \\ 10_000) do
     case take_event(client.buffer) do
       {:ok, event, rest} ->
         {%{client | buffer: rest}, event}
@@ -67,7 +67,7 @@ defmodule Mead.Test.SseClient do
   end
 
   @doc "The next event, with its data decoded as JSON: `{client, event_with_map_data}`."
-  def receive_json(client, timeout \\ 2_000) do
+  def receive_json(client, timeout \\ 10_000) do
     case receive_event(client, timeout) do
       {client, %{data: data} = event} -> {client, %{event | data: JSON.decode!(data)}}
       other -> other
@@ -75,7 +75,7 @@ defmodule Mead.Test.SseClient do
   end
 
   @doc "Reads events until an unnamed one whose envelope has `type`; raises on close or timeout."
-  def receive_type(client, type, timeout \\ 2_000) do
+  def receive_type(client, type, timeout \\ 10_000) do
     case receive_json(client, timeout) do
       {client, %{event: nil, data: %{"type" => ^type}} = event} -> {client, event}
       {client, %{}} -> receive_type(client, type, timeout)

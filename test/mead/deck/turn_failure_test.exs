@@ -53,7 +53,7 @@ defmodule Mead.Deck.TurnFailureTest do
 
   # Every sequenced event up to and including the first one that satisfies `done`.
   defp events_until(client, done, collected \\ []) do
-    {client, envelope} = WebSocketClient.receive_json(client, 5_000)
+    {client, envelope} = WebSocketClient.receive_json(client, 15_000)
     assert is_map(envelope), "expected an event, got #{inspect(envelope)}"
 
     cond do

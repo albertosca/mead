@@ -66,7 +66,7 @@ defmodule Mead.Deck.FullFlowTest do
   end
 
   defp next_event(client) do
-    {client, envelope} = WebSocketClient.receive_json(client, 5_000)
+    {client, envelope} = WebSocketClient.receive_json(client, 15_000)
     assert is_map(envelope), "expected an event, got #{inspect(envelope)}"
 
     if envelope["type"] == "heartbeat", do: next_event(client), else: {client, envelope}

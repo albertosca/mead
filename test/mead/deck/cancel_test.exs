@@ -54,7 +54,7 @@ defmodule Mead.Deck.CancelTest do
   end
 
   defp events_until(client, type, collected \\ []) do
-    {client, envelope} = WebSocketClient.receive_json(client, 3_000)
+    {client, envelope} = WebSocketClient.receive_json(client, 15_000)
     assert is_map(envelope), "expected an event before #{type}, got #{inspect(envelope)}"
 
     cond do

@@ -38,7 +38,7 @@ defmodule Mead.Deck.RememberedRulesTest do
   end
 
   defp events_until(client, matches?, collected \\ []) do
-    {client, envelope} = WebSocketClient.receive_json(client, 3_000)
+    {client, envelope} = WebSocketClient.receive_json(client, 15_000)
     assert is_map(envelope), "expected an event, got #{inspect(envelope)}"
 
     if envelope["type"] == "heartbeat" do

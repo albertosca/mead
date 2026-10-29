@@ -43,8 +43,8 @@ defmodule Mead.Deck.StreamingTest do
   defp open(directory) do
     server =
       DeckServer.start(directory, [],
-        # Five thousand fragments are five thousand file writes; a slow disk must not end the turn.
-        session_options: [handler: Mead.Test.ToolHandler, turn_timeout: 60_000]
+        # Five thousand fragments are five thousand file writes; a slow disk or a loaded machine must not end the turn.
+        session_options: [handler: Mead.Test.ToolHandler, turn_timeout: 150_000]
       )
 
     %{"ticket" => ticket, "session_id" => session_id} = DeckServer.ticket(server)
@@ -56,7 +56,7 @@ defmodule Mead.Deck.StreamingTest do
 
   # Every sequenced event up to and including the last metric of the turn.
   defp events_until_turn_end(client, collected \\ []) do
-    {client, envelope} = WebSocketClient.receive_json(client, 5_000)
+    {client, envelope} = WebSocketClient.receive_json(client, 15_000)
     assert is_map(envelope), "expected an event, got #{inspect(envelope)}"
 
     cond do
@@ -116,6 +116,8 @@ defmodule Mead.Deck.StreamingTest do
     refute Enum.any?(history, &(&1.output == "fake reply"))
   end
 
+  # Under a loaded machine this takes up to ten times its idle five seconds.
+  @tag timeout: 180_000
   test "five thousand fragments keep the sequence gapless and the log readable",
        %{directory: directory} do
     text = String.duplicate("x", 5_000)
@@ -147,7 +149,7 @@ defmodule Mead.Deck.StreamingTest do
   end
 
   defp replay_all(client, collected \\ []) do
-    case WebSocketClient.receive_json(client, 500) do
+    case WebSocketClient.receive_json(client, 1_500) do
       {client, :timeout} -> {client, collected}
       {client, %{"type" => "heartbeat"}} -> replay_all(client, collected)
       {client, envelope} -> replay_all(client, collected ++ [envelope])

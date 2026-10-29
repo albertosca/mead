@@ -116,7 +116,7 @@ defmodule Mead.Test.WebSocketClient do
   defp accept_frame(frame, client), do: %{client | frames: client.frames ++ [frame]}
 
   @doc "The next text frame decoded as JSON: `{client, map}`, or `{client, other_frame}`."
-  def receive_json(client, timeout \\ 2_000) do
+  def receive_json(client, timeout \\ 10_000) do
     case receive_frame(client, timeout) do
       {client, {:text, text}} -> {client, JSON.decode!(text)}
       {client, other} -> {client, other}
@@ -124,7 +124,7 @@ defmodule Mead.Test.WebSocketClient do
   end
 
   @doc "Reads frames until one of `type` arrives; raises on a close, a lost connection or a timeout."
-  def receive_type(client, type, timeout \\ 2_000) do
+  def receive_type(client, type, timeout \\ 10_000) do
     case receive_json(client, timeout) do
       {client, %{"type" => ^type} = envelope} -> {client, envelope}
       {client, %{}} -> receive_type(client, type, timeout)
