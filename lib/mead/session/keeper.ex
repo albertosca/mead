@@ -66,6 +66,34 @@ defmodule Mead.Session.Keeper do
     :ok
   end
 
+  @doc """
+  Brings back every suspended session on this node whose server is still running (see
+  `Mead.Session.Server.revive/1`). Always `:ok`; a server that is not suspended is left alone.
+  """
+  @spec revive_all() :: :ok
+  def revive_all do
+    for {_id, session, _type, _modules} <- children(Pool),
+        is_pid(session),
+        {Server, server, _type, _modules} <- children(session),
+        is_pid(server) do
+      Server.revive(server)
+    end
+
+    :ok
+  end
+
+  @doc """
+  Returns once the recovery the keeper is running, if any, is over. Recovery runs inside the
+  keeper, so this call is answered only after it; an orderly stop waits here before suspending,
+  so it also suspends the sessions recovery just resumed. `:ok` when the keeper is not running.
+  """
+  @spec await_recovery(timeout()) :: :ok
+  def await_recovery(timeout \\ 30_000) do
+    GenServer.call(__MODULE__, :await_recovery, timeout)
+  catch
+    :exit, _reason -> :ok
+  end
+
   # A supervisor that is gone or stopping has no children to suspend.
   defp children(supervisor) do
     Supervisor.which_children(supervisor)
@@ -89,6 +117,9 @@ defmodule Mead.Session.Keeper do
 
     {:noreply, state}
   end
+
+  @impl true
+  def handle_call(:await_recovery, _from, state), do: {:reply, :ok, state}
 
   # After a pool restart the processes of the old pool's sessions can still be registered for a
   # moment (dying, or dead with the registry not yet told), and resuming such a session would

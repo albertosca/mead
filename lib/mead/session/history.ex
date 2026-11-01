@@ -163,7 +163,9 @@ defmodule Mead.Session.History do
   the last attempt ran under, nothing restarted around the session, so the session itself cut
   the attempt, and the continuation spends one of `maximum` crash continuations. A changed
   generation means an infrastructure restart cut it, and it spends only the total budget,
-  `options[:total_maximum]` (default #{@default_total_resumes}).
+  `options[:total_maximum]` (default #{@default_total_resumes}). `options[:infrastructure]` set to
+  `true` says the same without a generation change: the caller knows the infrastructure cut the
+  attempt (a suspension that no pool restart followed).
 
   `{:error, :exhausted}` once either budget is spent, and `{:error, :nothing_to_resume}` when the
   newest turn is not in progress.
@@ -173,10 +175,14 @@ defmodule Mead.Session.History do
   def begin_resume(session_id, maximum, options \\ []) do
     generation = Keyword.get(options, :generation)
     total_maximum = Keyword.get(options, :total_maximum, @default_total_resumes)
+    session_cut = not Keyword.get(options, :infrastructure, false)
 
     Agent.get_and_update(Session.via(session_id, :history), fn
       %{turns: [%Turn{status: :in_progress} = newest | older]} = state ->
-        crash_count = newest.crash_resumes + if(newest.generation == generation, do: 1, else: 0)
+        crash_count =
+          newest.crash_resumes +
+            if(session_cut and newest.generation == generation, do: 1, else: 0)
+
         count = newest.resumes + 1
 
         if crash_count > maximum or count > total_maximum do

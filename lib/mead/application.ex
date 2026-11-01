@@ -49,6 +49,9 @@ defmodule Mead.Application do
     if Process.whereis(Mead.Supervisor) do
       try do
         Supervisor.terminate_child(Mead.Supervisor, Mead.MCP.Server)
+        # A recovery still resuming sessions would resume some after this suspension, and their
+        # turns would then run against a stopping hub.
+        Mead.Session.Keeper.await_recovery()
         Mead.Session.Keeper.suspend_all()
       catch
         # The root stopped between the check and the call.

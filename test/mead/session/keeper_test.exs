@@ -154,4 +154,20 @@ defmodule Mead.Session.KeeperTest do
     assert Mead.submit_turn(session_id, {:echo, "late"}) == {:error, :session_crashed}
     assert Keeper.suspend_all() == :ok
   end
+
+  # Recovery runs inside the keeper, so a keeper still busy with it answers only afterwards: an
+  # orderly stop that waits here suspends the sessions recovery resumed too.
+  test "await_recovery returns only once the keeper is free" do
+    keeper = Process.whereis(Keeper)
+    :ok = :sys.suspend(keeper)
+    waiting = Task.async(fn -> Keeper.await_recovery() end)
+
+    try do
+      assert Task.yield(waiting, 200) == nil
+    after
+      :sys.resume(keeper)
+    end
+
+    assert Task.await(waiting) == :ok
+  end
 end

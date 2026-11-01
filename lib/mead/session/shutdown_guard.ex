@@ -9,6 +9,12 @@ defmodule Mead.Session.ShutdownGuard do
   every session (`Mead.Session.Keeper.suspend_all/0`), and the keeper continues their turns once the
   pool is back.
 
+  A crash of a child between the pool and the hub (the keeper, the deck channel supervisor) also
+  stops this child while the hub is up, so it suspends, but the pool is not restarted and the
+  suspended servers stay. So when this child starts again it revives every suspended session
+  (`Mead.Session.Keeper.revive_all/0`), and their turns continue; after a restart that did replace
+  the pool, and at boot, there is none.
+
   A crash of the hub itself also stops this child, after the hub is gone. It then does nothing: the
   sessions keep running, and the hub comes back on its own. An orderly
   stop has already suspended everything in `prep_stop/1`, so a second pass finds nothing to do.
@@ -23,6 +29,7 @@ defmodule Mead.Session.ShutdownGuard do
   @impl true
   def init(nil) do
     Process.flag(:trap_exit, true)
+    Mead.Session.Keeper.revive_all()
     {:ok, nil}
   end
 

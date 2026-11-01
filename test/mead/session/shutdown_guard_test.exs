@@ -112,6 +112,30 @@ defmodule Mead.Session.ShutdownGuardTest do
     end
   end
 
+  # The keeper and the channel supervisor sit after the pool and before the hub: their crash stops
+  # the guard while the hub is up, so it suspends the turns, but the pool is not restarted to
+  # bring them back. The guard that starts again revives them, and the session takes turns again.
+  for {name, crashed} <- [keeper: Mead.Session.Keeper, channels: Mead.Deck.ChannelSupervisor] do
+    test "a #{name} crash suspends the running turn and the guard brings it back",
+         %{session_id: session_id, tmp_dir: directory} do
+      kill_root_child(unquote(crashed))
+
+      assert_receive {:resumed_with, [:a]}, 10_000
+      assert_receive {:handler_at, continued, [:a, :b]}, 10_000
+      send(continued, :release)
+      wait_until(fn -> finished?(session_id) end)
+
+      {:ok, [turn]} = Mead.Session.Store.load(directory, session_id)
+      assert turn.crash_resumes == 0
+
+      input = {:checkpointed, self(), [:c]}
+      later = Task.async(fn -> Mead.submit_turn(session_id, input) end)
+      assert_receive {:handler_at, later_handler, [:c]}, 5_000
+      send(later_handler, :release)
+      assert Task.await(later, 5_000) == {:ok, [:c]}
+    end
+  end
+
   test "a turn supervisor crash leaves the turn in progress, and it continues",
        %{session_id: session_id, tmp_dir: directory} do
     kill_root_child(Mead.TurnSupervisor)

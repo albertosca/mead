@@ -118,6 +118,20 @@ defmodule Mead.Session.Server do
   def suspend(session_id), do: stopping_call(session_id, :suspend, :ok)
 
   @doc """
+  Brings a suspended session back without restarting it: its turn continues from its checkpoint,
+  as after a restart, and it takes submits again. A suspension is normally followed by a pool
+  restart that replaces the server; this is for one that was not. The continuation does not spend
+  the turn's crash budget, since the suspension cut it. `:ok` for a server that is not suspended,
+  and for one that is gone.
+  """
+  @spec revive(pid()) :: :ok
+  def revive(server) when is_pid(server) do
+    GenServer.call(server, :revive)
+  catch
+    :exit, _reason -> :ok
+  end
+
+  @doc """
   The interaction attached to the running turn, with whether it receives streamed text; `:none`
   when nothing is attached, no turn runs, or the session is unknown.
   """
@@ -194,9 +208,14 @@ defmodule Mead.Session.Server do
   end
 
   @impl true
-  def handle_continue(:resume, state) do
+  def handle_continue(:resume, state), do: continue_resumed(state, false)
+
+  def handle_continue(:revive, state), do: continue_resumed(state, true)
+
+  defp continue_resumed(state, infrastructure) do
     case History.begin_resume(state.session_id, @maximum_resumes,
-           generation: Generation.current()
+           generation: Generation.current(),
+           infrastructure: infrastructure
          ) do
       {:ok, turn} ->
         earlier = state.session_id |> History.all() |> Enum.drop(-1)
@@ -329,6 +348,16 @@ defmodule Mead.Session.Server do
     stop_task(state.running)
     {:reply, :ok, suspended(state)}
   end
+
+  def handle_call(:revive, _from, %{stopping: :suspended} = state) do
+    state = %{state | stopping: false}
+
+    if continuable?(History.newest(state.session_id), state.handler),
+      do: {:reply, :ok, state, {:continue, :revive}},
+      else: {:reply, :ok, abandon_in_progress(state)}
+  end
+
+  def handle_call(:revive, _from, state), do: {:reply, :ok, state}
 
   def handle_call(request, _from, %{running: nil} = state)
       when request in [:pause_clock, :resume_clock],
