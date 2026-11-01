@@ -114,7 +114,7 @@ defmodule Mead.RouterInteractionTest do
     assert %{content: [result]} = List.last(second_conversation_messages())
 
     assert result.content ==
-             "Nobody was attached to approve this tool call after the server restarted, so it was not run."
+             "Nobody was there to approve this call after the server restarted, so it was not run."
   end
 
   test "an unknown tool is reported failed without asking anyone" do

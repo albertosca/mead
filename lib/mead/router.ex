@@ -699,8 +699,7 @@ defmodule Mead.Router do
     do: "The person did not answer in time, so this tool call was not run."
 
   defp denial_text(:unattended),
-    do:
-      "Nobody was attached to approve this tool call after the server restarted, so it was not run."
+    do: "Nobody was there to approve this call after the server restarted, so it was not run."
 
   defp describe(:unknown_tool), do: "unknown tool"
   defp describe(:not_allowed), do: "this tool is not allowed in this turn"

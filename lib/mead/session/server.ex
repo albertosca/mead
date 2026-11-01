@@ -37,6 +37,13 @@ defmodule Mead.Session.Server do
   so the turn stays in progress with its marker and continues at the next boot. After either, the
   server refuses every submit with `{:error, :session_stopped}` until it terminates.
 
+  A turn never holds the caller's interaction itself. Its handler gets
+  `interaction: {Mead.Session.InteractionRelay, %{session_id: id}}` whenever the turn is
+  interactive, and the server keeps the caller's interaction as the one attached to the running
+  turn: the submitted one first (the only one that receives streamed text), then the one of any
+  submit that joins the turn, which replaces it. A continued turn starts with none attached; see
+  `Mead.Session.InteractionRelay` for what happens until one is.
+
   A reader that bypasses the server can observe an interrupted turn as in progress in the moment
   between the new server registering its name and finishing `init/1`.
   """
@@ -47,6 +54,7 @@ defmodule Mead.Session.Server do
 
   alias Mead.Session
   alias Mead.Session.History
+  alias Mead.Session.InteractionRelay
   alias Mead.Session.Pending
   alias Mead.Session.Turn
 
@@ -92,6 +100,42 @@ defmodule Mead.Session.Server do
   """
   @spec suspend(String.t()) :: :ok
   def suspend(session_id), do: stopping_call(session_id, :suspend)
+
+  @doc """
+  The interaction attached to the running turn, with whether it receives streamed text; `:none`
+  when nothing is attached, no turn runs, or the session is unknown.
+  """
+  @spec attached_interaction(String.t()) :: {:ok, {module(), term()}, boolean()} | :none
+  def attached_interaction(session_id), do: interaction_call(session_id, :attached_interaction)
+
+  @doc """
+  Like `attached_interaction/1`, but with nothing attached it waits up to `grace` milliseconds
+  for a submit that joins the turn with an interaction, with the turn clock paused. A wait that
+  ends with nothing attached makes the running attempt unattended: every later wait in it answers
+  `:none` at once, until an interaction attaches.
+  """
+  @spec await_interaction(String.t(), non_neg_integer()) ::
+          {:ok, {module(), term()}, boolean()} | :none
+  def await_interaction(session_id, grace),
+    do: interaction_call(session_id, {:await_interaction, grace})
+
+  @doc "Detaches `interaction` from the running turn, when it is still the one attached."
+  @spec detach_interaction(String.t(), {module(), term()}) :: :ok
+  def detach_interaction(session_id, interaction) do
+    case interaction_call(session_id, {:detach_interaction, interaction}) do
+      :none -> :ok
+      :ok -> :ok
+    end
+  end
+
+  defp interaction_call(session_id, request) do
+    case Session.whereis(session_id, :server) do
+      nil -> :none
+      server -> GenServer.call(server, request, :infinity)
+    end
+  catch
+    :exit, _reason -> :none
+  end
 
   defp stopping_call(session_id, request) do
     case Session.whereis(session_id, :server) do
@@ -144,6 +188,7 @@ defmodule Mead.Session.Server do
           turn.turn_options
           |> handler_options(state.session_id)
           |> Keyword.put(:checkpoint, checkpoint(state.session_id, turn.resumes))
+          |> put_relay(Map.get(turn.turn_options, :interactive, false), state.session_id)
 
         task =
           Task.Supervisor.async(Mead.TurnSupervisor, fn ->
@@ -210,6 +255,11 @@ defmodule Mead.Session.Server do
     |> Keyword.put(:session_id, session_id)
   end
 
+  defp put_relay(options, false, _session_id), do: options
+
+  defp put_relay(options, true, session_id),
+    do: Keyword.put(options, :interaction, {InteractionRelay, %{session_id: session_id}})
+
   defp checkpoint(session_id, attempt),
     do: fn step -> History.append_step(session_id, attempt, step) end
 
@@ -226,6 +276,7 @@ defmodule Mead.Session.Server do
         start_turn(state, input, options, client_turn_id, from)
 
       %Turn{input: ^input, status: :in_progress} when running != nil ->
+        running = attach(running, Keyword.get(options, :interaction))
         {:noreply, %{state | running: %{running | waiters: [waiter(from) | running.waiters]}}}
 
       %Turn{input: ^input} = turn ->
@@ -267,26 +318,78 @@ defmodule Mead.Session.Server do
       when request in [:pause_clock, :resume_clock],
       do: {:reply, :ok, state}
 
-  def handle_call(:pause_clock, _from, %{running: running} = state) do
-    running =
-      if running.pauses == 0 do
-        Process.cancel_timer(running.timer)
-        %{running | timer: nil, remaining: max(running.deadline - now(), 1)}
-      else
-        running
-      end
-
-    {:reply, :ok, %{state | running: %{running | pauses: running.pauses + 1}}}
-  end
-
-  def handle_call(:resume_clock, _from, %{running: %{pauses: 0}} = state),
-    do: {:reply, :ok, state}
-
-  def handle_call(:resume_clock, _from, %{running: %{pauses: 1} = running} = state),
-    do: {:reply, :ok, %{state | running: start_timer(%{running | pauses: 0}, running.remaining)}}
+  def handle_call(:pause_clock, _from, %{running: running} = state),
+    do: {:reply, :ok, %{state | running: pause(running)}}
 
   def handle_call(:resume_clock, _from, %{running: running} = state),
-    do: {:reply, :ok, %{state | running: %{running | pauses: running.pauses - 1}}}
+    do: {:reply, :ok, %{state | running: resume(running)}}
+
+  def handle_call({:detach_interaction, interaction}, _from, %{running: running} = state)
+      when running != nil and running.interaction == interaction,
+      do: {:reply, :ok, %{state | running: %{running | interaction: nil, streaming: false}}}
+
+  def handle_call({:detach_interaction, _interaction}, _from, state), do: {:reply, :ok, state}
+
+  def handle_call(request, _from, %{running: nil} = state)
+      when request == :attached_interaction or
+             (is_tuple(request) and elem(request, 0) == :await_interaction),
+      do: {:reply, :none, state}
+
+  def handle_call(:attached_interaction, _from, state),
+    do: {:reply, attached(state.running), state}
+
+  def handle_call({:await_interaction, grace}, from, %{running: running} = state) do
+    cond do
+      running.interaction != nil ->
+        {:reply, attached(running), state}
+
+      running.unattended ->
+        {:reply, :none, state}
+
+      true ->
+        reference = make_ref()
+        timer = Process.send_after(self(), {:interaction_grace, reference}, grace)
+        waiter = {from, reference, timer}
+
+        running = %{
+          pause(running)
+          | interaction_waiters: [waiter | running.interaction_waiters]
+        }
+
+        {:noreply, %{state | running: running}}
+    end
+  end
+
+  defp attached(%{interaction: nil}), do: :none
+  defp attached(running), do: {:ok, running.interaction, running.streaming}
+
+  # A joining submit's interaction replaces the attached one, never streams (it missed the start
+  # of the answer), ends an unattended attempt, and answers everyone waiting for one.
+  defp attach(running, nil), do: running
+
+  defp attach(running, interaction) do
+    running = %{running | interaction: interaction, streaming: false, unattended: false}
+
+    Enum.reduce(running.interaction_waiters, %{running | interaction_waiters: []}, fn
+      {from, _reference, timer}, running ->
+        Process.cancel_timer(timer)
+        GenServer.reply(from, {:ok, interaction, false})
+        resume(running)
+    end)
+  end
+
+  # The clock stops at the first open pause and restarts, with the time that was left, when the
+  # last one closes.
+  defp pause(%{pauses: 0} = running) do
+    Process.cancel_timer(running.timer)
+    %{running | timer: nil, remaining: max(running.deadline - now(), 1), pauses: 1}
+  end
+
+  defp pause(running), do: %{running | pauses: running.pauses + 1}
+
+  defp resume(%{pauses: 0} = running), do: running
+  defp resume(%{pauses: 1} = running), do: start_timer(%{running | pauses: 0}, running.remaining)
+  defp resume(running), do: %{running | pauses: running.pauses - 1}
 
   defp start_turn(%{running: running} = state, _input, _options, _client_turn_id, _from)
        when running != nil,
@@ -296,11 +399,14 @@ defmodule Mead.Session.Server do
     handler = state.handler
     history = History.all(state.session_id)
     marked = is_binary(client_turn_id) and resumable?(handler)
+    interaction = Keyword.get(options, :interaction)
 
     handler_options =
       options
+      |> Keyword.delete(:interaction)
       |> Keyword.put(:session_id, state.session_id)
       |> Keyword.put(:checkpoint, checkpoint(state.session_id, 0))
+      |> put_relay(interaction != nil, state.session_id)
 
     turn = Turn.start(input, client_turn_id, turn_options(options))
 
@@ -313,8 +419,8 @@ defmodule Mead.Session.Server do
           handler.handle_turn(history, input, handler_options)
         end)
 
-      {:noreply,
-       %{state | running: new_running(task, [waiter(from)], marked, state.turn_timeout)}}
+      running = new_running(task, [waiter(from)], marked, state.turn_timeout, interaction)
+      {:noreply, %{state | running: running}}
     else
       {:error, _reason} = error ->
         if marked, do: clear_marker(state)
@@ -333,9 +439,20 @@ defmodule Mead.Session.Server do
     end
   end
 
-  defp new_running(task, waiters, marked, turn_timeout) do
+  # The interaction a turn was submitted with is the only one that streams.
+  defp new_running(task, waiters, marked, turn_timeout, interaction \\ nil) do
     start_timer(
-      %{waiters: waiters, task: task, generation: 0, pauses: 0, marked: marked},
+      %{
+        waiters: waiters,
+        task: task,
+        generation: 0,
+        pauses: 0,
+        marked: marked,
+        interaction: interaction,
+        streaming: interaction != nil,
+        unattended: false,
+        interaction_waiters: []
+      },
       turn_timeout
     )
   end
@@ -393,6 +510,20 @@ defmodule Mead.Session.Server do
       {:ok, result} -> conclude(state, normalize(result))
       {:exit, reason} -> conclude(state, {:failed, reason})
       nil -> conclude(state, {:timeout, nil})
+    end
+  end
+
+  # Nothing attached within the grace: this attempt is unattended from now on.
+  def handle_info({:interaction_grace, reference}, %{running: running} = state)
+      when running != nil do
+    case List.keytake(running.interaction_waiters, reference, 1) do
+      {{from, ^reference, _timer}, rest} ->
+        GenServer.reply(from, :none)
+        running = resume(%{running | interaction_waiters: rest, unattended: true})
+        {:noreply, %{state | running: running}}
+
+      nil ->
+        {:noreply, state}
     end
   end
 
