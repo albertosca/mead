@@ -24,7 +24,7 @@ Um turno enviado com `client_turn_id` sobrevive a uma queda do servidor da sess�
 * Mandar de novo a mesma chave e a mesma entrada junta-se ao turno em andamento ou devolve o resultado dele.
 * Um turno é continuado no máximo 3 vezes; depois disso termina `interrupted`, para que um turno que derruba quem o roda não entre em laço.
 * Uma queda do supervisor de turnos ou do registry deixa um turno com chave em andamento, e ele continua quando a árvore volta.
-* Uma chamada `:effect` cancelada, que estourou o tempo, perdeu a conexão ou quebrou enquanto rodava é informada ao modelo como uma que pode ou não ter tido efeito.
+* Uma chamada `:effect` cancelada, que estourou o tempo, perdeu a conexão, recebeu uma resposta ilegível ou quebrou enquanto rodava é informada ao modelo como uma que pode ou não ter tido efeito.
 * O diretório de todo arquivo novo é sincronizado, e todo evento do deck é sincronizado antes de um cliente recebê-lo, então uma queda de energia não perde nome de arquivo nem reaproveita número de sequência.
 * `Mead.stop_session/1` é definitivo: o turno em andamento termina `interrupted` e nunca é continuado. Um turno sem chave, ou cujo handler não sabe retomar, também termina `interrupted` depois de uma queda.
 

@@ -123,7 +123,9 @@ defmodule Mead.Session.ShutdownGuardTest do
 
   # The guard finds the servers through the pool, so a registry that is gone does not crash it
   # before it suspends anything.
-  test "suspend_all works while the registry is down" do
+  test "suspend_all works while the registry is down", %{handler_pid: handler_pid} do
+    handler_monitor = Process.monitor(handler_pid)
+
     log =
       capture_log(fn ->
         registry = Process.whereis(Mead.Registry)
@@ -132,6 +134,8 @@ defmodule Mead.Session.ShutdownGuardTest do
         try do
           assert Process.whereis(Mead.Registry) == nil
           assert Mead.Session.Keeper.suspend_all() == :ok
+          # The running turn was found and suspended, not just skipped.
+          assert_received {:DOWN, ^handler_monitor, :process, ^handler_pid, _reason}
         after
           {:ok, _pid} = Supervisor.restart_child(Mead.Supervisor, Mead.Registry)
           refute Process.whereis(Mead.Registry) in [nil, registry]

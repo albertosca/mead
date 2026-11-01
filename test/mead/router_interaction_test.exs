@@ -218,7 +218,8 @@ defmodule Mead.RouterInteractionTest do
 
     for {reason, text} <- [
           timeout: "The tool call failed: it took too long.",
-          connection_lost: "The tool call failed: the connection to the tool server was lost."
+          connection_lost: "The tool call failed: the connection to the tool server was lost.",
+          malformed_response: "The tool call failed: the tool server's answer could not be read."
         ] do
       test "#{reason} tells the model it may have taken effect" do
         effect_hub({:error, unquote(reason)})

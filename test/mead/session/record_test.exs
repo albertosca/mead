@@ -2,6 +2,7 @@ defmodule Mead.Session.RecordTest do
   use ExUnit.Case, async: true
 
   import Bitwise
+  import Mead.TestHelpers
 
   alias Mead.Session.Record
 
@@ -82,28 +83,17 @@ defmodule Mead.Session.RecordTest do
       folder = Path.join(directory, "new_folder")
       File.mkdir_p!(folder)
       path = Path.join(folder, "private")
-      test_process = self()
 
-      worker =
-        spawn(fn ->
-          receive do
-            :go ->
-              Record.create_private(path)
-              Record.create_private(path)
-              send(test_process, :done)
-          end
+      calls =
+        calls_to({Record, :sync_directory, 1}, fn ->
+          Record.create_private(path)
+          Record.create_private(path)
         end)
 
-      :erlang.trace_pattern({Record, :sync_directory, 1}, true, [:local])
-      :erlang.trace(worker, true, [:call])
-      on_exit(fn -> :erlang.trace_pattern({Record, :sync_directory, 1}, false, [:local]) end)
-
-      send(worker, :go)
-      assert_receive :done
-
-      assert_receive {:trace, ^worker, :call, {Record, :sync_directory, [^folder]}}
-      assert_receive {:trace, ^worker, :call, {Record, :sync_directory, [^directory]}}
-      refute_receive {:trace, ^worker, :call, _call}, 100
+      assert calls == [
+               {Record, :sync_directory, [folder]},
+               {Record, :sync_directory, [directory]}
+             ]
     end
 
     test "truncate cuts the file to the given size", %{tmp_dir: directory} do
@@ -125,6 +115,13 @@ defmodule Mead.Session.RecordTest do
       assert Record.remove_leftover(path) == :ok
       assert Record.remove_leftover(path) == :ok
       refute File.exists?(path)
+    end
+
+    # A directory opened without the :directory mode is refused with :eisdir, and the refusal is
+    # tolerated, so the only proof the directory reached the disk is that the sync ran on it.
+    test "sync_directory really syncs the directory", %{tmp_dir: directory} do
+      assert [{:file, :sync, [_device]}] =
+               calls_to({:file, :sync, 1}, fn -> Record.sync_directory(directory) end)
     end
 
     test "sync_directory never fails", %{tmp_dir: directory} do

@@ -52,8 +52,8 @@ defmodule Mead.Router do
   tool calls of the event cover the replayed steps too, so a continued turn is counted once.
 
   The same holds for a live `:effect` call whose outcome is unknown: one cancelled while running,
-  timed out, cut by a lost connection, or whose process crashed is reported to the model as one
-  that may or may not have taken effect, never as a plain failure.
+  timed out, cut by a lost connection, answered unreadably, or whose process crashed is reported
+  to the model as one that may or may not have taken effect, never as a plain failure.
   """
 
   @behaviour Mead.Session.TurnHandler
@@ -78,8 +78,8 @@ defmodule Mead.Router do
   @doubt " It may or may not have taken effect; check before calling it again."
 
   # Hub errors that come after the request may have reached the tool server: the call went out
-  # and no answer came back. Every other hub error means it was never sent.
-  @doubtful_errors [:timeout, :connection_lost]
+  # and no answer, or no readable one, came back. Every other hub error means it was never sent.
+  @doubtful_errors [:timeout, :connection_lost, :malformed_response]
 
   @impl true
   def handle_turn(history, input, options), do: resume_turn(history, input, [], options)
@@ -753,6 +753,7 @@ defmodule Mead.Router do
   defp describe(:timeout), do: "it took too long"
   defp describe(:connection_lost), do: "the connection to the tool server was lost"
   defp describe(:connection_unavailable), do: "the tool server is not connected"
+  defp describe(:malformed_response), do: "the tool server's answer could not be read"
   defp describe(:invalid_arguments), do: "the arguments were not an object"
   defp describe({:rpc_error, _code, message}), do: "the tool server answered: #{message}"
   defp describe(other), do: inspect(other)

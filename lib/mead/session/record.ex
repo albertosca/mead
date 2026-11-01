@@ -112,7 +112,7 @@ defmodule Mead.Session.Record do
   """
   @spec sync_directory(Path.t()) :: :ok
   def sync_directory(directory) do
-    with {:ok, device} <- :file.open(directory, [:read, :raw]) do
+    with {:ok, device} <- :file.open(directory, [:read, :raw, :directory]) do
       :file.sync(device)
       :file.close(device)
     end

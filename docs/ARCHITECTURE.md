@@ -199,7 +199,7 @@ A result longer than 50 000 characters is truncated with a marker, and non-text 
 When the provider of the chosen slot implements `converse/3` (on either route) and the policy shows at least one tool, `Mead.Router` runs a loop of up to eight provider calls through the optional callback `c:Mead.Provider.converse/3`.
 
 * Tool errors, denials, and unknown tools go back to the model as error results. They never fail the turn.
-* An `:effect` call whose outcome is unknown, because it was cancelled while running, timed out, lost its connection, or its process crashed, is reported with "It may or may not have taken effect; check before calling it again." A call that never reached the tool server is a plain failure.
+* An `:effect` call whose outcome is unknown, because it was cancelled while running, timed out, lost its connection, got an answer that could not be read, or its process crashed, is reported with "It may or may not have taken effect; check before calling it again." A call that never reached the tool server is a plain failure.
 * A continued turn offers the tools the servers show after the restart. A call in doubt to a tool that is gone fails as an unknown tool; when no tool is left, the answer is asked for again without tools and nothing recorded runs again.
 * The route event carries the sum of the tokens of every call and a `tool_calls` count.
 * The whole loop runs inside the turn timeout, so a conversation that uses tools may need a `:turn_timeout` above the default of 30 seconds.
@@ -391,7 +391,7 @@ config :mead, :deck,
    * Redeeming is an atomic ETS take, so two attempts with one ticket upgrade at most one.
    * A request that is not a valid upgrade is refused with 426 before the ticket is touched.
    * The `Origin` rule is the same as MCP's (`Mead.Origin`).
-3. **Resume.** The socket's first message must be `session.resume {last_sequence}` within `resume_deadline_ms`. The server answers with an unsequenced `session.snapshot` and replays every sequenced event after `last_sequence` from the log. A `last_sequence` beyond the snapshot's `current_sequence` (the log was lost or restored from an older copy) gets the whole log replayed, and the client drops what it holds.
+3. **Resume.** The socket's first message must be `session.resume {last_sequence}` within `resume_deadline_ms`. The server answers with an unsequenced `session.snapshot` and replays every sequenced event after `last_sequence` from the log. A `last_sequence` beyond the snapshot's `current_sequence` (the log was lost or restored from an older copy) gets the whole log replayed, and the client drops what it holds. The check sees only a client that is still ahead: if a lost or restored log has grown past the client's `last_sequence` again before it reconnects, the client cannot tell its old events from the new ones under the same numbers. Since every event is synced before it is sent, a stored log gets there only when it was lost or restored from outside mead; a session without storage, whose log lives in memory and starts again at 0 when its channel restarts, can get there when a continued turn streams past the client's sequence before the client reconnects.
 
 ### The channel and the event log
 

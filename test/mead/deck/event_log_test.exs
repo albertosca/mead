@@ -1,6 +1,8 @@
 defmodule Mead.Deck.EventLogTest do
   use ExUnit.Case, async: true
 
+  import Mead.TestHelpers
+
   alias Mead.Deck.EventLog
 
   @moduletag :tmp_dir
@@ -28,10 +30,20 @@ defmodule Mead.Deck.EventLogTest do
 
   # An event a client was sent must survive a power cut: a lost tail would hand its sequence
   # numbers to different events, and a client holding the old ones would never ask for the new.
-  test "every append is synced: there is no unsynced mode" do
+  # The appended file is opened through an io server, so its sync is the one called with a pid;
+  # the directory syncs of a first append use a raw descriptor.
+  test "every append is synced: there is no unsynced mode", %{tmp_dir: directory} do
     Code.ensure_loaded!(EventLog)
-    assert function_exported?(EventLog, :append, 2)
     refute function_exported?(EventLog, :append, 3)
+    {:ok, log} = EventLog.open(directory, @session_id)
+
+    file_syncs =
+      for {:file, :sync, [device]} <-
+            calls_to({:file, :sync, 1}, fn -> append_all(log, [1, 2]) end),
+          is_pid(device),
+          do: device
+
+    assert length(file_syncs) == 2
   end
 
   test "an empty log has last_sequence 0", %{tmp_dir: directory} do
