@@ -12,6 +12,9 @@ defmodule Mead.Application do
       {Registry, keys: :unique, name: Mead.Registry},
       {Task.Supervisor, name: Mead.TurnSupervisor},
       Mead.Session.Pool,
+      # Right after the pool: a pool restart restarts it, and it resumes the marked sessions. A
+      # hub crash, which restarts every child after the hub, never reaches it.
+      Mead.Session.Keeper,
       # After the pool; a hub crash must not restart the deck channels.
       Mead.Deck.ChannelSupervisor,
       # After the pool, so that a crash of the hub never restarts the pool.
@@ -23,6 +26,14 @@ defmodule Mead.Application do
     ]
 
     Supervisor.start_link(children, supervisor_options())
+  end
+
+  # Runs before any child stops, while the hub and the channels are still up, so a turn cut by the
+  # shutdown is suspended (and continues at the next boot) instead of recording a failure.
+  @impl true
+  def prep_stop(state) do
+    Mead.Session.Keeper.suspend_all()
+    state
   end
 
   # Killing a root child restarts everything after it, which counts as one restart. OTP's default
