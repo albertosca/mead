@@ -12,7 +12,7 @@ Requires Elixir 1.20+ on Erlang/OTP 29; on macOS it also needs a C compiler (`xc
 
 ```elixir
 def deps do
-  [{:mead, "~> 0.1"}]
+  [{:mead, "~> 0.3"}]
 end
 ```
 

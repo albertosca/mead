@@ -94,7 +94,7 @@ defmodule Mead.MixProject do
   def project do
     [
       app: :mead,
-      version: "0.2.1",
+      version: "0.3.0",
       elixir: "~> 1.20",
       elixirc_paths: elixirc_paths(Mix.env()),
       compilers: [:mead_native] ++ Mix.compilers(),
@@ -113,7 +113,8 @@ defmodule Mead.MixProject do
     [
       licenses: ["MIT"],
       links: %{"GitHub" => "https://github.com/albertosca/mead"},
-      files: ~w(lib c_src mix.exs README.md README.pt.md LICENSE docs/ARCHITECTURE.md)
+      files:
+        ~w(lib c_src mix.exs README.md README.pt.md CHANGELOG.md LICENSE docs/ARCHITECTURE.md)
     ]
   end
 
@@ -123,6 +124,7 @@ defmodule Mead.MixProject do
       extras: [
         "README.md",
         "README.pt.md",
+        "CHANGELOG.md",
         "docs/ARCHITECTURE.md",
         "CONTRIBUTING.md",
         "SECURITY.md",
