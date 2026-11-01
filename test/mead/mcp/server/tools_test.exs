@@ -330,8 +330,8 @@ defmodule Mead.MCP.Server.ToolsTest do
       assert {:ok, %{"isError" => true} = result} = Task.await(caller)
 
       assert text(result) ==
-               "the session restarted while the turn ran; it continues on its own, " <>
-                 "so submit again with the same client_turn_id to get its result"
+               "the session restarted while the turn ran; a turn that can continue does so on " <>
+                 "its own, so submit again with the same client_turn_id to get its outcome"
     end
 
     test "a turn without a key cut by a server crash says the session crashed" do

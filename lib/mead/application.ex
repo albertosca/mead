@@ -19,6 +19,9 @@ defmodule Mead.Application do
       Mead.Deck.ChannelSupervisor,
       # After the pool, so that a crash of the hub never restarts the pool.
       Mead.MCP.Hub,
+      # Right after the hub, so it stops before the hub when an earlier child crashes, and
+      # suspends the running turns while the hub they may be calling is still up.
+      Mead.Session.ShutdownGuard,
       # Before the listener, which serves the deck's ticket endpoint from this table.
       Mead.Deck.Tickets,
       # Last, so that a crash of the listener restarts only the listener.
@@ -29,9 +32,12 @@ defmodule Mead.Application do
   end
 
   # Runs before any child stops, while the hub and the channels are still up, so a turn cut by the
-  # shutdown is suspended (and continues at the next boot) instead of recording a failure.
+  # shutdown is suspended (and continues at the next boot) instead of recording a failure. The
+  # listener goes first, so no client starts a turn after the suspension that the shutdown would
+  # then cut.
   @impl true
   def prep_stop(state) do
+    Supervisor.terminate_child(Mead.Supervisor, Mead.MCP.Server)
     Mead.Session.Keeper.suspend_all()
     state
   end

@@ -54,6 +54,8 @@ defmodule Mead.Router do
 
   @behaviour Mead.Session.TurnHandler
 
+  require Logger
+
   alias Mead.Router.AskUser
   alias Mead.Router.Classifier
   alias Mead.Session.Turn
@@ -174,12 +176,30 @@ defmodule Mead.Router do
 
   # The steps become the recorded route and one segment per recorded provider response, with the
   # tool records that followed it keyed by call id. Ids are unique within one response but not
-  # across responses, so the segments are consumed in order. Whatever does not fit ends the parse.
+  # across responses, so the segments are consumed in order. Whatever does not fit ends the parse
+  # with a warning: only a bug writes such a log, and the turn goes on live from that point.
   defp parse_steps([{:route, route, source} | rest])
-       when route in [:local, :cloud] and source in [:forced, :classified],
-       do: {{route, source}, segments(rest, [])}
+       when route in [:local, :cloud] and source in [:forced, :classified] do
+    {segments, dropped} = segments(rest, [])
+    warn_dropped(dropped)
+    {{route, source}, segments}
+  end
 
-  defp parse_steps(_steps), do: {nil, []}
+  defp parse_steps(steps) do
+    warn_dropped(steps)
+    {nil, []}
+  end
+
+  defp warn_dropped([]), do: :ok
+
+  defp warn_dropped(dropped) do
+    count = length(dropped)
+    {noun, verb} = if count == 1, do: {"step", "does"}, else: {"steps", "do"}
+
+    Logger.warning(
+      "router: dropped #{count} recorded #{noun} that #{verb} not fit; the turn goes on live from there"
+    )
+  end
 
   defp segments(
          [
@@ -194,7 +214,7 @@ defmodule Mead.Router do
     segments(rest, [{response, tool_records} | segments])
   end
 
-  defp segments(_rest, segments), do: Enum.reverse(segments)
+  defp segments(rest, segments), do: {Enum.reverse(segments), rest}
 
   defp tool_records([{:tool_started, id, class} | rest], records) when class in [:read, :effect],
     do: tool_records(rest, put_record(records, id, :started, class))

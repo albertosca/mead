@@ -9,8 +9,12 @@ defmodule Mead.Session.Pool do
 
   use DynamicSupervisor
 
+  require Logger
+
   alias Mead.Session
+  alias Mead.Session.Pending
   alias Mead.Session.Server
+  alias Mead.Session.Store
 
   @default_maximum_sessions 1_000
   @roles [:supervisor, :server, :history]
@@ -43,7 +47,10 @@ defmodule Mead.Session.Pool do
   Stops a conversation's supervisor pair; a stored conversation stays on disk.
 
   The server abandons its running turn first (`Mead.Session.Server.abandon/1`), so a stop on
-  purpose ends that turn interrupted instead of leaving it to be continued.
+  purpose ends that turn interrupted instead of leaving it to be continued. When no live server
+  answers (it is restarting after a crash, or the keeper is still resuming it), the pair is
+  stopped first and the stored turn is then interrupted and its marker removed here, since
+  nothing else is left to do it.
   """
   @spec stop_session(String.t()) :: :ok | {:error, :not_found}
   def stop_session(session_id) do
@@ -52,9 +59,33 @@ defmodule Mead.Session.Pool do
         {:error, :not_found}
 
       pid ->
-        Server.abandon(session_id)
-        terminate(pid, session_id)
+        reached = Server.abandon(session_id)
+
+        with :ok <- terminate(pid, session_id) do
+          if reached == :unreachable, do: interrupt_stored(Store.directory(), session_id)
+          :ok
+        end
     end
+  end
+
+  defp interrupt_stored(nil, _session_id), do: :ok
+
+  defp interrupt_stored(directory, session_id) do
+    if Store.exists?(directory, session_id) do
+      with {:error, reason} <- Store.append(directory, session_id, :interrupt) do
+        Logger.warning(
+          "session #{session_id}: could not interrupt its stored turn on stop: #{inspect(reason)}"
+        )
+      end
+    end
+
+    with {:error, reason} <- Pending.clear(directory, session_id) do
+      Logger.warning(
+        "session #{session_id}: could not remove its marker on stop: #{inspect(reason)}"
+      )
+    end
+
+    :ok
   end
 
   # The registry drops a dead process asynchronously, so a stop followed at once by a resume or a

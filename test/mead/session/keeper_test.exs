@@ -127,8 +127,13 @@ defmodule Mead.Session.KeeperTest do
     caller = Task.async(fn -> Mead.submit_turn(session_id, input, client_turn_id: "key-1") end)
     assert_receive {:handler_at, _handler_pid, [:a]}
 
+    on_exit(fn -> Supervisor.restart_child(Mead.Supervisor, Mead.MCP.Server) end)
     assert Mead.Application.prep_stop(:state) == :state
     Task.shutdown(caller, :brutal_kill)
+
+    # The listener stops before the sessions are suspended, so no turn starts after them.
+    assert {Mead.MCP.Server, :undefined, :supervisor, _modules} =
+             List.keyfind(Supervisor.which_children(Mead.Supervisor), Mead.MCP.Server, 0)
 
     assert {:ok, [%Turn{status: :in_progress, steps: [:a]}]} = Mead.history(session_id)
     assert [{^session_id, _settings}] = Pending.list(directory)

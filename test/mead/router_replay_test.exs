@@ -284,17 +284,40 @@ defmodule Mead.RouterReplayTest do
     hub()
     steps = [{:route, :cloud, :forced}, {:tool_result, "t9", %{}}, :garbage]
 
-    assert Router.replay(
-             [],
-             "read",
-             steps,
-             options(),
-             slots([FakeProvider.text_step("live")]),
-             FakeHub
-           ) ==
-             {:ok, "live"}
+    {result, log} =
+      ExUnit.CaptureLog.with_log(fn ->
+        Router.replay(
+          [],
+          "read",
+          steps,
+          options(),
+          slots([FakeProvider.text_step("live")]),
+          FakeHub
+        )
+      end)
 
+    assert result == {:ok, "live"}
     assert_received {:provider_conversed, _messages, _tools}
+    assert log =~ "dropped 2 recorded steps that do not fit"
+  end
+
+  test "a log without a readable route drops every step with a warning" do
+    hub()
+
+    {result, log} =
+      ExUnit.CaptureLog.with_log(fn ->
+        Router.replay(
+          [],
+          "read",
+          [:garbage],
+          options(),
+          slots([FakeProvider.text_step("live")]),
+          FakeHub
+        )
+      end)
+
+    assert result == {:ok, "live"}
+    assert log =~ "dropped 1 recorded step that does not fit"
   end
 
   test "without a checkpoint nothing is recorded" do

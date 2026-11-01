@@ -811,11 +811,9 @@ defmodule Mead.Deck.Channel do
           client_turn_id: turn_key(state, sequence)
         ]
 
-        deadline = System.monotonic_time(:millisecond) + @restart_wait
-
         task =
           Task.Supervisor.async_nolink(Mead.TurnSupervisor, fn ->
-            submit_through_restarts(session_id, text, options, deadline)
+            submit_through_restarts(session_id, text, options, nil)
           end)
 
         running = %{ref: task.ref, turn_id: turn_id, streamed_text: streamed_text}
@@ -831,9 +829,13 @@ defmodule Mead.Deck.Channel do
   # A server that crashed answers `:session_crashed` to the turn it was running and `:not_found`
   # while its supervisor starts it again; the restarted server continues the keyed turn, and the
   # same submission joins it (or gets its outcome) and attaches the interaction again.
+  # The wait starts at the first failure, not at the start of the turn, which may have run for
+  # longer than the wait before its server crashed.
   defp submit_through_restarts(session_id, text, options, deadline) do
     case Mead.submit_turn(session_id, text, options) do
       {:error, reason} = result when reason in [:session_crashed, :not_found] ->
+        deadline = deadline || System.monotonic_time(:millisecond) + @restart_wait
+
         if System.monotonic_time(:millisecond) < deadline do
           Process.sleep(@restart_retry_interval)
           submit_through_restarts(session_id, text, options, deadline)

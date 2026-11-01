@@ -87,10 +87,11 @@ defmodule Mead.Session.Server do
   @doc """
   Ends the running turn as interrupted, answers its waiters `{:error, :session_stopped}`, removes
   the pending marker, and refuses every later submit. Called before a session is stopped on
-  purpose, so that turn is never continued. `:ok` for an unknown session too.
+  purpose, so that turn is never continued. `:unreachable` when no live server answered (the
+  session is unknown, or its server is restarting): the caller then closes the stored turn itself.
   """
-  @spec abandon(String.t()) :: :ok
-  def abandon(session_id), do: stopping_call(session_id, :abandon)
+  @spec abandon(String.t()) :: :ok | :unreachable
+  def abandon(session_id), do: stopping_call(session_id, :abandon, :unreachable)
 
   @doc """
   Stops the running task without closing its turn, which stays in progress with its marker so it
@@ -99,7 +100,7 @@ defmodule Mead.Session.Server do
   session too.
   """
   @spec suspend(String.t()) :: :ok
-  def suspend(session_id), do: stopping_call(session_id, :suspend)
+  def suspend(session_id), do: stopping_call(session_id, :suspend, :ok)
 
   @doc """
   The interaction attached to the running turn, with whether it receives streamed text; `:none`
@@ -137,13 +138,13 @@ defmodule Mead.Session.Server do
     :exit, _reason -> :none
   end
 
-  defp stopping_call(session_id, request) do
+  defp stopping_call(session_id, request, unreachable) do
     case Session.whereis(session_id, :server) do
-      nil -> :ok
+      nil -> unreachable
       server -> GenServer.call(server, request, :infinity)
     end
   catch
-    :exit, _reason -> :ok
+    :exit, _reason -> unreachable
   end
 
   defp clock_call(session_id, request) do

@@ -259,12 +259,13 @@ defmodule Mead.MCP.Server.Tools do
 
   defp turn_result({:ok, output}, _keyed), do: success(text_of(output))
 
-  # A keyed turn is continued by the restarted server, so its caller only has to ask again.
+  # A keyed turn is continued by the restarted server when its handler can resume it, and ends
+  # interrupted when it cannot; either way its caller only has to ask again to learn which.
   defp turn_result({:error, :session_crashed}, true),
     do:
       failure(
-        "the session restarted while the turn ran; it continues on its own, " <>
-          "so submit again with the same client_turn_id to get its result"
+        "the session restarted while the turn ran; a turn that can continue does so on " <>
+          "its own, so submit again with the same client_turn_id to get its outcome"
       )
 
   defp turn_result({:error, reason}, _keyed), do: failure(turn_failure(reason))

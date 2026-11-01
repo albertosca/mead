@@ -110,6 +110,23 @@ defmodule Mead.Deck.DurableChannelTest do
              Mead.history(session_id)
   end
 
+  # The channel waits for the restarted server from the moment the submit fails, not from the start
+  # of the turn, so a crash late in a long turn is waited out like an early one.
+  test "a server killed after the turn ran past the restart wait still shows the outcome",
+       %{directory: directory} do
+    server = start_server(directory)
+    {client, session_id} = open_new(server)
+
+    _client = DeckServer.send_prompt(client, "stream Hel|Hello")
+    assert_receive {:handler_started, _handler, "stream Hel|Hello"}, 5_000
+    Process.sleep(5_500)
+
+    kill_and_wait(Session.whereis(session_id, :server))
+    {_client, events} = events_until_end(client, "turn-1")
+
+    assert text_events(events) == [{"text.delta", "Hel"}, {"text.delta", "lo"}]
+  end
+
   test "an answer that does not continue the streamed text resets it and sends the whole text",
        %{directory: directory} do
     {_session_id, _channel, events} = kill_server_mid_turn(directory, "stream Bye|Hello")

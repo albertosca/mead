@@ -42,6 +42,14 @@ defmodule Mead.Session.AbandonTest do
     {caller, handler_pid}
   end
 
+  defp flush_resumed do
+    receive do
+      {:resumed_with, _steps} -> flush_resumed()
+    after
+      0 -> :ok
+    end
+  end
+
   defp stored_turns(directory, session_id) do
     {:ok, turns} = Store.load(directory, session_id)
     turns
@@ -56,6 +64,24 @@ defmodule Mead.Session.AbandonTest do
     assert [%Turn{status: :interrupted, steps: []}] = stored_turns(directory, session_id)
     assert Pending.list(directory) == []
 
+    assert Mead.resume_session(session_id, handler: ResumableHandler) == {:ok, session_id}
+    assert {:ok, [%Turn{status: :interrupted}]} = Mead.history(session_id)
+    refute_received {:resumed_with, _steps}
+  end
+
+  test "a stop right after a server crash still interrupts the turn for good",
+       %{directory: directory} do
+    session_id = start_session!()
+    {_caller, _handler_pid} = start_keyed_turn(session_id)
+    Process.exit(Session.whereis(session_id, :server), :kill)
+
+    assert Mead.stop_session(session_id) == :ok
+    assert [%Turn{status: :interrupted}] = stored_turns(directory, session_id)
+    assert Pending.list(directory) == []
+
+    # The restarted server may have begun continuing the turn before the stop reached it; only a
+    # continuation after the stop would be wrong.
+    flush_resumed()
     assert Mead.resume_session(session_id, handler: ResumableHandler) == {:ok, session_id}
     assert {:ok, [%Turn{status: :interrupted}]} = Mead.history(session_id)
     refute_received {:resumed_with, _steps}
@@ -136,7 +162,7 @@ defmodule Mead.Session.AbandonTest do
   end
 
   test "abandoning or suspending an unknown session is a no-op" do
-    assert Server.abandon(Mead.UUID.generate()) == :ok
+    assert Server.abandon(Mead.UUID.generate()) == :unreachable
     assert Server.suspend(Mead.UUID.generate()) == :ok
   end
 end
