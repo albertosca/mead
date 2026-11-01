@@ -209,19 +209,21 @@ defmodule Mead.MCP.Server.Tools do
     end
   end
 
+  # JSON clients often send null for an optional field they leave unset, so null means no key.
   defp fetch_client_turn_id(arguments) do
-    case Map.fetch(arguments, "client_turn_id") do
-      :error ->
+    key = Map.get(arguments, "client_turn_id")
+
+    cond do
+      is_nil(key) ->
         {:ok, []}
 
-      {:ok, key} ->
-        if Mead.valid_client_turn_id?(key) do
-          {:ok, [client_turn_id: key]}
-        else
-          invalid(
-            "client_turn_id must be a string of 1 to 128 characters without control characters"
-          )
-        end
+      Mead.valid_client_turn_id?(key) ->
+        {:ok, [client_turn_id: key]}
+
+      true ->
+        invalid(
+          "client_turn_id must be a string of 1 to 128 characters without control characters"
+        )
     end
   end
 

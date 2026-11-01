@@ -15,7 +15,8 @@ defmodule Mead.Session.Server do
   it survives restarts and resumes. A submit that repeats the key and the input of the running
   turn joins its waiters and gets the same reply; one that repeats an ended turn gets the stored
   outcome at once, an interrupted one included, and nothing runs again; one that repeats the key
-  with another input is a conflict. A dead waiter is harmless, as a dead caller is.
+  with another input is a conflict. Waiters are monitored, and one that dies leaves the list
+  while the turn keeps running.
 
   The turn clock can be suspended with `pause_clock/1` and `resume_clock/1`, for a turn that waits
   for a person: while at least one pause is open the turn cannot time out, and the last resume
@@ -93,7 +94,7 @@ defmodule Mead.Session.Server do
         start_turn(state, input, options, client_turn_id, from)
 
       %Turn{input: ^input, status: :in_progress} when running != nil ->
-        {:noreply, %{state | running: %{running | waiters: [from | running.waiters]}}}
+        {:noreply, %{state | running: %{running | waiters: [waiter(from) | running.waiters]}}}
 
       %Turn{input: ^input} = turn ->
         {:reply, reply_for({turn.status, turn.output}), state}
@@ -146,7 +147,7 @@ defmodule Mead.Session.Server do
 
         running =
           start_timer(
-            %{waiters: [from], task: task, generation: 0, pauses: 0},
+            %{waiters: [waiter(from)], task: task, generation: 0, pauses: 0},
             state.turn_timeout
           )
 
@@ -157,16 +158,21 @@ defmodule Mead.Session.Server do
     end
   end
 
+  # A waiter is monitored, so one that dies while the turn runs leaves the list instead of
+  # holding a reply nobody will read.
+  defp waiter({pid, _tag} = from), do: {from, Process.monitor(pid)}
+
   # The newest turn recorded under the key; a key is recorded once, because a second use never
   # starts a turn.
+  #
+  # A turn found :in_progress while no turn runs would be replied as {:error, :in_progress}. That
+  # state cannot be reached: init/1 marks such turns interrupted (in memory even when the write
+  # fails), the history restarting restarts the server too (rest_for_one), and a resume
+  # interrupts them on load. A change to any of those must keep that true.
   defp earlier_turn(_session_id, nil), do: nil
 
-  defp earlier_turn(session_id, client_turn_id) do
-    session_id
-    |> History.all()
-    |> Enum.reverse()
-    |> Enum.find(&(&1.client_turn_id == client_turn_id))
-  end
+  defp earlier_turn(session_id, client_turn_id),
+    do: History.find_by_client_turn_id(session_id, client_turn_id)
 
   defp conflict_details(turn) do
     %{
@@ -188,6 +194,12 @@ defmodule Mead.Session.Server do
         %{running: %{task: %Task{ref: reference}}} = state
       ) do
     conclude(state, {:failed, reason})
+  end
+
+  def handle_info({:DOWN, reference, :process, _pid, _reason}, %{running: running} = state)
+      when running != nil do
+    waiters = Enum.reject(running.waiters, fn {_from, monitor} -> monitor == reference end)
+    {:noreply, %{state | running: %{running | waiters: waiters}}}
   end
 
   def handle_info(
@@ -252,7 +264,11 @@ defmodule Mead.Session.Server do
     )
 
     reply = reply_for(outcome)
-    Enum.each(waiters, &GenServer.reply(&1, reply))
+
+    Enum.each(waiters, fn {from, monitor} ->
+      Process.demonitor(monitor, [:flush])
+      GenServer.reply(from, reply)
+    end)
 
     {:noreply, %{state | running: nil}}
   end

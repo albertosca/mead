@@ -369,7 +369,7 @@ defmodule Mead.MCP.Server.ToolsTest do
     test "an invalid key is invalid params and records nothing" do
       session_id = start_session!()
 
-      for key <- ["", String.duplicate("a", 129), "a\nb", 42, nil, %{"id" => 1}] do
+      for key <- ["", String.duplicate("a", 129), "a\nb", 42, %{"id" => 1}] do
         assert submit(session_id, "echo hi", %{"client_turn_id" => key}) ==
                  {:error,
                   {:invalid_params,
@@ -377,6 +377,28 @@ defmodule Mead.MCP.Server.ToolsTest do
       end
 
       assert Mead.history(session_id) == {:ok, []}
+    end
+
+    test "a null key is the same as no key, as JSON clients send for an unset field" do
+      session_id = start_session!()
+
+      assert {:ok, %{"isError" => false}} =
+               submit(session_id, "echo hi", %{"client_turn_id" => nil})
+
+      assert {:ok, %{"isError" => false}} =
+               submit(session_id, "echo hi", %{"client_turn_id" => nil})
+
+      assert {:ok, [%{client_turn_id: nil}, %{client_turn_id: nil}]} = Mead.history(session_id)
+    end
+
+    test "quotes and backslashes in the original input stay escaped in the preview" do
+      session_id = start_session!()
+      {:ok, _result} = submit(session_id, ~S(echo say "hi" \ there), %{"client_turn_id" => "k"})
+
+      assert {:ok, %{"isError" => true} = result} =
+               submit(session_id, "echo other", %{"client_turn_id" => "k"})
+
+      assert text(result) =~ ~S(had the input "echo say \"hi\" \\ there".)
     end
   end
 

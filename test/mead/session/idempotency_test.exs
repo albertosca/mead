@@ -118,6 +118,52 @@ defmodule Mead.Session.IdempotencyTest do
 
       assert Task.await(survivor) == {:ok, :released}
     end
+
+    test "a waiter that dies is dropped while the turn still runs" do
+      session_id = start_session!()
+      input = {:block, self()}
+
+      first = Task.async(fn -> Mead.submit_turn(session_id, input, client_turn_id: "key-1") end)
+      assert_receive {:handler_started, handler_pid}
+
+      {:ok, doomed} =
+        Task.start(fn -> Mead.submit_turn(session_id, input, client_turn_id: "key-1") end)
+
+      wait_until(fn -> waiter_count(session_id) == 2 end)
+      Process.exit(doomed, :kill)
+      wait_until(fn -> waiter_count(session_id) == 1 end)
+
+      send(handler_pid, :release)
+      assert Task.await(first) == {:ok, :released}
+    end
+
+    test "every waiter gets the timeout when the turn runs out of time" do
+      session_id = start_session!(turn_timeout: 300)
+      input = {:block, self()}
+
+      first = Task.async(fn -> Mead.submit_turn(session_id, input, client_turn_id: "key-1") end)
+      assert_receive {:handler_started, _handler_pid}
+
+      second = Task.async(fn -> Mead.submit_turn(session_id, input, client_turn_id: "key-1") end)
+      wait_until(fn -> waiter_count(session_id) == 2 end)
+
+      assert Task.await(first) == {:error, :timeout}
+      assert Task.await(second) == {:error, :timeout}
+      assert {:ok, [%Turn{status: :timeout}]} = Mead.history(session_id)
+    end
+  end
+
+  describe "History.find_by_client_turn_id/2" do
+    test "finds the turn recorded under the key, and nil for a key never used" do
+      session_id = start_session!()
+      assert {:ok, "one"} = Mead.submit_turn(session_id, {:echo, "one"}, client_turn_id: "key-1")
+      assert {:ok, "two"} = Mead.submit_turn(session_id, {:echo, "two"})
+
+      assert %Turn{client_turn_id: "key-1", output: "one"} =
+               Mead.Session.History.find_by_client_turn_id(session_id, "key-1")
+
+      assert Mead.Session.History.find_by_client_turn_id(session_id, "key-2") == nil
+    end
   end
 
   describe "a repeated key with a different input" do
@@ -204,7 +250,7 @@ defmodule Mead.Session.IdempotencyTest do
   end
 
   describe "key validation" do
-    test "accepts 1 to 128 characters, counting characters and not bytes" do
+    test "accepts 1 to 128 characters, counting code points and not bytes" do
       session_id = start_session!()
 
       for key <- ["a", String.duplicate("a", 128), String.duplicate("é", 128), "retry 42/ü"] do
@@ -219,6 +265,10 @@ defmodule Mead.Session.IdempotencyTest do
         "",
         String.duplicate("a", 129),
         String.duplicate("é", 129),
+        # One grapheme each, but two code points: 256 code points in all.
+        String.duplicate("é", 128),
+        # A single grapheme of 50 001 code points.
+        "a" <> String.duplicate("́", 50_000),
         "line\nbreak",
         "tab\there",
         "nul\u0000",

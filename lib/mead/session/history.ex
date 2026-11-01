@@ -104,6 +104,18 @@ defmodule Mead.Session.History do
   end
 
   @doc """
+  Returns the newest turn recorded under `client_turn_id`, or `nil`.
+
+  The search runs inside the agent, so only the matching turn is copied out.
+  """
+  @spec find_by_client_turn_id(String.t(), String.t()) :: Turn.t() | nil
+  def find_by_client_turn_id(session_id, client_turn_id) do
+    session_id
+    |> Session.via(:history)
+    |> Agent.get(fn state -> Enum.find(state.turns, &(&1.client_turn_id == client_turn_id)) end)
+  end
+
+  @doc """
   Replaces the newest turn with the result of `function` applied to it.
 
   Memory changes even when the write fails; the error tells the caller the disk is behind.

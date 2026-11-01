@@ -183,9 +183,11 @@ defmodule Mead do
       :interrupted}` included for a turn a restart cut short. Repeating it with a different
       input returns `{:error, {:client_turn_id_conflict, details}}`, where `details` has the
       original `:client_turn_id`, `:input`, `:status` and `:started_at`. Keys are looked up in
-      the turns the history holds, so with `config :mead, :storage, max_turns:` a key older than
-      that window counts as new. Anything else returns `{:error, :invalid_client_turn_id}`
-      before a turn is recorded.
+      the turns the history holds. With `config :mead, :storage, max_turns:` set, a key counts
+      as new only once a compaction has dropped its turn: an explicit `compact_session/1`, the
+      automatic one past `compact_after_bytes`, or the one at resume. Until then it is still
+      found, however old. Anything else returns `{:error, :invalid_client_turn_id}` before a
+      turn is recorded.
 
   Returns `{:error, :not_found}` for an unknown session, `{:error, :session_stopped}` when the
   session was stopped with `stop_session/1` while the turn was running, and
@@ -216,14 +218,20 @@ defmodule Mead do
   end
 
   @maximum_client_turn_id_length 128
+  # A code point takes at most four bytes in UTF-8.
+  @maximum_client_turn_id_bytes @maximum_client_turn_id_length * 4
 
   @doc """
   Whether `key` is accepted as a `:client_turn_id`: a valid UTF-8 string of 1 to 128 characters
   with no control character.
+
+  Characters are Unicode code points, as JSON Schema's `maxLength` counts them, and not
+  graphemes: a letter with a combining accent is two, so a key is never larger than 512 bytes.
   """
   @spec valid_client_turn_id?(term()) :: boolean()
   def valid_client_turn_id?(key) when is_binary(key) do
-    String.valid?(key) and String.length(key) in 1..@maximum_client_turn_id_length and
+    byte_size(key) in 1..@maximum_client_turn_id_bytes and String.valid?(key) and
+      length(String.codepoints(key)) <= @maximum_client_turn_id_length and
       not String.match?(key, ~r/[[:cntrl:]]/u)
   end
 
