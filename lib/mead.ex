@@ -195,10 +195,13 @@ defmodule Mead do
 
   Returns `{:error, :not_found}` for an unknown session, `{:error, :session_stopped}` when the
   session was stopped with `stop_session/1` while the turn was running, and
-  `{:error, :session_crashed}` when the session's server died for any other reason. For a keyed
-  turn whose handler implements `resume_turn/4`, `:session_crashed` does not mean the turn is
-  lost: the restarted server continues it from its checkpoint, and submitting again with the same
-  key and input joins it, or returns its outcome once it ended.
+  `{:error, :session_crashed}` when the session's server died for any other reason. A keyed call
+  does not return on that crash: it waits for the restarted server, which continues the turn from
+  its checkpoint when its handler implements `resume_turn/4` and ends it interrupted otherwise,
+  and returns that turn's outcome. Each crash starts a 5-second wait again, so a turn that keeps
+  crashing ends when the server's resume budget does; only a server that does not come back
+  within the wait returns `:session_crashed`, and even then the turn is continued once it does,
+  so submitting again with the same key and input joins it or returns its outcome.
   """
   @spec submit_turn(String.t(), term(), keyword()) :: {:ok, term()} | {:error, term()}
   def submit_turn(session_id, input, options \\ []) do
@@ -252,7 +255,56 @@ defmodule Mead do
     end
   end
 
+  # How long a keyed submission waits for its session's server to come back, and how often it
+  # asks again meanwhile. The wait is read on each failure, so a test can shorten it.
+  @default_restart_wait 5_000
+  @restart_retry_interval 50
+
   defp run_turn(session_id, input, options) do
+    if Keyword.has_key?(options, :client_turn_id) do
+      run_through_restarts(session_id, input, options, nil)
+    else
+      call_server(session_id, input, options)
+    end
+  end
+
+  # A server that crashes answers `:session_crashed` to the turn it was running, and the session
+  # has no server while its supervisor (or the pool, or the keeper) starts it again. The restarted
+  # server continues the keyed turn, or ends it interrupted, and the same submission joins it or
+  # gets its outcome, so a keyed caller sees the turn's result instead of the restart.
+  #
+  # A `:not_found` before any crash is an unknown session and returns at once. Each crash starts
+  # the wait again, since it proves a server came back and took the turn: the turn may run for
+  # longer than the wait before the next one. That loop is bounded by the server's resume budget,
+  # which ends a turn that keeps crashing as interrupted. A server that does not come back within
+  # the wait returns `:session_crashed`, the cause, even when the session has no server by then.
+  defp run_through_restarts(session_id, input, options, deadline) do
+    case call_server(session_id, input, options) do
+      {:error, :not_found} = result when deadline == nil ->
+        result
+
+      {:error, reason} when reason in [:session_crashed, :not_found] ->
+        deadline =
+          if reason == :session_crashed, do: restart_deadline(), else: deadline
+
+        if System.monotonic_time(:millisecond) < deadline do
+          Process.sleep(@restart_retry_interval)
+          run_through_restarts(session_id, input, options, deadline)
+        else
+          {:error, :session_crashed}
+        end
+
+      result ->
+        result
+    end
+  end
+
+  defp restart_deadline do
+    System.monotonic_time(:millisecond) +
+      Application.get_env(:mead, :restart_wait, @default_restart_wait)
+  end
+
+  defp call_server(session_id, input, options) do
     case Session.whereis(session_id, :server) do
       nil ->
         {:error, :not_found}

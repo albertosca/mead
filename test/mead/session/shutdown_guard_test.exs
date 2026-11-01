@@ -13,6 +13,8 @@ defmodule Mead.Session.ShutdownGuardTest do
   @moduletag :capture_log
 
   setup %{tmp_dir: directory} do
+    # Each test here kills a root child at least once; see Mead.ApplicationTest.
+    await_root_restart_budget(2)
     previous_storage = Application.fetch_env(:mead, :storage)
     Application.put_env(:mead, :storage, directory: directory)
 
@@ -101,6 +103,44 @@ defmodule Mead.Session.ShutdownGuardTest do
   # exits, and the root restarts it and everything after it.
   test "a registry crash leaves the turn in progress, and it continues",
        %{session_id: session_id, tmp_dir: directory} do
+    crash_registry()
+    assert_continues(session_id, directory)
+  end
+
+  # Each crash restarts the pool and cuts the turn once, so four of them cut it more often than
+  # the three continuations a turn gets when its own session keeps failing; none of these cuts is
+  # the turn's fault. The turn has steps enough that no continuation finishes it early.
+  test "repeated registry crashes do not spend the turn's crash budget",
+       %{tmp_dir: directory, handler_pid: first_handler} do
+    send(first_handler, :release)
+    steps = Enum.to_list(1..8)
+    {:ok, session_id} = Mead.start_session(handler: ResumableHandler, turn_timeout: 60_000)
+    on_exit(fn -> Mead.stop_session(session_id) end)
+    input = {:checkpointed, self(), steps}
+    Task.start(fn -> Mead.submit_turn(session_id, input, client_turn_id: "storm") end)
+    assert_receive {:handler_at, _handler_pid, [1]}, 5_000
+    # Four root restarts in a row, and room for a later test's.
+    await_root_restart_budget(6)
+
+    for crash <- 1..4 do
+      crash_registry()
+
+      assert_receive {:resumed_with, [1 | _rest]},
+                     10_000,
+                     "no continuation after crash #{crash}"
+    end
+
+    wait_until(fn ->
+      release_handlers()
+      match?({:ok, [%Turn{status: :ok}]}, Mead.Session.Store.load(directory, session_id))
+    end)
+
+    {:ok, [turn]} = Mead.Session.Store.load(directory, session_id)
+    assert turn.resumes >= 4
+    assert turn.output == steps
+  end
+
+  defp crash_registry do
     registry = Process.whereis(Mead.Registry)
     registry_monitor = Process.monitor(registry)
 
@@ -118,7 +158,6 @@ defmodule Mead.Session.ShutdownGuardTest do
 
     assert outcome == :down
     wait_until(fn -> Process.whereis(Mead.Registry) not in [nil, registry] end)
-    assert_continues(session_id, directory)
   end
 
   # The guard finds the servers through the pool, so a registry that is gone does not crash it

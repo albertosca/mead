@@ -55,26 +55,89 @@ defmodule Mead.Session.ContinuationTest do
     List.last(turns)
   end
 
-  test "a keyed turn continues from its checkpoint after its server is killed" do
+  # The caller of a keyed turn never learns its server restarted: the submission waits through
+  # the restart and returns what the continued turn returns.
+  test "a keyed turn continues from its checkpoint and its caller gets the outcome" do
     session_id = start_session!()
     input = {:checkpointed, self(), [:a, :b]}
     caller = submit(session_id, input, "key-1")
     assert_receive {:handler_at, _pid, [:a]}
 
     kill_server(session_id)
-    assert Task.await(caller) == {:error, :session_crashed}
 
     assert_receive {:resumed_with, [:a]}
     assert_receive {:handler_at, handler_pid, [:a, :b]}
-
-    retry = submit(session_id, input, "key-1")
     wait_until(fn -> waiting?(session_id) end)
     send(handler_pid, :release)
 
-    assert Task.await(retry) == {:ok, [:a, :b]}
+    assert Task.await(caller) == {:ok, [:a, :b]}
 
     assert {:ok, [%Turn{status: :ok, output: [:a, :b], steps: [], resumes: 1}]} =
              Mead.history(session_id)
+  end
+
+  # Each crash proves the server came back and took the turn again, so the wait starts again
+  # there; a turn that runs for longer than the wait between two crashes still reaches its caller.
+  test "a keyed caller waits through a second crash that comes after the wait" do
+    previous_wait = Application.fetch_env(:mead, :restart_wait)
+    Application.put_env(:mead, :restart_wait, 300)
+
+    on_exit(fn ->
+      case previous_wait do
+        {:ok, value} -> Application.put_env(:mead, :restart_wait, value)
+        :error -> Application.delete_env(:mead, :restart_wait)
+      end
+    end)
+
+    session_id = start_session!()
+    caller = submit(session_id, {:checkpointed, self(), [:a, :b, :c]}, "key-1")
+    assert_receive {:handler_at, _pid, [:a]}
+    kill_server(session_id)
+    assert_receive {:handler_at, _pid, [:a, :b]}
+
+    Process.sleep(500)
+    kill_server(session_id)
+    assert_receive {:handler_at, handler_pid, [:a, :b, :c]}
+    wait_until(fn -> waiting?(session_id) end)
+    send(handler_pid, :release)
+
+    assert Task.await(caller) == {:ok, [:a, :b, :c]}
+  end
+
+  test "a keyed caller whose server does not come back within the wait gets :session_crashed" do
+    previous_wait = Application.fetch_env(:mead, :restart_wait)
+    Application.put_env(:mead, :restart_wait, 200)
+
+    on_exit(fn ->
+      case previous_wait do
+        {:ok, value} -> Application.put_env(:mead, :restart_wait, value)
+        :error -> Application.delete_env(:mead, :restart_wait)
+      end
+    end)
+
+    session_id = start_session!()
+    supervisor = Session.whereis(session_id, :supervisor)
+    caller = submit(session_id, {:checkpointed, self(), [:a, :b]}, "key-1")
+    assert_receive {:handler_at, _pid, [:a]}
+
+    # A suspended supervisor cannot start the server again until it is resumed.
+    :sys.suspend(supervisor)
+    Process.exit(Session.whereis(session_id, :server), :kill)
+
+    assert Task.await(caller) == {:error, :session_crashed}
+
+    :sys.resume(supervisor)
+    assert_receive {:handler_at, handler_pid, [:a, :b]}
+    send(handler_pid, :release)
+  end
+
+  test "a keyed submission to an unknown session is not found at once" do
+    started = System.monotonic_time(:millisecond)
+
+    assert Mead.submit_turn(Mead.UUID.generate(), :anything, client_turn_id: "key-1") ==
+             {:error, :not_found}
+
+    assert System.monotonic_time(:millisecond) - started < 1_000
   end
 
   defp waiting?(session_id) do
@@ -101,9 +164,11 @@ defmodule Mead.Session.ContinuationTest do
     assert_receive {:handler_options, first}
     assert_receive {:handler_at, _pid, [:a]}
     kill_server(session_id)
-    Task.await(caller)
 
     assert_receive {:handler_options, continued}
+    assert_receive {:handler_at, handler_pid, [:a, :b]}
+    send(handler_pid, :release)
+    assert Task.await(caller) == {:ok, [:a, :b]}
     assert continued[:route] == :cloud
     assert continued[:tools] == :effect
     assert continued[:session_id] == session_id
@@ -151,7 +216,7 @@ defmodule Mead.Session.ContinuationTest do
     supervisor = Session.whereis(session_id, :supervisor)
     caller = submit(session_id, {:checkpointed, self(), [:a, :b, :c, :d, :e]}, "key-1")
     assert_receive {:handler_at, _pid, [:a]}
-    Task.await(kill_and_wait(session_id, caller))
+    kill_server(session_id)
 
     for steps <- [[:a, :b], [:a, :b, :c]] do
       assert_receive {:handler_at, _pid, ^steps}
@@ -164,11 +229,7 @@ defmodule Mead.Session.ContinuationTest do
     wait_until(fn -> match?({:ok, [%Turn{status: :interrupted}]}, Mead.history(session_id)) end)
     assert Session.whereis(session_id, :supervisor) == supervisor
     refute_receive {:handler_at, _pid, _steps}, 200
-  end
-
-  defp kill_and_wait(session_id, caller) do
-    kill_server(session_id)
-    caller
+    assert Task.await(caller) == {:error, :interrupted}
   end
 
   test "a keyed turn is marked pending while it runs", %{directory: directory} do
@@ -222,9 +283,12 @@ defmodule Mead.Session.ContinuationTest do
     caller = submit(session_id, {:checkpointed, self(), [:a, :b]}, "key-1")
     assert_receive {:handler_at, _pid, [:a]}
     kill_server(session_id)
-    Task.await(caller)
     assert_receive {:resumed_with, [:a]}
 
     assert History.append_step(session_id, 0, :late) == {:error, :stale}
+
+    assert_receive {:handler_at, handler_pid, [:a, :b]}
+    send(handler_pid, :release)
+    assert Task.await(caller) == {:ok, [:a, :b]}
   end
 end

@@ -27,8 +27,10 @@ defmodule Mead.Session.Server do
   starts and the newest turn is still in progress, it continues that turn when it can: the turn
   has a `client_turn_id`, the options it was submitted with were recorded, and the handler
   implements `resume_turn/4`. The continuation runs with no waiters (a submit repeating the key
-  joins it) and gets the recorded steps. A turn is continued at most 3 times; the next start,
-  and every turn that cannot continue, marks it interrupted. While a turn that can continue runs,
+  joins it) and gets the recorded steps. A turn whose own session cut it is continued at most 3
+  times, counted only while the infrastructure stays the same (`Mead.Session.Generation`); one cut
+  by a pool, turn supervisor, registry or node restart is continued up to 20 times in all. The
+  next start past either budget, and every turn that cannot continue, marks it interrupted. While a turn that can continue runs,
   the session has a marker under `Mead.Session.Pending`, so recovery after a node stop finds it.
 
   A session that is stopped on purpose goes through `abandon/1` first: its running turn ends
@@ -53,13 +55,15 @@ defmodule Mead.Session.Server do
   require Logger
 
   alias Mead.Session
+  alias Mead.Session.Generation
   alias Mead.Session.History
   alias Mead.Session.InteractionRelay
   alias Mead.Session.Pending
   alias Mead.Session.Turn
 
-  # How many times one turn may be continued before the next start interrupts it, so a turn that
-  # crashes its server every time cannot loop.
+  # How many times one turn may be continued after its own session cut it, under the same
+  # infrastructure, before the next start interrupts it, so a turn that crashes its server every
+  # time cannot loop. Cuts by an infrastructure restart spend only History's total budget.
   @maximum_resumes 3
 
   @doc """
@@ -187,7 +191,9 @@ defmodule Mead.Session.Server do
 
   @impl true
   def handle_continue(:resume, state) do
-    case History.begin_resume(state.session_id, @maximum_resumes) do
+    case History.begin_resume(state.session_id, @maximum_resumes,
+           generation: Generation.current()
+         ) do
       {:ok, turn} ->
         earlier = state.session_id |> History.all() |> Enum.drop(-1)
         handler = state.handler
@@ -409,7 +415,10 @@ defmodule Mead.Session.Server do
       |> Keyword.put(:checkpoint, checkpoint(state.session_id, 0))
       |> put_relay(interaction != nil, state.session_id)
 
-    turn = Turn.start(input, client_turn_id, turn_options(options))
+    turn = %{
+      Turn.start(input, client_turn_id, turn_options(options))
+      | generation: Generation.current()
+    }
 
     # The marker is written before the turn, so a turn that can continue is never recorded without
     # the marker that lets recovery find it; a marker that cannot be written refuses the turn.

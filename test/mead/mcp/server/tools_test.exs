@@ -319,7 +319,7 @@ defmodule Mead.MCP.Server.ToolsTest do
                  "send a new client_turn_id to try again"
     end
 
-    test "a keyed turn cut by a server crash says it goes on and how to get its result" do
+    test "a keyed turn cut by a server crash answers its caller with the turn's own outcome" do
       session_id = start_session!()
       Process.register(self(), :mcp_text_handler_test)
 
@@ -330,8 +330,39 @@ defmodule Mead.MCP.Server.ToolsTest do
       assert {:ok, %{"isError" => true} = result} = Task.await(caller)
 
       assert text(result) ==
-               "the session restarted while the turn ran; a turn that can continue does so on " <>
-                 "its own, so submit again with the same client_turn_id to get its outcome"
+               "the turn was interrupted by a server restart and will not run again; " <>
+                 "send a new client_turn_id to try again"
+    end
+
+    test "a keyed turn whose server does not come back in time says how to get its result" do
+      previous_wait = Application.fetch_env(:mead, :restart_wait)
+      Application.put_env(:mead, :restart_wait, 200)
+
+      on_exit(fn ->
+        case previous_wait do
+          {:ok, value} -> Application.put_env(:mead, :restart_wait, value)
+          :error -> Application.delete_env(:mead, :restart_wait)
+        end
+      end)
+
+      session_id = start_session!()
+      Process.register(self(), :mcp_text_handler_test)
+      supervisor = Mead.Session.whereis(session_id, :supervisor)
+
+      caller = Task.async(fn -> submit(session_id, "block", %{"client_turn_id" => "key-1"}) end)
+      assert_receive {:handler_started, _handler}, 10_000
+
+      # A suspended supervisor cannot start the server again until it is resumed.
+      :sys.suspend(supervisor)
+      Process.exit(Mead.Session.whereis(session_id, :server), :kill)
+
+      assert {:ok, %{"isError" => true} = result} = Task.await(caller)
+      :sys.resume(supervisor)
+
+      assert text(result) ==
+               "the session restarted while the turn ran and did not come back in time; a " <>
+                 "turn that can continue does so on its own, so submit again with the same " <>
+                 "client_turn_id to get its outcome"
     end
 
     test "a turn without a key cut by a server crash says the session crashed" do

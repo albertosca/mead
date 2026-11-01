@@ -68,7 +68,6 @@ defmodule Mead.DurableEndToEndTest do
     monitor = Process.monitor(supervisor)
     Process.exit(supervisor, :kill)
     assert_receive {:DOWN, ^monitor, :process, ^supervisor, :killed}, 2_000
-    assert {:error, _reason} = Task.await(caller)
 
     # Whatever brings the session back first (its pool, or a keeper started again), the turn
     # continues exactly once.
@@ -80,6 +79,9 @@ defmodule Mead.DurableEndToEndTest do
     assert %{role: :user, content: [%{content: @in_doubt, is_error: true}]} = List.last(messages)
 
     wait_until(fn -> match?({:ok, [%{status: :ok}]}, Mead.history(session_id)) end)
+
+    # The original keyed call waited through the restart and gets the turn's outcome.
+    assert Task.await(caller, 10_000) == {:ok, "checked"}
     assert {:ok, "checked"} = submit.()
 
     refute_received {:provider_conversed, _messages, _tools}

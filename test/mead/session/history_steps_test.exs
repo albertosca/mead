@@ -57,6 +57,52 @@ defmodule Mead.Session.HistoryStepsTest do
     assert stored(context).resumes == 3
   end
 
+  # A continuation whose infrastructure (the pool, the turn supervisor, the registry or the OS
+  # process) changed since the last attempt was cut by that restart, not by the turn: it spends
+  # nothing of the crash budget.
+  test "continuations after infrastructure restarts do not spend the crash budget", context do
+    for {generation, count} <- Enum.with_index([:first, :second, :third, :fourth, :fifth], 1) do
+      assert {:ok, %Turn{resumes: ^count, crash_resumes: 0, generation: ^generation}} =
+               History.begin_resume(context.session_id, 3, generation: generation)
+    end
+
+    assert %Turn{resumes: 5, crash_resumes: 0, generation: :fifth} = stored(context)
+  end
+
+  test "continuations under the same infrastructure spend the crash budget", context do
+    # The turn started under no recorded generation, so the first continuation is a change.
+    assert {:ok, %Turn{crash_resumes: 0}} =
+             History.begin_resume(context.session_id, 3, generation: :same)
+
+    for crash <- 1..3 do
+      assert {:ok, %Turn{crash_resumes: ^crash}} =
+               History.begin_resume(context.session_id, 3, generation: :same)
+    end
+
+    assert History.begin_resume(context.session_id, 3, generation: :same) == {:error, :exhausted}
+    assert %Turn{resumes: 4, crash_resumes: 3} = stored(context)
+  end
+
+  test "infrastructure continuations stop at the total maximum", context do
+    for generation <- [:first, :second] do
+      assert {:ok, _turn} =
+               History.begin_resume(context.session_id, 3,
+                 generation: generation,
+                 total_maximum: 2
+               )
+    end
+
+    assert History.begin_resume(context.session_id, 3, generation: :third, total_maximum: 2) ==
+             {:error, :exhausted}
+  end
+
+  test "a resume recorded before generations existed still loads", context do
+    path = Path.join(context.directory, context.session_id <> ".log")
+    File.write!(path, Mead.Session.Record.encode({:resume, 2}), [:append])
+
+    assert %Turn{resumes: 2, crash_resumes: 2, generation: nil} = stored(context)
+  end
+
   test "a step of the new attempt applies once the continuation began", context do
     {:ok, _turn} = History.begin_resume(context.session_id, 3)
 

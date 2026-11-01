@@ -4,7 +4,7 @@ defmodule Mead.Session.Turn do
 
   `client_turn_id` is the caller's idempotency key, or `nil`; see `Mead.Session.Server`.
 
-  A turn in progress also carries what it needs to continue after a restart: `steps`, the checkpoint its handler recorded so far, in order (an opaque term per step, cleared when the turn closes); `resumes`, how many times it was continued; and `turn_options`, the options its handler needs to continue (`%{route: route, tools: tools | nil, interactive: boolean}`, never a pid), `%{}` for a turn recorded before this existed, which is never continued.
+  A turn in progress also carries what it needs to continue after a restart: `steps`, the checkpoint its handler recorded so far, in order (an opaque term per step, cleared when the turn closes); `resumes`, how many times it was continued; `crash_resumes`, how many of those continued an attempt cut under the same infrastructure, so by the session itself; `generation`, a fingerprint of the infrastructure the current attempt runs under (`Mead.Session.Generation`), `nil` when none was recorded; and `turn_options`, the options its handler needs to continue (`%{route: route, tools: tools | nil, interactive: boolean}`, never a pid), `%{}` for a turn recorded before this existed, which is never continued.
   """
 
   @type status :: :in_progress | :ok | :failed | :timeout | :interrupted
@@ -17,6 +17,8 @@ defmodule Mead.Session.Turn do
           client_turn_id: String.t() | nil,
           steps: [term()],
           resumes: non_neg_integer(),
+          crash_resumes: non_neg_integer(),
+          generation: term(),
           turn_options: map()
         }
 
@@ -27,8 +29,10 @@ defmodule Mead.Session.Turn do
     :status,
     :started_at,
     :client_turn_id,
+    :generation,
     steps: [],
     resumes: 0,
+    crash_resumes: 0,
     turn_options: %{}
   ]
 

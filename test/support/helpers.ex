@@ -29,6 +29,30 @@ defmodule Mead.TestHelpers do
   end
 
   @doc """
+  Waits until the root supervisor can take `free` more restarts without reaching its intensity.
+
+  Every test that kills a root child spends one of the 10 restarts the root allows in 5 seconds,
+  and the tests that do so run back to back; without this wait, a seed that orders enough of them
+  together takes the whole application down and fails every test after it. A restart counts while
+  it is younger than the period, in whole seconds, as `:supervisor` counts it.
+  """
+  @spec await_root_restart_budget(pos_integer()) :: :ok
+  def await_root_restart_budget(free) do
+    wait_until(fn -> root_restarts_left() >= free end, 7_000)
+    :ok
+  end
+
+  # The supervisor's state record, as of OTP 29: {:state, name, strategy, children, dynamics,
+  # intensity, period, restarts, ...}, where restarts are monotonic times in seconds.
+  defp root_restarts_left do
+    {:state, _name, _strategy, _children, _dynamics, intensity, period, restarts} =
+      Mead.Supervisor |> :sys.get_state() |> Tuple.to_list() |> Enum.take(8) |> List.to_tuple()
+
+    threshold = System.monotonic_time(:second) - period
+    intensity - Enum.count(restarts, &(&1 >= threshold))
+  end
+
+  @doc """
   Runs `function` in a fresh process and returns every `{module, function, arguments}` call it
   made to `traced`, in order.
 

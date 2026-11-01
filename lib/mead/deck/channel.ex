@@ -25,9 +25,10 @@ defmodule Mead.Deck.Channel do
   Every turn is submitted with a `client_turn_id`: `"turn-<sequence>"` with storage, and
   `"turn-<sequence>-<epoch>"` without, where the epoch is drawn when the channel starts because
   the in-memory log starts again at 0. The channel monitors the session supervisor, so a session
-  server that crashes and restarts keeps the channel; the turn task submits again with the same key
-  on `:session_crashed` or `:not_found`, every 50 ms for at most 5 seconds, and joins the turn the
-  restarted server continues. A channel that starts again resubmits the turn that was running
+  server that crashes and restarts keeps the channel. A keyed `Mead.submit_turn/3` already waits
+  through its server's restarts and returns what the continued turn returns; the turn task only
+  submits again, every 50 ms for at most 5 seconds, on a `:not_found` from a session whose server
+  has not come back yet when the turn starts. A channel that starts again resubmits the turn that was running
   when the last one died, if the session recorded a turn under its key, instead of reporting it
   interrupted. When the final text does not begin with what was streamed (a restart cut a stream
   and the new answer differs), the channel emits `text.reset` with the `turn_id`, telling the deck
@@ -828,14 +829,14 @@ defmodule Mead.Deck.Channel do
 
   defp start_next_turn(state), do: state
 
-  # A server that crashed answers `:session_crashed` to the turn it was running and `:not_found`
-  # while its supervisor starts it again; the restarted server continues the keyed turn, and the
-  # same submission joins it (or gets its outcome) and attaches the interaction again.
-  # The wait starts at the first failure, not at the start of the turn, which may have run for
-  # longer than the wait before its server crashed.
+  # A keyed submission waits through the restarts of a server it reached, but answers
+  # `:not_found` at once when the session has no server, which is also what a session that is
+  # restarting looks like when the turn starts (a channel that starts again resubmits its turn
+  # then). The same submission joins the continued turn, or gets its outcome, and attaches the
+  # interaction again.
   defp submit_through_restarts(session_id, text, options, deadline) do
     case Mead.submit_turn(session_id, text, options) do
-      {:error, reason} = result when reason in [:session_crashed, :not_found] ->
+      {:error, :not_found} = result ->
         deadline = deadline || System.monotonic_time(:millisecond) + @restart_wait
 
         if System.monotonic_time(:millisecond) < deadline do

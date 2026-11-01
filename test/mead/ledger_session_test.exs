@@ -67,6 +67,8 @@ defmodule Mead.LedgerSessionTest do
   end
 
   test "the ledger survives a crash of the turn supervisor", %{session_id: session_id} do
+    # Kills a root child; see Mead.ApplicationTest.
+    Mead.TestHelpers.await_root_restart_budget(2)
     Mead.submit_turn(session_id, "explain this")
     ledger_pid = Process.whereis(Ledger)
     assert is_pid(ledger_pid)

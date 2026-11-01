@@ -28,6 +28,10 @@ defmodule Mead.Session.History do
 
   @type persistence_error :: {:error, {:persistence, term()}}
 
+  # Infrastructure restarts cut a turn through no fault of its own, but one that takes the
+  # infrastructure down with it each time must still stop somewhere.
+  @default_total_resumes 20
+
   @doc """
   Starts the history for `options[:session_id]`, registered under `Mead.Registry`.
 
@@ -155,32 +159,46 @@ defmodule Mead.Session.History do
   @doc """
   Counts one more continuation of the turn in progress, write-first, and returns the turn.
 
-  `{:error, :exhausted}` once it was continued `maximum` times, and `{:error, :nothing_to_resume}`
-  when the newest turn is not in progress.
-  """
-  @spec begin_resume(String.t(), non_neg_integer()) ::
-          {:ok, Turn.t()} | {:error, :exhausted | :nothing_to_resume} | persistence_error()
-  def begin_resume(session_id, maximum) do
-    Agent.get_and_update(Session.via(session_id, :history), fn
-      %{turns: [%Turn{status: :in_progress, resumes: resumes} | _older]} = state
-      when resumes >= maximum ->
-        {{:error, :exhausted}, state}
+  The continuation runs under `options[:generation]` (default `nil`). When that is the generation
+  the last attempt ran under, nothing restarted around the session, so the session itself cut
+  the attempt, and the continuation spends one of `maximum` crash continuations. A changed
+  generation means an infrastructure restart cut it, and it spends only the total budget,
+  `options[:total_maximum]` (default #{@default_total_resumes}).
 
+  `{:error, :exhausted}` once either budget is spent, and `{:error, :nothing_to_resume}` when the
+  newest turn is not in progress.
+  """
+  @spec begin_resume(String.t(), non_neg_integer(), keyword()) ::
+          {:ok, Turn.t()} | {:error, :exhausted | :nothing_to_resume} | persistence_error()
+  def begin_resume(session_id, maximum, options \\ []) do
+    generation = Keyword.get(options, :generation)
+    total_maximum = Keyword.get(options, :total_maximum, @default_total_resumes)
+
+    Agent.get_and_update(Session.via(session_id, :history), fn
       %{turns: [%Turn{status: :in_progress} = newest | older]} = state ->
+        crash_count = newest.crash_resumes + if(newest.generation == generation, do: 1, else: 0)
         count = newest.resumes + 1
 
-        case persist(state, session_id, {:resume, count}) do
-          :ok ->
-            continued = %{newest | resumes: count}
-            {{:ok, continued}, compact_if_due(%{state | turns: [continued | older]}, session_id)}
-
-          error ->
-            {error, state}
+        if crash_count > maximum or count > total_maximum do
+          {{:error, :exhausted}, state}
+        else
+          continue_turn(state, session_id, newest, older, {count, crash_count, generation})
         end
 
       state ->
         {{:error, :nothing_to_resume}, state}
     end)
+  end
+
+  defp continue_turn(state, session_id, newest, older, {count, crash_count, generation}) do
+    case persist(state, session_id, {:resume, count, crash_count, generation}) do
+      :ok ->
+        continued = %{newest | resumes: count, crash_resumes: crash_count, generation: generation}
+        {{:ok, continued}, compact_if_due(%{state | turns: [continued | older]}, session_id)}
+
+      error ->
+        {error, state}
+    end
   end
 
   @doc """
