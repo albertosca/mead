@@ -15,7 +15,7 @@ mix test
 
 ## Before you open a pull request
 
-All three must pass, and CI runs them again:
+All three must pass, and CI runs them again (the tests on Linux and on macOS, where the drive flush goes through a NIF):
 
 ```
 mix test
