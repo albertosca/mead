@@ -4,8 +4,9 @@ defmodule Mead.Session.History do
   session has a storage directory.
 
   The state holds the turns with the newest first and the directory, or `nil` when persistence
-  is off. Only `append/2` is write-first: a turn that cannot be recorded is refused and memory is
-  left untouched, so a conversation never accepts a turn it would forget. `update_last/2` and
+  is off. `append/2`, `append_step/3` and `begin_resume/2` are write-first: a turn or a checkpoint
+  that cannot be recorded is refused and memory is left untouched, so a conversation never accepts
+  what it would forget. `update_last/2` and
   `mark_interrupted/1` always change memory and then try to write, because the caller already
   holds the answer; a closed turn that never reached the disk comes back after a restart as an
   interrupted one, which is accurate.
@@ -113,6 +114,72 @@ defmodule Mead.Session.History do
     session_id
     |> Session.via(:history)
     |> Agent.get(fn state -> Enum.find(state.turns, &(&1.client_turn_id == client_turn_id)) end)
+  end
+
+  @doc "Returns the newest turn, or `nil` when there is none."
+  @spec newest(String.t()) :: Turn.t() | nil
+  def newest(session_id) do
+    session_id
+    |> Session.via(:history)
+    |> Agent.get(&List.first(&1.turns))
+  end
+
+  @doc """
+  Records one checkpoint step of the turn in progress, write-first like `append/2`.
+
+  The step applies only while the newest turn is in progress and was continued exactly `attempt`
+  times. Anything else answers `{:error, :stale}` and writes nothing, so a late write from an
+  attempt that was killed (its message can already wait in this agent's mailbox) never reaches
+  the attempt that replaced it, nor a closed turn.
+  """
+  @spec append_step(String.t(), non_neg_integer(), term()) ::
+          :ok | {:error, :stale} | persistence_error()
+  def append_step(session_id, attempt, step) do
+    Agent.get_and_update(Session.via(session_id, :history), fn
+      %{turns: [%Turn{status: :in_progress, resumes: ^attempt} = newest | older]} = state ->
+        case persist(state, session_id, {:step, step}) do
+          :ok ->
+            turns = [%{newest | steps: newest.steps ++ [step]} | older]
+            {:ok, compact_if_due(%{state | turns: turns}, session_id)}
+
+          error ->
+            {error, state}
+        end
+
+      state ->
+        {{:error, :stale}, state}
+    end)
+  end
+
+  @doc """
+  Counts one more continuation of the turn in progress, write-first, and returns the turn.
+
+  `{:error, :exhausted}` once it was continued `maximum` times, and `{:error, :nothing_to_resume}`
+  when the newest turn is not in progress.
+  """
+  @spec begin_resume(String.t(), non_neg_integer()) ::
+          {:ok, Turn.t()} | {:error, :exhausted | :nothing_to_resume} | persistence_error()
+  def begin_resume(session_id, maximum) do
+    Agent.get_and_update(Session.via(session_id, :history), fn
+      %{turns: [%Turn{status: :in_progress, resumes: resumes} | _older]} = state
+      when resumes >= maximum ->
+        {{:error, :exhausted}, state}
+
+      %{turns: [%Turn{status: :in_progress} = newest | older]} = state ->
+        count = newest.resumes + 1
+
+        case persist(state, session_id, {:resume, count}) do
+          :ok ->
+            continued = %{newest | resumes: count}
+            {{:ok, continued}, compact_if_due(%{state | turns: [continued | older]}, session_id)}
+
+          error ->
+            {error, state}
+        end
+
+      state ->
+        {{:error, :nothing_to_resume}, state}
+    end)
   end
 
   @doc """
