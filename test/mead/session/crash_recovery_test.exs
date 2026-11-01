@@ -93,8 +93,8 @@ defmodule Mead.Session.CrashRecoveryTest do
     neighbour_id = start_session!()
     neighbour_server_pid = Session.whereis(neighbour_id, :server)
 
-    # Three restarts are allowed within five seconds; the fourth crash takes the pair down.
-    for _attempt <- 1..3, do: kill_server_and_await_replacement(session_id)
+    # Five restarts are allowed within five seconds; the sixth crash takes the pair down.
+    for _attempt <- 1..5, do: kill_server_and_await_replacement(session_id)
     Process.exit(Session.whereis(session_id, :server), :kill)
 
     wait_until(fn ->

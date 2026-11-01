@@ -23,9 +23,16 @@ defmodule Mead.Session.Server do
   restarts the timer with the time that was left. Pauses nest by counting, and neither call does
   anything when no turn is running, so a pause can never leak into the next turn.
 
-  When the server restarts after a crash, `init/1` marks every turn still recorded as in
-  progress as interrupted. A reader that bypasses the server can observe the old status in the
-  moment between the new server registering its name and finishing `init/1`.
+  Every turn gets a `:checkpoint` option that records its steps in the history. When the server
+  starts and the newest turn is still in progress, it continues that turn when it can: the turn
+  has a `client_turn_id`, the options it was submitted with were recorded, and the handler
+  implements `resume_turn/4`. The continuation runs with no waiters (a submit repeating the key
+  joins it) and gets the recorded steps. A turn is continued at most 3 times; the next start,
+  and every turn that cannot continue, marks it interrupted. While a turn that can continue runs,
+  the session has a marker under `Mead.Session.Pending`, so recovery after a node stop finds it.
+
+  A reader that bypasses the server can observe an interrupted turn as in progress in the moment
+  between the new server registering its name and finishing `init/1`.
   """
 
   use GenServer
@@ -34,7 +41,12 @@ defmodule Mead.Session.Server do
 
   alias Mead.Session
   alias Mead.Session.History
+  alias Mead.Session.Pending
   alias Mead.Session.Turn
+
+  # How many times one turn may be continued before the next start interrupts it, so a turn that
+  # crashes its server every time cannot loop.
+  @maximum_resumes 3
 
   @doc """
   Starts the server for `options[:session_id]`, registered under `Mead.Registry`.
@@ -72,17 +84,101 @@ defmodule Mead.Session.Server do
     Process.flag(:trap_exit, true)
 
     session_id = Keyword.fetch!(options, :session_id)
-    record(History.mark_interrupted(session_id), session_id)
 
     state = %{
       session_id: session_id,
       handler: Keyword.fetch!(options, :handler),
       turn_timeout: Keyword.fetch!(options, :turn_timeout),
+      directory: Keyword.get(options, :directory),
       running: nil
     }
 
-    {:ok, state}
+    if continuable?(History.newest(session_id), state.handler) do
+      {:ok, state, {:continue, :resume}}
+    else
+      {:ok, abandon_in_progress(state)}
+    end
   end
+
+  @impl true
+  def handle_continue(:resume, state) do
+    case History.begin_resume(state.session_id, @maximum_resumes) do
+      {:ok, turn} ->
+        earlier = state.session_id |> History.all() |> Enum.drop(-1)
+        handler = state.handler
+
+        options =
+          turn.turn_options
+          |> handler_options(state.session_id)
+          |> Keyword.put(:checkpoint, checkpoint(state.session_id, turn.resumes))
+
+        task =
+          Task.Supervisor.async(Mead.TurnSupervisor, fn ->
+            handler.resume_turn(earlier, turn.input, turn.steps, options)
+          end)
+
+        {:noreply, %{state | running: new_running(task, [], true, state.turn_timeout)}}
+
+      {:error, reason} ->
+        Logger.warning(
+          "could not continue the turn of session #{state.session_id}: #{inspect(reason)}"
+        )
+
+        {:noreply, abandon_in_progress(state)}
+    end
+  end
+
+  # Only a keyed turn that recorded its options can be continued, and only by a handler that
+  # knows how.
+  defp continuable?(
+         %Turn{status: :in_progress, client_turn_id: key, turn_options: turn_options},
+         handler
+       )
+       when is_binary(key) and turn_options != %{},
+       do: resumable?(handler)
+
+  defp continuable?(_newest, _handler), do: false
+
+  defp resumable?(handler),
+    do: Code.ensure_loaded?(handler) and function_exported?(handler, :resume_turn, 4)
+
+  # The turn left in progress cannot continue: it ends interrupted (in memory even when the write
+  # fails), and the marker it may have left goes with it.
+  defp abandon_in_progress(state) do
+    record(History.mark_interrupted(state.session_id), state.session_id)
+    clear_marker(state)
+    state
+  end
+
+  defp clear_marker(state) do
+    case Pending.clear(state.directory, state.session_id) do
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning(
+          "could not remove the pending marker of session #{state.session_id}: #{inspect(reason)}"
+        )
+    end
+  end
+
+  # What the handler needs to continue the turn, kept on the turn. Never a pid or a context.
+  defp turn_options(options) do
+    %{
+      route: Keyword.get(options, :route, :auto),
+      tools: Keyword.get(options, :tools),
+      interactive: Keyword.has_key?(options, :interaction)
+    }
+  end
+
+  defp handler_options(%{route: route, tools: tools}, session_id) do
+    [route: route]
+    |> then(fn options -> if tools, do: Keyword.put(options, :tools, tools), else: options end)
+    |> Keyword.put(:session_id, session_id)
+  end
+
+  defp checkpoint(session_id, attempt),
+    do: fn step -> History.append_step(session_id, attempt, step) end
 
   @impl true
   def handle_call({:submit, input, options}, from, state) do
@@ -136,26 +232,49 @@ defmodule Mead.Session.Server do
   defp start_turn(state, input, options, client_turn_id, from) do
     handler = state.handler
     history = History.all(state.session_id)
-    handler_options = Keyword.put(options, :session_id, state.session_id)
+    marked = is_binary(client_turn_id) and resumable?(handler)
 
-    case History.append(state.session_id, Turn.start(input, client_turn_id)) do
-      :ok ->
-        task =
-          Task.Supervisor.async(Mead.TurnSupervisor, fn ->
-            handler.handle_turn(history, input, handler_options)
-          end)
+    handler_options =
+      options
+      |> Keyword.put(:session_id, state.session_id)
+      |> Keyword.put(:checkpoint, checkpoint(state.session_id, 0))
 
-        running =
-          start_timer(
-            %{waiters: [waiter(from)], task: task, generation: 0, pauses: 0},
-            state.turn_timeout
-          )
+    turn = Turn.start(input, client_turn_id, turn_options(options))
 
-        {:noreply, %{state | running: running}}
+    # The marker is written before the turn, so a turn that can continue is never recorded without
+    # the marker that lets recovery find it; a marker that cannot be written refuses the turn.
+    with :ok <- mark(state, marked),
+         :ok <- History.append(state.session_id, turn) do
+      task =
+        Task.Supervisor.async(Mead.TurnSupervisor, fn ->
+          handler.handle_turn(history, input, handler_options)
+        end)
 
+      {:noreply,
+       %{state | running: new_running(task, [waiter(from)], marked, state.turn_timeout)}}
+    else
       {:error, _reason} = error ->
+        if marked, do: clear_marker(state)
         {:reply, error, state}
     end
+  end
+
+  defp mark(_state, false), do: :ok
+
+  defp mark(state, true) do
+    settings = %{handler: state.handler, turn_timeout: state.turn_timeout}
+
+    case Pending.mark(state.directory, state.session_id, settings) do
+      :ok -> :ok
+      {:error, reason} -> {:error, {:persistence, reason}}
+    end
+  end
+
+  defp new_running(task, waiters, marked, turn_timeout) do
+    start_timer(
+      %{waiters: waiters, task: task, generation: 0, pauses: 0, marked: marked},
+      turn_timeout
+    )
   end
 
   # A waiter is monitored, so one that dies while the turn runs leaves the list instead of
@@ -166,9 +285,10 @@ defmodule Mead.Session.Server do
   # starts a turn.
   #
   # A turn found :in_progress while no turn runs would be replied as {:error, :in_progress}. That
-  # state cannot be reached: init/1 marks such turns interrupted (in memory even when the write
-  # fails), the history restarting restarts the server too (rest_for_one), and a resume
-  # interrupts them on load. A change to any of those must keep that true.
+  # state cannot be reached: init/1 either continues such a turn (a task runs it from
+  # handle_continue/2, before any submit is handled) or marks it interrupted (in memory even when
+  # the write fails), and the history restarting restarts the server too (rest_for_one). A change
+  # to any of those must keep that true.
   defp earlier_turn(_session_id, nil), do: nil
 
   defp earlier_turn(session_id, client_turn_id),
@@ -254,7 +374,7 @@ defmodule Mead.Session.Server do
   defp normalize(other), do: {:failed, {:bad_return, other}}
 
   defp conclude(state, {status, output} = outcome) do
-    %{waiters: waiters, timer: timer} = state.running
+    %{waiters: waiters, timer: timer, marked: marked} = state.running
 
     if timer, do: Process.cancel_timer(timer)
 
@@ -262,6 +382,8 @@ defmodule Mead.Session.Server do
       History.update_last(state.session_id, &Turn.finish(&1, status, output)),
       state.session_id
     )
+
+    if marked, do: clear_marker(state)
 
     reply = reply_for(outcome)
 

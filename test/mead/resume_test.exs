@@ -90,11 +90,16 @@ defmodule Mead.ResumeTest do
 
       assert Mead.stop_session(session_id) == :ok
 
-      # The turns are interrupted before the file is compacted, so the first resume already
-      # leaves the canonical file and nothing changes from then on.
-      written = File.read!(file_of(directory, session_id))
+      # The server interrupts the turn after the file was compacted, so the first resume leaves
+      # the compacted turns plus an interrupt; the second compacts that into the canonical file,
+      # and nothing changes from then on.
       {:ok, stored} = Store.load(directory, session_id)
       assert [%Turn{status: :ok}, %Turn{status: :interrupted}] = stored
+
+      assert Mead.resume_session(session_id, handler: Mead.Test.TextHandler) == {:ok, session_id}
+      assert Mead.history(session_id) == {:ok, stored}
+      assert Mead.stop_session(session_id) == :ok
+      written = File.read!(file_of(directory, session_id))
 
       assert Mead.resume_session(session_id, handler: Mead.Test.TextHandler) == {:ok, session_id}
       assert Mead.history(session_id) == {:ok, stored}

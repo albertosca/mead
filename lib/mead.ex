@@ -50,7 +50,9 @@ defmodule Mead do
   Starts a session again from the conversation stored under `session_id`.
 
   It takes the options of `start_session/1`, because the handler and the timeout are not stored.
-  Turns that were still running when the session ended come back as `:interrupted`. Needs
+  A turn that was still running when the session ended continues from its checkpoint when it was
+  submitted with a `client_turn_id` and the handler implements `resume_turn/4` (see
+  `Mead.Session.Server`); any other comes back as `:interrupted`. Needs
   `config :mead, :storage, directory: ...`; without it nothing is stored and the answer is
   `{:error, :not_found}`, which is also the answer for an id with no file or one that is not a
   session id. A running session is `{:error, :already_running}`, and a file damaged anywhere but
@@ -73,8 +75,9 @@ defmodule Mead do
         {:error, :already_running}
       else
         with {:ok, recovered} <- Store.recover(directory, session_id) do
-          # Interrupted before compacting, so the file is already what the history would write.
-          turns = recovered |> Enum.map(&Turn.interrupt/1) |> Store.window(Store.max_turns())
+          # Kept as stored: the server's init/1 decides whether a turn in progress continues or
+          # ends interrupted.
+          turns = Store.window(recovered, Store.max_turns())
           compact_quietly(directory, session_id, turns)
           launch(session_id, options, resume: turns)
         end
