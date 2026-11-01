@@ -17,14 +17,34 @@ defmodule Mix.Tasks.Compile.MeadNative do
   end
 
   @impl Mix.Task.Compiler
-  def clean, do: File.rm(target())
+  def clean do
+    File.rm(stamp())
+    File.rm(target())
+  end
 
   defp target, do: Path.join([Mix.Project.app_path(), "priv", "mead_native.so"])
 
+  # Written beside the library after a build: a library built for another ERTS, compiler or set of
+  # flags is built again, not only one older than its source.
+  defp stamp, do: target() <> ".stamp"
+
+  defp fingerprint, do: inspect({:erlang.system_info(:version), compiler_command(), @flags})
+
+  # CC may carry flags of its own, as in "gcc -m64"; an empty one means the default.
+  defp compiler_command do
+    case "CC" |> System.get_env("") |> String.split() do
+      [] -> ["cc"]
+      command -> command
+    end
+  end
+
   defp up_to_date? do
-    case {File.stat(target()), File.stat(@source)} do
-      {{:ok, built}, {:ok, source}} -> built.mtime >= source.mtime
-      _missing -> false
+    case {File.stat(target()), File.stat(@source), File.read(stamp())} do
+      {{:ok, built}, {:ok, source}, {:ok, recorded}} ->
+        built.mtime >= source.mtime and recorded == fingerprint()
+
+      _missing ->
+        false
     end
   end
 
@@ -38,11 +58,12 @@ defmodule Mix.Tasks.Compile.MeadNative do
         "include"
       ])
 
-    compiler = System.get_env("CC", "cc")
-    arguments = @flags ++ ["-I", include, @source, "-o", target()]
+    [compiler | compiler_flags] = compiler_command()
+    arguments = compiler_flags ++ @flags ++ ["-I", include, @source, "-o", target()]
 
     case run_compiler(compiler, arguments) do
       {_output, 0} ->
+        File.write!(stamp(), fingerprint())
         Mix.shell().info("Compiled #{@source}")
         {:ok, []}
 

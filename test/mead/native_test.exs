@@ -28,10 +28,29 @@ defmodule Mead.NativeTest do
 
     test "the native code is loaded" do
       assert Native.loaded?()
+      assert Native.status() == :loaded
+    end
+
+    # A library that cannot be loaded is reported, not raised, so the module stays available and
+    # the application can refuse to start with the reason.
+    test "a library that cannot be loaded is reported as an error", %{tmp_dir: directory} do
+      path = Path.join(directory, "mead_native.so")
+      File.write!(path, "not a library")
+
+      assert {:error, _reason} = Native.load_from(Path.rootname(path))
     end
   else
     test "the native code is not loaded off macOS" do
       refute Native.loaded?()
+      assert Native.status() == :not_needed
     end
+  end
+
+  test "the application starts only when the native code it needs is there" do
+    assert Mead.Application.native_ready(:loaded) == :ok
+    assert Mead.Application.native_ready(:not_needed) == :ok
+
+    assert Mead.Application.native_ready({:error, :enoent}) ==
+             {:error, {:native_code_not_loaded, :enoent}}
   end
 end

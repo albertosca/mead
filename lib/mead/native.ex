@@ -12,23 +12,28 @@ defmodule Mead.Native do
 
   @on_load :load
 
+  # Always :ok, so a library that fails to load leaves the module available with its status, and
+  # Mead.Application refuses to start with the reason instead of every sync raising later.
   @doc false
-  @spec load() :: :ok | {:error, term()}
+  @spec load() :: :ok
   def load do
-    if :os.type() == {:unix, :darwin} do
-      result =
-        :mead
-        |> :code.priv_dir()
-        |> Path.join("mead_native")
-        |> String.to_charlist()
-        |> :erlang.load_nif(0)
+    status =
+      if :os.type() == {:unix, :darwin} do
+        :mead |> :code.priv_dir() |> Path.join("mead_native") |> load_from() |> loaded_status()
+      else
+        :not_needed
+      end
 
-      if result == :ok, do: :persistent_term.put({__MODULE__, :loaded}, true)
-      result
-    else
-      :ok
-    end
+    :persistent_term.put({__MODULE__, :status}, status)
+    :ok
   end
+
+  @doc false
+  @spec load_from(Path.t()) :: :ok | {:error, term()}
+  def load_from(path), do: path |> String.to_charlist() |> :erlang.load_nif(0)
+
+  defp loaded_status(:ok), do: :loaded
+  defp loaded_status({:error, reason}), do: {:error, reason}
 
   @doc """
   Opens `path` (a file or a directory), flushes it to the drive with `F_FULLFSYNC`, and closes
@@ -41,7 +46,14 @@ defmodule Mead.Native do
   @spec full_fsync(Path.t()) :: :ok | {:error, atom() | {:errno, integer()}}
   def full_fsync(_path), do: :erlang.nif_error(:not_loaded)
 
-  @doc "Whether the native code is loaded: always on macOS, never elsewhere."
+  @doc """
+  `:loaded` on macOS, `:not_needed` elsewhere, or `{:error, reason}` when macOS could not load the
+  library (the application then refuses to start).
+  """
+  @spec status() :: :loaded | :not_needed | {:error, term()}
+  def status, do: :persistent_term.get({__MODULE__, :status}, :not_needed)
+
+  @doc "Whether the native code is loaded: on macOS once it loaded, never elsewhere."
   @spec loaded?() :: boolean()
-  def loaded?, do: :persistent_term.get({__MODULE__, :loaded}, false)
+  def loaded?, do: status() == :loaded
 end

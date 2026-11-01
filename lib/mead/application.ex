@@ -30,11 +30,21 @@ defmodule Mead.Application do
 
     # The watchdog sits above the root, so a root that runs out of restarts is started again
     # instead of stopping the application; the keeper then continues the turns it cut.
-    Mead.Watchdog.start_link(
-      name: Mead.Watchdog,
-      start: {Supervisor, :start_link, [children, supervisor_options()]}
-    )
+    with :ok <- native_ready(Mead.Native.status()) do
+      Mead.Watchdog.start_link(
+        name: Mead.Watchdog,
+        start: {Supervisor, :start_link, [children, supervisor_options()]}
+      )
+    end
   end
+
+  # Without the drive flush on macOS a sync would only order writes, so a power cut could lose
+  # turns mead said it kept: the node does not start rather than run with that.
+  @doc false
+  @spec native_ready(:loaded | :not_needed | {:error, term()}) :: :ok | {:error, term()}
+  def native_ready(:loaded), do: :ok
+  def native_ready(:not_needed), do: :ok
+  def native_ready({:error, reason}), do: {:error, {:native_code_not_loaded, reason}}
 
   # Runs before any child stops, while the hub and the channels are still up, so a turn cut by the
   # shutdown is suspended (and continues at the next boot) instead of recording a failure. The
