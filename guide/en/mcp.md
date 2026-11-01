@@ -24,4 +24,6 @@ config :mead, :mcp,
 
 It exposes nine tools: `start_session`, `submit_turn`, `history`, `stop_session`, `resume_session`, `delete_session`, `list_sessions`, `compact_session` and `usage`. `tools: "effect"` is honoured only when the operator set `allow_effect: true`.
 
+`submit_turn` takes an optional `client_turn_id`. Send the same id again after a lost connection: the turn runs once, and the retry waits for it or gets its stored answer.
+
 Add `certfile` and `keyfile` to serve HTTPS. The full list of limits and status codes is in [ARCHITECTURE.md](https://github.com/albertosca/mead/blob/main/docs/ARCHITECTURE.md).
