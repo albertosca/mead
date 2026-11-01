@@ -11,6 +11,12 @@ defmodule Mead.Session.Server do
   as a message instead of killing the server, while a server death takes the running task down
   with it, so no orphaned handler keeps running for a conversation that restarted.
 
+  A turn submitted with a `client_turn_id` runs at most once. The key is recorded on the turn, so
+  it survives restarts and resumes. A submit that repeats the key and the input of the running
+  turn joins its waiters and gets the same reply; one that repeats an ended turn gets the stored
+  outcome at once, an interrupted one included, and nothing runs again; one that repeats the key
+  with another input is a conflict. A dead waiter is harmless, as a dead caller is.
+
   The turn clock can be suspended with `pause_clock/1` and `resume_clock/1`, for a turn that waits
   for a person: while at least one pause is open the turn cannot time out, and the last resume
   restarts the timer with the time that was left. Pauses nest by counting, and neither call does
@@ -78,30 +84,22 @@ defmodule Mead.Session.Server do
   end
 
   @impl true
-  def handle_call({:submit, _input, _options}, _from, %{running: running} = state)
-      when running != nil do
-    {:reply, {:error, :turn_in_progress}, state}
-  end
-
   def handle_call({:submit, input, options}, from, state) do
-    handler = state.handler
-    history = History.all(state.session_id)
-    handler_options = Keyword.put(options, :session_id, state.session_id)
+    {client_turn_id, options} = Keyword.pop(options, :client_turn_id)
+    running = state.running
 
-    case History.append(state.session_id, Turn.start(input)) do
-      :ok ->
-        task =
-          Task.Supervisor.async(Mead.TurnSupervisor, fn ->
-            handler.handle_turn(history, input, handler_options)
-          end)
+    case earlier_turn(state.session_id, client_turn_id) do
+      nil ->
+        start_turn(state, input, options, client_turn_id, from)
 
-        running =
-          start_timer(%{from: from, task: task, generation: 0, pauses: 0}, state.turn_timeout)
+      %Turn{input: ^input, status: :in_progress} when running != nil ->
+        {:noreply, %{state | running: %{running | waiters: [from | running.waiters]}}}
 
-        {:noreply, %{state | running: running}}
+      %Turn{input: ^input} = turn ->
+        {:reply, reply_for({turn.status, turn.output}), state}
 
-      {:error, _reason} = error ->
-        {:reply, error, state}
+      %Turn{} = turn ->
+        {:reply, {:error, {:client_turn_id_conflict, conflict_details(turn)}}, state}
     end
   end
 
@@ -129,6 +127,55 @@ defmodule Mead.Session.Server do
 
   def handle_call(:resume_clock, _from, %{running: running} = state),
     do: {:reply, :ok, %{state | running: %{running | pauses: running.pauses - 1}}}
+
+  defp start_turn(%{running: running} = state, _input, _options, _client_turn_id, _from)
+       when running != nil,
+       do: {:reply, {:error, :turn_in_progress}, state}
+
+  defp start_turn(state, input, options, client_turn_id, from) do
+    handler = state.handler
+    history = History.all(state.session_id)
+    handler_options = Keyword.put(options, :session_id, state.session_id)
+
+    case History.append(state.session_id, Turn.start(input, client_turn_id)) do
+      :ok ->
+        task =
+          Task.Supervisor.async(Mead.TurnSupervisor, fn ->
+            handler.handle_turn(history, input, handler_options)
+          end)
+
+        running =
+          start_timer(
+            %{waiters: [from], task: task, generation: 0, pauses: 0},
+            state.turn_timeout
+          )
+
+        {:noreply, %{state | running: running}}
+
+      {:error, _reason} = error ->
+        {:reply, error, state}
+    end
+  end
+
+  # The newest turn recorded under the key; a key is recorded once, because a second use never
+  # starts a turn.
+  defp earlier_turn(_session_id, nil), do: nil
+
+  defp earlier_turn(session_id, client_turn_id) do
+    session_id
+    |> History.all()
+    |> Enum.reverse()
+    |> Enum.find(&(&1.client_turn_id == client_turn_id))
+  end
+
+  defp conflict_details(turn) do
+    %{
+      client_turn_id: turn.client_turn_id,
+      input: turn.input,
+      status: turn.status,
+      started_at: turn.started_at
+    }
+  end
 
   @impl true
   def handle_info({reference, result}, %{running: %{task: %Task{ref: reference}}} = state) do
@@ -195,7 +242,7 @@ defmodule Mead.Session.Server do
   defp normalize(other), do: {:failed, {:bad_return, other}}
 
   defp conclude(state, {status, output} = outcome) do
-    %{from: from, timer: timer} = state.running
+    %{waiters: waiters, timer: timer} = state.running
 
     if timer, do: Process.cancel_timer(timer)
 
@@ -204,7 +251,8 @@ defmodule Mead.Session.Server do
       state.session_id
     )
 
-    GenServer.reply(from, reply_for(outcome))
+    reply = reply_for(outcome)
+    Enum.each(waiters, &GenServer.reply(&1, reply))
 
     {:noreply, %{state | running: nil}}
   end

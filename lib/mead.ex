@@ -176,6 +176,16 @@ defmodule Mead do
     * `:interaction` - a `{module, context}` pair, `module` implementing `Mead.Router.Interaction`;
       `Mead.Router` then asks it for permission around every tool call. Anything else returns
       `{:error, :invalid_interaction}` before a turn is recorded.
+    * `:client_turn_id` - the caller's idempotency key for this turn, a string of 1 to 128
+      characters without control characters. A turn submitted with a key runs at most once per
+      session: repeating the key with the same input while the turn runs waits for its reply,
+      and after it ended returns the stored outcome without running anything, `{:error,
+      :interrupted}` included for a turn a restart cut short. Repeating it with a different
+      input returns `{:error, {:client_turn_id_conflict, details}}`, where `details` has the
+      original `:client_turn_id`, `:input`, `:status` and `:started_at`. Keys are looked up in
+      the turns the history holds, so with `config :mead, :storage, max_turns:` a key older than
+      that window counts as new. Anything else returns `{:error, :invalid_client_turn_id}`
+      before a turn is recorded.
 
   Returns `{:error, :not_found}` for an unknown session, `{:error, :session_stopped}` when the
   session was stopped with `stop_session/1` while the turn was running, and
@@ -188,6 +198,7 @@ defmodule Mead do
     cond do
       Keyword.fetch!(options, :route) not in @routes -> {:error, :invalid_route}
       invalid_interaction?(options) -> {:error, :invalid_interaction}
+      invalid_client_turn_id?(options) -> {:error, :invalid_client_turn_id}
       true -> run_turn(session_id, input, options)
     end
   end
@@ -197,9 +208,30 @@ defmodule Mead do
       not Mead.Router.Interaction.valid?(Keyword.fetch!(options, :interaction))
   end
 
+  defp invalid_client_turn_id?(options) do
+    case Keyword.fetch(options, :client_turn_id) do
+      {:ok, key} -> not valid_client_turn_id?(key)
+      :error -> false
+    end
+  end
+
+  @maximum_client_turn_id_length 128
+
+  @doc """
+  Whether `key` is accepted as a `:client_turn_id`: a valid UTF-8 string of 1 to 128 characters
+  with no control character.
+  """
+  @spec valid_client_turn_id?(term()) :: boolean()
+  def valid_client_turn_id?(key) when is_binary(key) do
+    String.valid?(key) and String.length(key) in 1..@maximum_client_turn_id_length and
+      not String.match?(key, ~r/[[:cntrl:]]/u)
+  end
+
+  def valid_client_turn_id?(_key), do: false
+
   defp validate_submit_options!(options) do
     if Keyword.keyword?(options) do
-      Keyword.validate!(options, [:tools, :interaction, route: :auto])
+      Keyword.validate!(options, [:tools, :interaction, :client_turn_id, route: :auto])
     else
       raise ArgumentError, "options must be a keyword list, got: #{inspect(options)}"
     end

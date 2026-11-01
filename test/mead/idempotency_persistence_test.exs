@@ -46,4 +46,34 @@ defmodule Mead.IdempotencyPersistenceTest do
     assert %Turn{client_turn_id: nil, input: "old question", status: :ok} = turn
     assert Map.fetch(turn, :client_turn_id) == {:ok, nil}
   end
+
+  test "a key survives stop_session and resume_session" do
+    {:ok, session_id} = Mead.start_session(handler: Mead.Test.ScriptedHandler)
+    on_exit(fn -> Mead.stop_session(session_id) end)
+
+    assert Mead.submit_turn(session_id, {:echo, "one"}, client_turn_id: "key-1") == {:ok, "one"}
+    assert Mead.stop_session(session_id) == :ok
+
+    assert Mead.resume_session(session_id, handler: Mead.Test.ScriptedHandler) ==
+             {:ok, session_id}
+
+    assert Mead.submit_turn(session_id, {:echo, "one"}, client_turn_id: "key-1") == {:ok, "one"}
+    assert {:ok, [%Turn{client_turn_id: "key-1"}]} = Mead.history(session_id)
+  end
+
+  test "a keyed turn left in progress on disk answers :interrupted after a resume",
+       %{directory: directory} do
+    session_id = Mead.UUID.generate()
+    :ok = Store.append(directory, session_id, {:append, Turn.start({:echo, "lost"}, "key-1")})
+
+    assert Mead.resume_session(session_id, handler: Mead.Test.ScriptedHandler) ==
+             {:ok, session_id}
+
+    on_exit(fn -> Mead.stop_session(session_id) end)
+
+    assert Mead.submit_turn(session_id, {:echo, "lost"}, client_turn_id: "key-1") ==
+             {:error, :interrupted}
+
+    assert {:ok, [%Turn{status: :interrupted}]} = Mead.history(session_id)
+  end
 end
