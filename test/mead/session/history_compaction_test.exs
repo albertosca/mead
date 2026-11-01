@@ -43,9 +43,17 @@ defmodule Mead.Session.HistoryCompactionTest do
   test "compacts from memory once the file passes the threshold and keeps appending", context do
     start_history(context, compact_after_bytes: 2_000)
     run_turn(context, 0)
-    first_inode = inode(context)
-    for index <- 1..40, do: run_turn(context, index)
-    refute inode(context) == first_inode
+
+    # A compaction replaces the file, so its inode changes. Compared turn by turn and not against
+    # the first one: across several compactions the file system may hand a freed inode back.
+    inodes =
+      for index <- 1..40 do
+        before = inode(context)
+        run_turn(context, index)
+        {before, inode(context)}
+      end
+
+    assert Enum.any?(inodes, fn {before, current} -> before != current end)
 
     {:ok, turns} = Store.load(context.directory, context.session_id)
     assert turns == History.all(context.session_id)
