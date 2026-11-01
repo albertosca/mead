@@ -45,9 +45,16 @@ defmodule Mead.Session.Pending do
   def clear(nil, _session_id), do: :ok
 
   def clear(directory, session_id) do
-    if Store.valid_session_id?(session_id),
-      do: Record.remove_leftover(Path.join(folder(directory), session_id)),
-      else: :ok
+    folder = folder(directory)
+
+    # The directory is synced too, so a power cut does not bring back a marker already cleared.
+    with true <- Store.valid_session_id?(session_id),
+         :ok <- Record.remove_leftover(Path.join(folder, session_id)) do
+      Record.sync_directory(folder)
+    else
+      false -> :ok
+      error -> error
+    end
   end
 
   @doc "Lists the marked sessions with their settings, ignoring anything that is not a marker."

@@ -18,6 +18,49 @@ defmodule Mead.Session.PendingTest do
     assert Pending.clear(directory, session_id) == :ok
   end
 
+  # The removal is a change to the folder, so a power cut right after a cleared marker would
+  # otherwise bring it back, and the keeper would resume a turn that had already ended.
+  test "clearing a marker syncs the folder it was in", %{tmp_dir: directory} do
+    session_id = Mead.UUID.generate()
+    :ok = Pending.mark(directory, session_id, @settings)
+    folder = directory |> Path.join("pending") |> Path.expand()
+
+    # A process does not receive its own traces, so another one forwards them.
+    test_process = self()
+    tracer = spawn_link(fn -> forward_traces(test_process) end)
+    :erlang.trace_pattern({Mead.Session.Record, :sync_directory, 1}, true, [])
+    :erlang.trace(self(), true, [:call, {:tracer, tracer}])
+
+    try do
+      assert Pending.clear(directory, session_id) == :ok
+    after
+      :erlang.trace(self(), false, [:call])
+      :erlang.trace_pattern({Mead.Session.Record, :sync_directory, 1}, false, [])
+    end
+
+    synced =
+      for {:trace, _pid, :call, {Mead.Session.Record, :sync_directory, [path]}} <- flush_traces(),
+          do: Path.expand(path)
+
+    assert folder in synced
+  end
+
+  defp forward_traces(receiver) do
+    receive do
+      trace ->
+        send(receiver, trace)
+        forward_traces(receiver)
+    end
+  end
+
+  defp flush_traces(collected \\ []) do
+    receive do
+      {:trace, _pid, :call, _call} = trace -> flush_traces([trace | collected])
+    after
+      200 -> Enum.reverse(collected)
+    end
+  end
+
   test "marking twice keeps one marker with the newest settings", %{tmp_dir: directory} do
     session_id = Mead.UUID.generate()
     :ok = Pending.mark(directory, session_id, @settings)
