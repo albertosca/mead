@@ -172,7 +172,9 @@ defmodule Mead.CompactionTest do
     File.write!(file_of(directory, session_id) <> ".tmp", "leftover")
 
     assert Mead.delete_session(session_id) == :ok
-    assert File.ls!(directory) == []
+    # The pending directory the turns' markers lived in stays, empty.
+    assert File.ls!(directory) -- ["pending"] == []
+    assert File.ls!(Path.join(directory, "pending")) == []
   end
 
   test "an explicit compaction without a file does not log a warning" do

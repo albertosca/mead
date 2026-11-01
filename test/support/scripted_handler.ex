@@ -27,4 +27,7 @@ defmodule Mead.Test.ScriptedHandler do
       :release -> {:ok, :released}
     end
   end
+
+  @impl true
+  def resume_turn(history, input, _steps, options), do: handle_turn(history, input, options)
 end

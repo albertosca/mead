@@ -33,7 +33,7 @@ defmodule Mead.Session.CrashRecoveryTest do
     new_pid
   end
 
-  test "a server killed mid-turn comes back with the same id and its history, and the turn is interrupted" do
+  test "a server killed mid-turn comes back with the same id and its history, and the turn continues" do
     session_id = start_session!()
     assert Mead.submit_turn(session_id, {:echo, "before"}) == {:ok, "before"}
     old_server_pid = Session.whereis(session_id, :server)
@@ -44,7 +44,10 @@ defmodule Mead.Session.CrashRecoveryTest do
 
     Process.exit(old_server_pid, :kill)
 
-    assert Task.await(caller) == {:error, :session_crashed}
+    assert_receive {:handler_started, continued_pid}
+    refute continued_pid == handler_pid
+    send(continued_pid, :release)
+    assert Task.await(caller) == {:ok, :released}
 
     new_server_pid =
       wait_until(fn ->
@@ -57,7 +60,7 @@ defmodule Mead.Session.CrashRecoveryTest do
     assert {:ok,
             [
               %Turn{input: {:echo, "before"}, status: :ok, output: "before"},
-              %Turn{input: {:block, _}, status: :interrupted}
+              %Turn{input: {:block, _}, status: :ok, output: :released}
             ]} = Mead.history(session_id)
 
     assert Mead.submit_turn(session_id, {:echo, "after"}) == {:ok, "after"}

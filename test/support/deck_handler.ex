@@ -117,4 +117,7 @@ defmodule Mead.Test.DeckHandler do
       {:error, reason} -> {:ok, "no choice #{reason}"}
     end
   end
+
+  @impl true
+  def resume_turn(history, input, _steps, options), do: handle_turn(history, input, options)
 end

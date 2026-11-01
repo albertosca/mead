@@ -16,17 +16,17 @@ Each session is one append-only file named after its id, with a checksum on ever
 
 ### Durable turns
 
-A turn submitted with a `client_turn_id` survives a crash of its session server, a restart of the session pool and a stop of the whole node, as long as its handler implements `resume_turn/4` (the router does).
+Every turn survives a crash of its session server, a restart of the session pool and a stop of the whole node. A turn submitted without a `client_turn_id` gets a generated one (`"mead-<uuid>"`, shown in the history), and every handler implements `resume_turn/4`: `Mead.start_session/1` refuses one that does not. A handler with nothing to checkpoint resumes by running the turn again.
 
 * Every step of a routed turn is recorded as a checkpoint: its route, each model response, each tool call as it starts and as it ends. A continued turn replays them instead of asking again.
 * A `:read` tool call that was running is run again. An `:effect` call that was running is never run again: the model is told it may or may not have taken effect, so it can check before calling it again.
-* A session with a keyed turn in progress leaves a marker under `<directory>/pending/`. `Mead.Session.Keeper` resumes those sessions at boot, so the turn continues without anyone asking. An orderly shutdown suspends running turns instead of failing them.
-* The keyed call itself waits through a restart of its session server and returns the continued turn's outcome; its caller never sees the crash unless the server does not come back within 5 seconds of it. Submitting again with the same key and input joins the running turn or returns its outcome.
+* A session with a turn in progress leaves a marker under `<directory>/pending/`. `Mead.Session.Keeper` resumes those sessions at boot, so the turn continues without anyone asking. An orderly shutdown suspends running turns instead of failing them.
+* The call itself waits through a restart of its session server and returns the continued turn's outcome; its caller never sees the crash unless the server does not come back within 5 seconds of it. Submitting again with the same key and input joins the running turn or returns its outcome.
 * A turn whose own session keeps failing is continued at most 3 times; after that it ends `interrupted`, so a turn that crashes whatever runs it cannot loop. Cuts caused by a restart of the infrastructure around the session (the pool, the turn supervisor, the registry, or the node) do not count toward those 3, only toward a total of 20.
-* A crash of the turn supervisor or of the registry leaves a keyed turn in progress, and it continues once the tree is back.
+* A crash of the turn supervisor or of the registry leaves the turn in progress, and it continues once the tree is back.
 * An `:effect` call that was cancelled, timed out, lost its connection, got an unreadable answer or crashed while running is reported to the model as one that may or may not have taken effect.
 * Every new file's directory is synced, and every deck event is synced before a client is sent it, so a power cut loses no name and reuses no sequence number. On macOS a sync is a real flush of the drive's cache (`F_FULLFSYNC`), not only the ordering barrier Erlang's `:file.sync/1` gives there.
-* `Mead.stop_session/1` is final: the running turn ends `interrupted` and is never continued. An unkeyed turn, or one whose handler cannot resume, also ends `interrupted` after a crash.
+* `Mead.stop_session/1` is final: the running turn ends `interrupted` and is never continued. A turn recorded by an older version, before turns kept their options, also ends `interrupted` after a crash. Resubmitting without a key opens a new turn; pass your own `client_turn_id` to join the one running.
 
 ### Compaction and trimming
 

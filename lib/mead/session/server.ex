@@ -25,8 +25,9 @@ defmodule Mead.Session.Server do
 
   Every turn gets a `:checkpoint` option that records its steps in the history. When the server
   starts and the newest turn is still in progress, it continues that turn when it can: the turn
-  has a `client_turn_id`, the options it was submitted with were recorded, and the handler
-  implements `resume_turn/4`. The continuation runs with no waiters (a submit repeating the key
+  has a `client_turn_id` (every turn gets one; `Mead.submit_turn/3` generates it when the caller
+  gives none), the options it was submitted with were recorded, and the handler implements
+  `resume_turn/4`, which `Mead.start_session/1` requires. The continuation runs with no waiters (a submit repeating the key
   joins it) and gets the recorded steps. A turn whose own session cut it is continued at most 3
   times, counted only while the infrastructure stays the same (`Mead.Session.Generation`); one cut
   by a pool, turn supervisor, registry or node restart is continued up to 20 times in all. The
@@ -221,7 +222,7 @@ defmodule Mead.Session.Server do
   end
 
   # Only a keyed turn that recorded its options can be continued, and only by a handler that
-  # knows how.
+  # knows how; a turn recorded before keys were generated or options were kept is not.
   defp continuable?(
          %Turn{status: :in_progress, client_turn_id: key, turn_options: turn_options},
          handler

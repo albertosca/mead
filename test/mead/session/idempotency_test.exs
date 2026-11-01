@@ -60,21 +60,13 @@ defmodule Mead.Session.IdempotencyTest do
       assert {:ok, [%Turn{status: :timeout}]} = Mead.history(session_id)
     end
 
-    test "after a turn interrupted by a server crash returns :interrupted and runs nothing" do
+    test "after a turn crashes spent its resumes returns :interrupted and runs nothing" do
       session_id = start_session!()
       test_pid = self()
       input = {:block, test_pid}
 
       spawn(fn -> Mead.submit_turn(session_id, input, client_turn_id: "key-1") end)
-      assert_receive {:handler_started, _handler_pid}
-
-      old_server = Session.whereis(session_id, :server)
-      Process.exit(old_server, :kill)
-
-      wait_until(fn ->
-        match?({:ok, [%Turn{status: :interrupted}]}, Mead.history(session_id)) and
-          Session.whereis(session_id, :server) not in [nil, old_server]
-      end)
+      crash_until_interrupted(session_id)
 
       assert Mead.submit_turn(session_id, input, client_turn_id: "key-1") ==
                {:error, :interrupted}

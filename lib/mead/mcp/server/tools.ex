@@ -261,8 +261,8 @@ defmodule Mead.MCP.Server.Tools do
 
   # A keyed submission waits through its server's restarts and answers with the turn's own
   # outcome, so a keyed `:session_crashed` means the server did not come back within that wait.
-  # The turn is continued once it does, when its handler can resume it, and ends interrupted
-  # when it cannot; either way its caller only has to ask again to learn which.
+  # The turn is continued once it does, or ends interrupted once its resume budget is spent;
+  # either way its caller only has to ask again to learn which.
   defp turn_result({:error, :session_crashed}, true),
     do:
       failure(
@@ -271,11 +271,19 @@ defmodule Mead.MCP.Server.Tools do
           "client_turn_id to get its outcome"
       )
 
+  # A turn without a key got one from mead that the client never saw, so the history is where the
+  # client finds the outcome of the continued turn.
+  defp turn_result({:error, :session_crashed}, false),
+    do:
+      failure(
+        "the session restarted while the turn ran and did not come back in time; the turn " <>
+          "continues on its own once it does, and the history tool shows its outcome"
+      )
+
   defp turn_result({:error, reason}, _keyed), do: failure(turn_failure(reason))
 
   defp turn_failure(:not_found), do: "unknown session"
   defp turn_failure(:session_stopped), do: "the session was stopped during the turn"
-  defp turn_failure(:session_crashed), do: "the session crashed during the turn"
   defp turn_failure(:turn_in_progress), do: "a turn is already running in this session"
   defp turn_failure(:timeout), do: "the turn timed out"
   defp turn_failure({:persistence, _reason}), do: "the conversation could not be saved"

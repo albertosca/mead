@@ -14,4 +14,7 @@ defmodule Mead.Test.ToolHandler do
     Mead.Test.FakeHub.configure(hub_settings)
     Mead.Router.route(history, input, options, slots, Mead.Test.FakeHub)
   end
+
+  @impl true
+  def resume_turn(history, input, _steps, options), do: handle_turn(history, input, options)
 end

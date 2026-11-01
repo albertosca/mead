@@ -29,6 +29,28 @@ defmodule Mead.TestHelpers do
   end
 
   @doc """
+  Kills the session's server each time its handler announces `{:handler_started, pid}`, until the
+  turn has started `starts` times, and waits for the server that replaces the last one. With the
+  default 4, a turn whose handler resumes by running again spends its crash budget of 3 and the
+  next start ends it interrupted.
+  """
+  def crash_until_interrupted(session_id, starts \\ 4) do
+    for _start <- 1..starts do
+      receive do
+        {:handler_started, _pid} -> :ok
+      after
+        10_000 -> raise "the handler did not start"
+      end
+
+      old_server = Mead.Session.whereis(session_id, :server)
+      Process.exit(old_server, :kill)
+      wait_until(fn -> Mead.Session.whereis(session_id, :server) not in [nil, old_server] end)
+    end
+
+    wait_until(fn -> match?({:ok, [%{status: :interrupted} | _]}, Mead.history(session_id)) end)
+  end
+
+  @doc """
   Waits until the root supervisor can take `free` more restarts without reaching its intensity.
 
   Every test that kills a root child spends one of the 10 restarts the root allows in 5 seconds,

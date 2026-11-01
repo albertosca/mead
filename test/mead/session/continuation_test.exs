@@ -177,28 +177,53 @@ defmodule Mead.Session.ContinuationTest do
     assert is_function(first[:checkpoint], 1)
   end
 
-  test "an unkeyed turn is interrupted when its server is killed" do
+  # A turn submitted without a key gets one from mead, so a crash continues it like any other.
+  test "a turn submitted without a key continues after a crash and answers its caller" do
     session_id = start_session!()
     input = {:checkpointed, self(), [:a, :b]}
     caller = Task.async(fn -> Mead.submit_turn(session_id, input) end)
     assert_receive {:handler_at, _pid, [:a]}
 
     kill_server(session_id)
-    Task.await(caller)
 
-    wait_until(fn -> match?({:ok, [%Turn{status: :interrupted}]}, Mead.history(session_id)) end)
-    refute_received {:resumed_with, _steps}
+    assert_receive {:resumed_with, [:a]}
+    assert_receive {:handler_at, continued, [:a, :b]}
+    send(continued, :release)
+
+    assert Task.await(caller) == {:ok, [:a, :b]}
+
+    assert {:ok, [%Turn{status: :ok, client_turn_id: "mead-" <> generated}]} =
+             Mead.history(session_id)
+
+    assert generated =~
+             ~r/\A[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\z/
   end
 
-  test "a keyed turn of a handler that cannot continue is interrupted" do
+  test "two turns submitted without a key with the same input both run" do
+    session_id = start_session!()
+
+    assert Mead.submit_turn(session_id, {:echo, "same"}) == {:ok, "same"}
+    assert Mead.submit_turn(session_id, {:echo, "same"}) == {:ok, "same"}
+
+    assert {:ok, [%Turn{client_turn_id: first}, %Turn{client_turn_id: second}]} =
+             Mead.history(session_id)
+
+    assert is_binary(first) and is_binary(second)
+
+    assert first != second
+  end
+
+  test "a keyed turn of a handler that resumes by running again runs again after a crash" do
     session_id = start_session!(ScriptedHandler)
     caller = submit(session_id, {:block, self()}, "key-1")
     assert_receive {:handler_started, _pid}
 
     kill_server(session_id)
-    Task.await(caller)
+    assert_receive {:handler_started, continued}
+    send(continued, :release)
 
-    wait_until(fn -> match?({:ok, [%Turn{status: :interrupted}]}, Mead.history(session_id)) end)
+    assert Task.await(caller) == {:ok, :released}
+    assert {:ok, [%Turn{status: :ok, output: :released}]} = Mead.history(session_id)
   end
 
   test "a keyed turn recorded without turn options is interrupted", %{directory: directory} do
@@ -245,15 +270,17 @@ defmodule Mead.Session.ContinuationTest do
     assert Pending.list(directory) == []
   end
 
-  test "an unkeyed turn is not marked", %{directory: directory} do
+  # The marker is what lets the keeper continue the turn after a node stop.
+  test "a turn submitted without a key is marked pending while it runs", %{directory: directory} do
     session_id = start_session!()
     input = {:checkpointed, self(), [:a]}
     caller = Task.async(fn -> Mead.submit_turn(session_id, input) end)
     assert_receive {:handler_at, handler_pid, [:a]}
 
-    assert Pending.list(directory) == []
+    assert [{^session_id, _options}] = Pending.list(directory)
     send(handler_pid, :release)
     Task.await(caller)
+    assert Pending.list(directory) == []
   end
 
   test "a resumed session continues its keyed turn instead of interrupting it", %{

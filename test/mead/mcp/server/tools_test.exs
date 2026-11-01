@@ -4,6 +4,9 @@ defmodule Mead.MCP.Server.ToolsTest.NonStringHandler do
 
   @impl true
   def handle_turn(_history, _input, _options), do: {:ok, %{reply: [1, 2, 3]}}
+
+  @impl true
+  def resume_turn(history, input, _steps, options), do: handle_turn(history, input, options)
 end
 
 defmodule Mead.MCP.Server.ToolsTest do
@@ -296,20 +299,12 @@ defmodule Mead.MCP.Server.ToolsTest do
       assert text(second_result) == "released"
     end
 
-    test "a repeat of a turn a server crash interrupted says it will not run again" do
+    test "a repeat of a turn crashes interrupted says it will not run again" do
       session_id = start_session!()
       Process.register(self(), :mcp_text_handler_test)
 
       spawn(fn -> submit(session_id, "block", %{"client_turn_id" => "key-1"}) end)
-      assert_receive {:handler_started, _handler}, 10_000
-
-      old_server = Mead.Session.whereis(session_id, :server)
-      Process.exit(old_server, :kill)
-
-      wait_until(fn ->
-        match?({:ok, [%{status: :interrupted}]}, Mead.history(session_id)) and
-          Mead.Session.whereis(session_id, :server) not in [nil, old_server]
-      end)
+      crash_until_interrupted(session_id)
 
       assert {:ok, %{"isError" => true} = result} =
                submit(session_id, "block", %{"client_turn_id" => "key-1"})
@@ -327,11 +322,11 @@ defmodule Mead.MCP.Server.ToolsTest do
       assert_receive {:handler_started, _handler}, 10_000
       Process.exit(Mead.Session.whereis(session_id, :server), :kill)
 
-      assert {:ok, %{"isError" => true} = result} = Task.await(caller)
+      assert_receive {:handler_started, continued}, 10_000
+      send(continued, :release)
 
-      assert text(result) ==
-               "the turn was interrupted by a server restart and will not run again; " <>
-                 "send a new client_turn_id to try again"
+      assert {:ok, %{"isError" => false} = result} = Task.await(caller)
+      assert text(result) == "released"
     end
 
     test "a keyed turn whose server does not come back in time says how to get its result" do
@@ -365,7 +360,41 @@ defmodule Mead.MCP.Server.ToolsTest do
                  "client_turn_id to get its outcome"
     end
 
-    test "a turn without a key cut by a server crash says the session crashed" do
+    test "a turn without a key whose server does not come back in time points to the history" do
+      previous_wait = Application.fetch_env(:mead, :restart_wait)
+      Application.put_env(:mead, :restart_wait, 200)
+
+      on_exit(fn ->
+        case previous_wait do
+          {:ok, value} -> Application.put_env(:mead, :restart_wait, value)
+          :error -> Application.delete_env(:mead, :restart_wait)
+        end
+      end)
+
+      session_id = start_session!()
+      Process.register(self(), :mcp_text_handler_test)
+      supervisor = Mead.Session.whereis(session_id, :supervisor)
+
+      caller = Task.async(fn -> submit(session_id, "block") end)
+      assert_receive {:handler_started, _handler}, 10_000
+
+      :sys.suspend(supervisor)
+      Process.exit(Mead.Session.whereis(session_id, :server), :kill)
+
+      assert {:ok, %{"isError" => true} = result} = Task.await(caller)
+      :sys.resume(supervisor)
+
+      assert text(result) ==
+               "the session restarted while the turn ran and did not come back in time; the " <>
+                 "turn continues on its own once it does, and the history tool shows its " <>
+                 "outcome"
+
+      assert_receive {:handler_started, continued}, 10_000
+      send(continued, :release)
+      wait_until(fn -> match?({:ok, [%{status: :ok}]}, Mead.history(session_id)) end)
+    end
+
+    test "a turn without a key cut by a server crash answers with the continued turn" do
       session_id = start_session!()
       Process.register(self(), :mcp_text_handler_test)
 
@@ -373,8 +402,11 @@ defmodule Mead.MCP.Server.ToolsTest do
       assert_receive {:handler_started, _handler}, 10_000
       Process.exit(Mead.Session.whereis(session_id, :server), :kill)
 
-      assert {:ok, %{"isError" => true} = result} = Task.await(caller)
-      assert text(result) == "the session crashed during the turn"
+      assert_receive {:handler_started, continued}, 10_000
+      send(continued, :release)
+
+      assert {:ok, %{"isError" => false} = result} = Task.await(caller)
+      assert text(result) == "released"
     end
 
     test "a key reused with another input names the key, the original turn and the way out" do
@@ -446,7 +478,11 @@ defmodule Mead.MCP.Server.ToolsTest do
       assert {:ok, %{"isError" => false}} =
                submit(session_id, "echo hi", %{"client_turn_id" => nil})
 
-      assert {:ok, [%{client_turn_id: nil}, %{client_turn_id: nil}]} = Mead.history(session_id)
+      # Each got a key of its own from mead, so the second did not repeat the first.
+      assert {:ok, [%{client_turn_id: "mead-" <> first}, %{client_turn_id: "mead-" <> second}]} =
+               Mead.history(session_id)
+
+      assert first != second
     end
 
     test "quotes and backslashes in the original input stay escaped in the preview" do
@@ -461,14 +497,14 @@ defmodule Mead.MCP.Server.ToolsTest do
   end
 
   describe "history" do
-    test "shows each turn's client_turn_id, null when it had none" do
+    test "shows each turn's client_turn_id, the one mead generated when it had none" do
       session_id = start_session!()
       {:ok, _result} = submit(session_id, "echo keyed", %{"client_turn_id" => "key-1"})
       {:ok, _result} = submit(session_id, "echo plain")
 
       assert {:ok, result} = Tools.call("history", %{"session_id" => session_id}, @closed)
 
-      assert [%{"client_turn_id" => "key-1"}, %{"client_turn_id" => nil}] =
+      assert [%{"client_turn_id" => "key-1"}, %{"client_turn_id" => "mead-" <> _generated}] =
                JSON.decode!(text(result))
     end
 

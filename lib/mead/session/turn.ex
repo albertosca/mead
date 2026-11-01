@@ -2,7 +2,9 @@ defmodule Mead.Session.Turn do
   @moduledoc """
   One exchange in a conversation: the input, the output once known, and how it ended.
 
-  `client_turn_id` is the caller's idempotency key, or `nil`; see `Mead.Session.Server`.
+  `client_turn_id` is the caller's idempotency key, or `"mead-<uuid>"` that `Mead.submit_turn/3`
+  generates when the caller gives none; `nil` only for a turn recorded before keys were generated.
+  See `Mead.Session.Server`.
 
   A turn in progress also carries what it needs to continue after a restart: `steps`, the checkpoint its handler recorded so far, in order (an opaque term per step, cleared when the turn closes); `resumes`, how many times it was continued; `crash_resumes`, how many of those continued an attempt cut under the same infrastructure, so by the session itself; `generation`, a fingerprint of the infrastructure the current attempt runs under (`Mead.Session.Generation`), `nil` when none was recorded; and `turn_options`, the options its handler needs to continue (`%{route: route, tools: tools | nil, interactive: boolean}`, never a pid), `%{}` for a turn recorded before this existed, which is never continued.
   """

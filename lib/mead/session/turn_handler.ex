@@ -9,11 +9,12 @@ defmodule Mead.Session.TurnHandler do
   session down.
 
   `checkpoint` is a one-argument function that records a step of the turn (any term the handler
-  chooses) and answers `:ok` or `{:error, reason}`. A handler that also implements the optional
-  `resume_turn/4` can continue a turn submitted with a `client_turn_id` that was cut short by a
-  crash or a stop: it gets the steps recorded so far, in order, and must not redo their work. A
-  handler that records a step must stop when the write fails, because nothing it does after that
-  can be continued.
+  chooses) and answers `:ok` or `{:error, reason}`. `resume_turn/4` continues a turn that a crash
+  or a stop cut short: it gets the steps recorded so far, in order, and must not redo their work.
+  It is required, and `Mead.start_session/1` refuses a handler without it, so every turn can
+  continue. A handler that records no steps can resume by calling `handle_turn/3` again, which is
+  only safe when running the turn twice is. A handler that records a step must stop when the write
+  fails, because nothing it does after that can be continued.
   """
 
   alias Mead.Session.Turn
@@ -27,6 +28,4 @@ defmodule Mead.Session.TurnHandler do
               steps :: [term()],
               options :: keyword()
             ) :: {:ok, output :: term()} | {:error, reason :: term()}
-
-  @optional_callbacks resume_turn: 4
 end

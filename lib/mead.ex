@@ -33,8 +33,8 @@ defmodule Mead do
 
   ## Options
 
-    * `:handler` - module implementing `Mead.Session.TurnHandler`; defaults to the
-      `:turn_handler` application setting, then to `Mead.Session.EchoHandler`.
+    * `:handler` - module implementing `Mead.Session.TurnHandler`, `resume_turn/4` included;
+      defaults to the `:turn_handler` application setting, then to `Mead.Session.EchoHandler`.
     * `:turn_timeout` - milliseconds a single turn may run; defaults to the `:turn_timeout`
       application setting, then to 30 seconds.
 
@@ -51,9 +51,9 @@ defmodule Mead do
   Starts a session again from the conversation stored under `session_id`.
 
   It takes the options of `start_session/1`, because the handler and the timeout are not stored.
-  A turn that was still running when the session ended continues from its checkpoint when it was
-  submitted with a `client_turn_id` and the handler implements `resume_turn/4` (see
-  `Mead.Session.Server`); any other comes back as `:interrupted`. Needs
+  A turn that was still running when the session ended continues from its checkpoint (see
+  `Mead.Session.Server`); only one recorded before turns kept their options, or one past its
+  resume budget, comes back as `:interrupted`. Needs
   `config :mead, :storage, directory: ...`; without it nothing is stored and the answer is
   `{:error, :not_found}`, which is also the answer for an id with no file or one that is not a
   session id. A running session is `{:error, :already_running}`, and a file damaged anywhere but
@@ -142,11 +142,19 @@ defmodule Mead do
   end
 
   defp validate_handler!(handler) when is_atom(handler) and handler not in [nil, true, false] do
-    if Code.ensure_loaded?(handler) and function_exported?(handler, :handle_turn, 3) do
-      handler
-    else
-      raise ArgumentError,
-            "handler #{inspect(handler)} must be a module that defines handle_turn/3"
+    cond do
+      not (Code.ensure_loaded?(handler) and function_exported?(handler, :handle_turn, 3)) ->
+        raise ArgumentError,
+              "handler #{inspect(handler)} must be a module that defines handle_turn/3"
+
+      not function_exported?(handler, :resume_turn, 4) ->
+        raise ArgumentError,
+              "handler #{inspect(handler)} must define resume_turn/4, so a turn it runs can " <>
+                "continue after a crash; a handler with nothing to checkpoint can resume by " <>
+                "calling handle_turn/3 again"
+
+      true ->
+        handler
     end
   end
 
@@ -191,14 +199,15 @@ defmodule Mead do
       as new only once a compaction has dropped its turn: an explicit `compact_session/1`, the
       automatic one past `compact_after_bytes`, or the one at resume. Until then it is still
       found, however old. Anything else returns `{:error, :invalid_client_turn_id}` before a
-      turn is recorded.
+      turn is recorded. Without it mead generates `"mead-<uuid>"`, which the history shows, so
+      every turn can be continued after a crash; only the caller's own key lets a resubmission
+      join the turn.
 
   Returns `{:error, :not_found}` for an unknown session, `{:error, :session_stopped}` when the
   session was stopped with `stop_session/1` while the turn was running, and
-  `{:error, :session_crashed}` when the session's server died for any other reason. A keyed call
+  `{:error, :session_crashed}` when the session's server died for any other reason. The call
   does not return on that crash: it waits for the restarted server, which continues the turn from
-  its checkpoint when its handler implements `resume_turn/4` and ends it interrupted otherwise,
-  and returns that turn's outcome. Each crash starts a 5-second wait again, so a turn that keeps
+  its checkpoint, and returns that turn's outcome. Each crash starts a 5-second wait again, so a turn that keeps
   crashing ends when the server's resume budget does; only a server that does not come back
   within the wait returns `:session_crashed`, and even then the turn is continued once it does,
   so submitting again with the same key and input joins it or returns its outcome.
@@ -260,18 +269,23 @@ defmodule Mead do
   @default_restart_wait 5_000
   @restart_retry_interval 50
 
+  # A turn submitted without a key gets a fresh one, so every turn is continued after a crash and
+  # its caller waits through the restart for the outcome. Nobody else knows the key, so the turn
+  # never joins or repeats another.
   defp run_turn(session_id, input, options) do
-    if Keyword.has_key?(options, :client_turn_id) do
-      run_through_restarts(session_id, input, options, nil)
-    else
-      call_server(session_id, input, options)
-    end
+    options = Keyword.put_new_lazy(options, :client_turn_id, &generated_client_turn_id/0)
+    run_through_restarts(session_id, input, options, nil)
   end
+
+  @generated_key_prefix "mead-"
+
+  defp generated_client_turn_id, do: @generated_key_prefix <> Mead.UUID.generate()
 
   # A server that crashes answers `:session_crashed` to the turn it was running, and the session
   # has no server while its supervisor (or the pool, or the keeper) starts it again. The restarted
-  # server continues the keyed turn, or ends it interrupted, and the same submission joins it or
-  # gets its outcome, so a keyed caller sees the turn's result instead of the restart.
+  # server continues the turn, or ends it interrupted once its budget is spent, and the same
+  # submission joins it or gets its outcome, so the caller sees the turn's result instead of the
+  # restart.
   #
   # A `:not_found` before any crash is an unknown session and returns at once. Each crash starts
   # the wait again, since it proves a server came back and took the turn: the turn may run for

@@ -1,3 +1,8 @@
+defmodule Mead.MeadTest.HandleOnlyHandler do
+  @moduledoc false
+  def handle_turn(_history, input, _options), do: {:ok, input}
+end
+
 defmodule Mead.MeadTest do
   use ExUnit.Case, async: true
 
@@ -55,6 +60,14 @@ defmodule Mead.MeadTest do
     test "rejects options that are not a keyword list" do
       for invalid <- [%{}, nil, "options", [:handler]] do
         assert_raise ArgumentError, ~r/keyword list/, fn -> Mead.start_session(invalid) end
+      end
+    end
+
+    # Every turn must be able to continue after a crash, so a handler that cannot resume one is
+    # refused before any session runs it.
+    test "rejects a handler that does not implement resume_turn/4" do
+      assert_raise ArgumentError, ~r/resume_turn\/4/, fn ->
+        Mead.start_session(handler: Mead.MeadTest.HandleOnlyHandler)
       end
     end
 
