@@ -255,13 +255,17 @@ defmodule Mead.Session.Store do
   defp chronological({:ok, turns}), do: {:ok, Enum.reverse(turns)}
   defp chronological({:error, _reason} = error), do: error
 
-  defp apply_event({:append, %Turn{} = turn}, turns), do: {:ok, [turn | turns]}
+  defp apply_event({:append, %Turn{} = turn}, turns), do: {:ok, [current(turn) | turns]}
 
   defp apply_event({:replace_last, %Turn{} = turn}, [_newest | older]),
-    do: {:ok, [turn | older]}
+    do: {:ok, [current(turn) | older]}
 
   defp apply_event(:interrupt, turns), do: {:ok, Enum.map(turns, &Turn.interrupt/1)}
   defp apply_event(_other, _turns), do: {:error, :corrupt_history}
+
+  # A turn written before a field existed decodes as a %Turn{} map without that key, and reading
+  # the field would raise. Rebuilding it fills every missing field with its default.
+  defp current(turn), do: struct(Turn, Map.from_struct(turn))
 
   @doc """
   Lists the stored sessions, newest first, as maps with the `:session_id` and the `:updated_at` of
