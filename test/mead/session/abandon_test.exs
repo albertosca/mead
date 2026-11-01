@@ -127,9 +127,10 @@ defmodule Mead.Session.AbandonTest do
              stored_turns(directory, session_id)
 
     assert [{^session_id, _settings}] = Pending.list(directory)
-    assert Mead.submit_turn(session_id, {:echo, "late"}) == {:error, :session_stopped}
+    server = Session.whereis(session_id, :server)
+    assert GenServer.call(server, {:submit, {:echo, "late"}, []}) == {:error, :session_suspended}
 
-    # The waiter is not answered: it belongs to a node that is stopping too.
+    # The waiter is told the session is suspended and keeps waiting for it to come back.
     refute Task.yield(caller, 100)
     Task.shutdown(caller, :brutal_kill)
   end

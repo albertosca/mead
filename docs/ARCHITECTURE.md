@@ -10,6 +10,7 @@
 ```mermaid
 graph TD
     subgraph core_otp ["Core BEAM / OTP - Supervision Tree"]
+        Watchdog["Mead.Watchdog - Restarts the Root"]
         RootSup["Mead.Supervisor"]
         SessionSup["DynamicSupervisor - Sessions"]
         Registry["Registry - Session Registry"]
@@ -20,6 +21,7 @@ graph TD
         Keeper["Mead.Session.Keeper - Resumes Cut Turns"]
     end
 
+    Watchdog --> RootSup
     RootSup --> SessionSup
     RootSup --> Registry
     RootSup --> MCPHub
@@ -39,6 +41,7 @@ graph TD
 ```
 
 ### Component Details
+0. **`Mead.Watchdog`:** The application's top process, above the root supervisor. When the root stops on its own (past its 10 restarts in 5 seconds), the watchdog starts it again after a wait that starts at 100 ms and doubles up to 5 seconds, and goes back to 100 ms once a root has stayed up for 30 seconds; it keeps trying a start that fails. The keeper in the new tree continues the turns the stop cut. Only the first start at boot is not retried, so a node that cannot boot fails at once. `prep_stop/1` stands it down before an orderly stop, so it never brings back the tree the stop takes down.
 1. **`Mead.Supervisor`:** The application root supervisor. Enforces a `rest_for_one` strategy for foundational infrastructure.
 2. **`Mead.Session.Pool` (Sessions):** A `DynamicSupervisor` that starts one `Mead.Session.Supervisor` per active conversation. Each of those supervises that conversation's `Mead.Session.History` and `Mead.Session.Server`.
 3. **`Registry`:** Fast in-memory process registry mapping conversation UUIDs to runtime PIDs for microsecond WebSocket routing.
@@ -90,7 +93,8 @@ Each conversation is a `Mead.Session.Supervisor` started by `Mead.Session.Pool`.
 * A continued turn has no person attached. The session hands its handler `Mead.Session.InteractionRelay`, which waits up to `interaction_grace` (30 seconds by default) for a caller to attach an interaction before it denies a permission as `:unattended`.
 * The session supervisor tolerates 5 restarts in 5 seconds. More take the whole pair down, and that conversation is gone. Neighbouring conversations are never affected.
 * A turn runs in a task under `Mead.TurnSupervisor`, linked to the server, which traps exits. A task that dies because the turn supervisor died was cut by the infrastructure, not by its turn: the turn is left in progress with its marker, as a suspend leaves it, and the keeper continues it once the pool has restarted.
-* A crash of the registry knocks every session down (the registry links to the processes it names), and the keeper continues their turns once the tree is back, without spending their crash budget, however often it happens. The shutdown guard finds the servers to suspend through the pool, not the registry, so it works while the registry is down. A registry killed from outside with `:kill` is not a crash it can survive: its partition still holds the name when the root restarts it, the restart fails until the root gives up, and the node stops; marked turns continue at the next boot.
+* A crash of the registry knocks every session down (the registry links to the processes it names), and the keeper continues their turns once the tree is back, without spending their crash budget, however often it happens. The shutdown guard finds the servers to suspend through the pool, not the registry, so it works while the registry is down. A registry killed from outside with `:kill` is not a crash it can survive: its partition still holds the name when the root restarts it, the restart fails until the root gives up; the watchdog then starts a fresh root, and the keeper continues the marked turns.
+* A caller waits through all of it. A server that exits under a call, with `:shutdown` too, answers `:session_crashed`, and a suspended server answers `:session_suspended`; `Mead.submit_turn/3` waits through both, since only a deliberate stop answers `:session_stopped`, and while the registry is down a session reads as not running, which a caller already waiting retries (a new submission in that window gets `:not_found` at once, as for an unknown session). A submission that races `stop_session/1` and reaches the server as it exits waits the 5 seconds and gets `:session_crashed`.
 * A handler that raises, exits, returns garbage, or exceeds the turn timeout fails only that turn, with the status `failed` or `timeout`.
 * A server death takes its running task with it.
 
@@ -264,7 +268,7 @@ A bug in the dispatcher becomes a generic 500. Its log line names only the excep
 
 * The listener serves at most `maximum_connections` connections at once (rounded up to a multiple of 10 from 10 on). It closes one that finds no room after about a second.
 * The session pool refuses a session beyond `config :mead, :maximum_sessions` (default 1000) with `{:error, :max_children}`, which `start_session` reports as "the session could not be started".
-* The root supervisor tolerates 10 restarts in 5 seconds.
+* The root supervisor tolerates 10 restarts in 5 seconds; past that `Mead.Watchdog` starts it again.
 
 ### Not in this slice
 

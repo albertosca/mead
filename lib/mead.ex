@@ -297,9 +297,13 @@ defmodule Mead do
       {:error, :not_found} = result when deadline == nil ->
         result
 
-      {:error, reason} when reason in [:session_crashed, :not_found] ->
+      {:error, reason} when reason in [:session_crashed, :session_suspended, :not_found] ->
         deadline =
-          if reason == :session_crashed, do: restart_deadline(), else: deadline
+          cond do
+            reason == :session_crashed -> restart_deadline()
+            deadline == nil -> restart_deadline()
+            true -> deadline
+          end
 
         if System.monotonic_time(:millisecond) < deadline do
           Process.sleep(@restart_retry_interval)
@@ -327,8 +331,9 @@ defmodule Mead do
         try do
           GenServer.call(pid, {:submit, input, options}, :infinity)
         catch
-          :exit, {{:shutdown, _detail}, _call} -> {:error, :session_stopped}
-          :exit, {:shutdown, _call} -> {:error, :session_stopped}
+          # A deliberate stop answers `:session_stopped` before the server goes, so a server that
+          # exits under a call, `:shutdown` included, was taken down by a crash or a restart
+          # around it, and the turn continues once it is back.
           :exit, _reason -> {:error, :session_crashed}
         end
     end

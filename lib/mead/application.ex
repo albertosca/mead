@@ -28,17 +28,34 @@ defmodule Mead.Application do
       Mead.MCP.Server
     ]
 
-    Supervisor.start_link(children, supervisor_options())
+    # The watchdog sits above the root, so a root that runs out of restarts is started again
+    # instead of stopping the application; the keeper then continues the turns it cut.
+    Mead.Watchdog.start_link(
+      name: Mead.Watchdog,
+      start: {Supervisor, :start_link, [children, supervisor_options()]}
+    )
   end
 
   # Runs before any child stops, while the hub and the channels are still up, so a turn cut by the
   # shutdown is suspended (and continues at the next boot) instead of recording a failure. The
   # listener goes first, so no client starts a turn after the suspension that the shutdown would
-  # then cut.
+  # then cut. The watchdog stands down first, so it does not bring back the tree the stop takes
+  # down, and a root that is down at that moment (the watchdog waiting to restart it) has nothing
+  # to suspend: its turns were suspended when it stopped and stay marked.
   @impl true
   def prep_stop(state) do
-    Supervisor.terminate_child(Mead.Supervisor, Mead.MCP.Server)
-    Mead.Session.Keeper.suspend_all()
+    Mead.Watchdog.stand_down(Mead.Watchdog)
+
+    if Process.whereis(Mead.Supervisor) do
+      try do
+        Supervisor.terminate_child(Mead.Supervisor, Mead.MCP.Server)
+        Mead.Session.Keeper.suspend_all()
+      catch
+        # The root stopped between the check and the call.
+        :exit, _reason -> :ok
+      end
+    end
+
     state
   end
 

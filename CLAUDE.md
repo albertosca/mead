@@ -36,7 +36,7 @@ Welcome! This document provides complete operational guidelines and technical co
 
 ## 3. Architecture Quick Reference
 
-* Application Root: `Mead.Supervisor` (`rest_for_one` strategy)
+* Application Root: `Mead.Watchdog`, the top process, starts `Mead.Supervisor` (`rest_for_one` strategy) and starts it again with a backoff from 100 ms to 5 s whenever it stops on its own, so running out of root restarts no longer stops the app; `prep_stop` stands it down first.
 * Session Pool: `Mead.Session.Pool` (`DynamicSupervisor`) starting one `Mead.Session.Supervisor` per conversation, which holds a `Mead.Session.History` agent and a `Mead.Session.Server`.
 * Process Registry: Elixir `Registry` mapping UUIDs to running GenServer PIDs.
 * Router: `Mead.Router`, a stateless turn handler (no process) that classifies each turn as local or cloud, calls the provider in that slot (`Mead.Provider`; Anthropic and Ollama implemented), and emits `[:mead, :router, :route]` events for the ledger.

@@ -110,12 +110,13 @@ defmodule Mead.Session.KeeperTest do
 
     keeper = Process.whereis(Keeper)
     Process.exit(Process.whereis(Session.Pool), :kill)
-    assert {:error, _reason} = Task.await(caller)
 
     wait_until(fn -> Process.whereis(Keeper) not in [nil, keeper] end)
     assert_receive {:resumed_with, [:a]}, 5_000
     assert_receive {:handler_at, handler_pid, [:a, :b]}
     send(handler_pid, :release)
+    # The caller waited through the restart.
+    assert Task.await(caller) == {:ok, [:a, :b]}
     wait_until(fn -> finished?(session_id) end)
   end
 
@@ -128,6 +129,8 @@ defmodule Mead.Session.KeeperTest do
     assert_receive {:handler_at, _handler_pid, [:a]}
 
     on_exit(fn -> Supervisor.restart_child(Mead.Supervisor, Mead.MCP.Server) end)
+    # prep_stop stands the watchdog down, which a real stop never takes back; this one does.
+    on_exit(fn -> :sys.replace_state(Mead.Watchdog, &%{&1 | standing_down: false}) end)
     assert Mead.Application.prep_stop(:state) == :state
     Task.shutdown(caller, :brutal_kill)
 
@@ -137,7 +140,18 @@ defmodule Mead.Session.KeeperTest do
 
     assert {:ok, [%Turn{status: :in_progress, steps: [:a]}]} = Mead.history(session_id)
     assert [{^session_id, _settings}] = Pending.list(directory)
-    assert Mead.submit_turn(session_id, {:echo, "late"}) == {:error, :session_stopped}
+    # A suspended session comes back, so a late submit waits for it; this one never does.
+    previous_wait = Application.fetch_env(:mead, :restart_wait)
+    Application.put_env(:mead, :restart_wait, 100)
+
+    on_exit(fn ->
+      case previous_wait do
+        {:ok, value} -> Application.put_env(:mead, :restart_wait, value)
+        :error -> Application.delete_env(:mead, :restart_wait)
+      end
+    end)
+
+    assert Mead.submit_turn(session_id, {:echo, "late"}) == {:error, :session_crashed}
     assert Keeper.suspend_all() == :ok
   end
 end

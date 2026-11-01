@@ -92,6 +92,26 @@ defmodule Mead.Session.ShutdownGuardTest do
     end
   end
 
+  # The caller is not the setup's: it waits for its own turn's outcome through the restart, whether
+  # the restart suspended the turn (a crash before the hub) or only cut it (a pool restart).
+  for {name, crashed} <- [ledger: Mead.Ledger, turn_supervisor: Mead.TurnSupervisor] do
+    test "the caller of a turn cut by a #{name} crash waits and gets the turn's outcome",
+         %{handler_pid: setup_handler} do
+      send(setup_handler, :release)
+      {:ok, session_id} = Mead.start_session(handler: ResumableHandler, turn_timeout: 30_000)
+      on_exit(fn -> Mead.stop_session(session_id) end)
+      input = {:checkpointed, self(), [:x, :y]}
+      caller = Task.async(fn -> Mead.submit_turn(session_id, input) end)
+      assert_receive {:handler_at, _pid, [:x]}
+
+      kill_root_child(unquote(crashed))
+
+      assert_receive {:handler_at, continued, [:x, :y]}, 10_000
+      send(continued, :release)
+      assert Task.await(caller, 10_000) == {:ok, [:x, :y]}
+    end
+  end
+
   test "a turn supervisor crash leaves the turn in progress, and it continues",
        %{session_id: session_id, tmp_dir: directory} do
     kill_root_child(Mead.TurnSupervisor)

@@ -38,7 +38,9 @@ defmodule Mead.Session.Server do
   interrupted for good, its waiters get `{:error, :session_stopped}`, and its marker goes. An
   orderly shutdown of the node goes through `suspend/1` instead, which only stops the running task,
   so the turn stays in progress with its marker and continues at the next boot. After either, the
-  server refuses every submit with `{:error, :session_stopped}` until it terminates.
+  server refuses every submit until it terminates: with `{:error, :session_stopped}` after
+  `abandon/1`, and with `{:error, :session_suspended}`, which a caller waits through, after
+  `suspend/1`.
 
   A turn never holds the caller's interaction itself. Its handler gets
   `interaction: {Mead.Session.InteractionRelay, %{session_id: id}}` whenever the turn is
@@ -100,8 +102,9 @@ defmodule Mead.Session.Server do
 
   @doc """
   Stops the running task without closing its turn, which stays in progress with its marker so it
-  continues when the session comes back, and refuses every later submit. Its waiters get no
-  answer: it is called only when the node stops, and they stop with it. `:ok` for an unknown
+  continues when the session comes back. Its waiters, and every later submit, get
+  `{:error, :session_suspended}`, which `Mead.submit_turn/3` waits through as it waits through a
+  crash: the tree comes back under a caller that outlives the stop. `:ok` for an unknown
   session too. Takes the session id or the server's pid; the pid needs no registry, so a suspend
   still works while the registry is down.
   """
@@ -279,8 +282,13 @@ defmodule Mead.Session.Server do
     do: fn step -> History.append_step(session_id, attempt, step) end
 
   @impl true
-  def handle_call({:submit, _input, _options}, _from, %{stopping: true} = state),
+  def handle_call({:submit, _input, _options}, _from, %{stopping: :abandoned} = state),
     do: {:reply, {:error, :session_stopped}, state}
+
+  # A suspended session comes back, at the next boot or when the watchdog restarts the tree, so
+  # the caller is told to wait for it rather than that it is gone.
+  def handle_call({:submit, _input, _options}, _from, %{stopping: :suspended} = state),
+    do: {:reply, {:error, :session_suspended}, state}
 
   def handle_call({:submit, input, options}, from, state) do
     {client_turn_id, options} = Keyword.pop(options, :client_turn_id)
@@ -314,7 +322,7 @@ defmodule Mead.Session.Server do
 
     record(History.mark_interrupted(state.session_id), state.session_id)
     clear_marker(state)
-    {:reply, :ok, %{state | stopping: true}}
+    {:reply, :ok, %{state | stopping: :abandoned}}
   end
 
   def handle_call(:suspend, _from, state) do
@@ -450,14 +458,17 @@ defmodule Mead.Session.Server do
     end
   end
 
+  # The waiters are told the session is suspended, so a caller that outlives the stop (the watchdog
+  # restarts the tree under it) keeps waiting for the turn instead of giving up on it.
   defp suspended(state) do
     if state.running do
-      Enum.each(state.running.waiters, fn {_from, monitor} ->
+      Enum.each(state.running.waiters, fn {from, monitor} ->
         Process.demonitor(monitor, [:flush])
+        GenServer.reply(from, {:error, :session_suspended})
       end)
     end
 
-    %{state | running: nil, stopping: true}
+    %{state | running: nil, stopping: :suspended}
   end
 
   defp alive?(nil), do: false
