@@ -13,7 +13,8 @@ defmodule Mead.Session.TurnHandler do
   or a stop cut short: it gets the steps recorded so far, in order, and must not redo their work.
   It is required, and `Mead.start_session/1` refuses a handler without it, so every turn can
   continue. A handler that records no steps can resume by calling `handle_turn/3` again, which is
-  only safe when running the turn twice is. A handler that records a step must stop when the write
+  only safe when running the turn twice is; otherwise returning `{:error, :not_resumable}` ends
+  the cut turn as failed and repeats nothing. A handler that records a step must stop when the write
   fails, because nothing it does after that can be continued.
   """
 

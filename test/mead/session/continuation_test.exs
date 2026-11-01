@@ -55,6 +55,37 @@ defmodule Mead.Session.ContinuationTest do
     List.last(turns)
   end
 
+  defmodule UnsafeToRepeatHandler do
+    @moduledoc false
+    @behaviour Mead.Session.TurnHandler
+
+    @impl true
+    def handle_turn(_history, {:side_effect, test_pid}, _options) do
+      send(test_pid, {:side_effect_ran, self()})
+
+      receive do
+        :release -> {:ok, :done}
+      end
+    end
+
+    @impl true
+    def resume_turn(_history, _input, _steps, _options), do: {:error, :not_resumable}
+  end
+
+  # The minimal safe resume_turn/4 the guides recommend for a turn that must not run twice.
+  test "a handler that answers :not_resumable ends the cut turn as failed and repeats nothing" do
+    session_id = start_session!(UnsafeToRepeatHandler)
+    caller = submit(session_id, {:side_effect, self()}, "once")
+    assert_receive {:side_effect_ran, _pid}
+
+    kill_server(session_id)
+
+    assert Task.await(caller) == {:error, {:failed, :not_resumable}}
+    refute_received {:side_effect_ran, _pid}
+    assert {:ok, [%Turn{status: status}]} = Mead.history(session_id)
+    refute status in [:ok, :in_progress]
+  end
+
   # The caller of a keyed turn never learns its server restarted: the submission waits through
   # the restart and returns what the continued turn returns.
   test "a keyed turn continues from its checkpoint and its caller gets the outcome" do

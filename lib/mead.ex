@@ -151,7 +151,8 @@ defmodule Mead do
         raise ArgumentError,
               "handler #{inspect(handler)} must define resume_turn/4, so a turn it runs can " <>
                 "continue after a crash; a handler with nothing to checkpoint can resume by " <>
-                "calling handle_turn/3 again"
+                "calling handle_turn/3 again when running the turn twice is safe, and otherwise " <>
+                "return {:error, :not_resumable}, which ends the cut turn as failed"
 
       true ->
         handler
