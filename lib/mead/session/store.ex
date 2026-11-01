@@ -2,7 +2,7 @@ defmodule Mead.Session.Store do
   @moduledoc """
   Keeps the turns of each conversation in one append-only file per session.
 
-  A file is a sequence of records framed by `Mead.Session.Record`, each the encoding of one event: `{:append, turn}` when a turn starts, `{:replace_last, turn}` when the newest turn is closed, and `:interrupt` when every turn still in progress became interrupted. Replaying the events in order rebuilds the list the history agent held.
+  A file is a sequence of records framed by `Mead.Session.Record`, each the encoding of one event: `{:append, turn}` when a turn starts, `{:step, step}` when the turn in progress records a checkpoint step, `{:resume, count}` when it is continued after a restart, `{:replace_last, turn}` when the newest turn is closed, and `:interrupt` when every turn still in progress became interrupted. Replaying the events in order rebuilds the list the history agent held; a step or a resume that finds no turn in progress is `:corrupt_history`.
 
   A last record that is cut short or fails its payload checksum is what a crash during a write
   leaves, so it is dropped with a warning. The length has a checksum of its own, so a flipped bit
@@ -38,7 +38,12 @@ defmodule Mead.Session.Store do
   @default_compact_after_bytes 1_048_576
   @default_ledger_journal_max_bytes 1_048_576
 
-  @type event :: {:append, Turn.t()} | {:replace_last, Turn.t()} | :interrupt
+  @type event ::
+          {:append, Turn.t()}
+          | {:step, term()}
+          | {:resume, non_neg_integer()}
+          | {:replace_last, Turn.t()}
+          | :interrupt
 
   @doc "Returns the configured storage directory, or `nil` when persistence is off."
   @spec directory() :: String.t() | nil
@@ -259,6 +264,13 @@ defmodule Mead.Session.Store do
 
   defp apply_event({:replace_last, %Turn{} = turn}, [_newest | older]),
     do: {:ok, [current(turn) | older]}
+
+  defp apply_event({:step, step}, [%Turn{status: :in_progress} = newest | older]),
+    do: {:ok, [%{newest | steps: newest.steps ++ [step]} | older]}
+
+  defp apply_event({:resume, count}, [%Turn{status: :in_progress} = newest | older])
+       when is_integer(count) and count >= 0,
+       do: {:ok, [%{newest | resumes: count} | older]}
 
   defp apply_event(:interrupt, turns), do: {:ok, Enum.map(turns, &Turn.interrupt/1)}
   defp apply_event(_other, _turns), do: {:error, :corrupt_history}
