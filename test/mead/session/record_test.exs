@@ -117,11 +117,45 @@ defmodule Mead.Session.RecordTest do
       refute File.exists?(path)
     end
 
-    # A directory opened without the :directory mode is refused with :eisdir, and the refusal is
-    # tolerated, so the only proof the directory reached the disk is that the sync ran on it.
-    test "sync_directory really syncs the directory", %{tmp_dir: directory} do
-      assert [{:file, :sync, [_device]}] =
-               calls_to({:file, :sync, 1}, fn -> Record.sync_directory(directory) end)
+    if :os.type() == {:unix, :darwin} do
+      # On macOS :file.sync/1 is F_BARRIERFSYNC, which does not flush the drive's cache.
+      test "sync flushes the file at the path to the drive", %{tmp_dir: directory} do
+        path = Path.join(directory, "flushed")
+        {:ok, device} = File.open(path, [:append, :binary])
+        IO.binwrite(device, "data")
+
+        full = calls_to({Mead.Native, :full_fsync, 1}, fn -> Record.sync(device, path) end)
+        ordered = calls_to({:file, :sync, 1}, fn -> Record.sync(device, path) end)
+        File.close(device)
+
+        assert full == [{Mead.Native, :full_fsync, [path]}]
+        assert ordered == []
+      end
+
+      # The refusal of a directory sync is tolerated, so the only proof the directory reached the
+      # disk is that the flush ran on it.
+      test "sync_directory really flushes the directory", %{tmp_dir: directory} do
+        assert calls_to({Mead.Native, :full_fsync, 1}, fn ->
+                 Record.sync_directory(directory)
+               end) == [{Mead.Native, :full_fsync, [directory]}]
+      end
+    else
+      test "sync syncs the device", %{tmp_dir: directory} do
+        path = Path.join(directory, "synced")
+        {:ok, device} = File.open(path, [:append, :binary])
+
+        assert [{:file, :sync, [^device]}] =
+                 calls_to({:file, :sync, 1}, fn -> Record.sync(device, path) end)
+
+        File.close(device)
+      end
+
+      # A directory opened without the :directory mode is refused with :eisdir, and the refusal
+      # is tolerated, so the only proof the directory reached the disk is that the sync ran on it.
+      test "sync_directory really syncs the directory", %{tmp_dir: directory} do
+        assert [{:file, :sync, [_device]}] =
+                 calls_to({:file, :sync, 1}, fn -> Record.sync_directory(directory) end)
+      end
     end
 
     test "sync_directory never fails", %{tmp_dir: directory} do

@@ -25,7 +25,7 @@ A turn submitted with a `client_turn_id` survives a crash of its session server,
 * A turn whose own session keeps failing is continued at most 3 times; after that it ends `interrupted`, so a turn that crashes whatever runs it cannot loop. Cuts caused by a restart of the infrastructure around the session (the pool, the turn supervisor, the registry, or the node) do not count toward those 3, only toward a total of 20.
 * A crash of the turn supervisor or of the registry leaves a keyed turn in progress, and it continues once the tree is back.
 * An `:effect` call that was cancelled, timed out, lost its connection, got an unreadable answer or crashed while running is reported to the model as one that may or may not have taken effect.
-* Every new file's directory is synced, and every deck event is synced before a client is sent it, so a power cut loses no name and reuses no sequence number.
+* Every new file's directory is synced, and every deck event is synced before a client is sent it, so a power cut loses no name and reuses no sequence number. On macOS a sync is a real flush of the drive's cache (`F_FULLFSYNC`), not only the ordering barrier Erlang's `:file.sync/1` gives there.
 * `Mead.stop_session/1` is final: the running turn ends `interrupted` and is never continued. An unkeyed turn, or one whose handler cannot resume, also ends `interrupted` after a crash.
 
 ### Compaction and trimming

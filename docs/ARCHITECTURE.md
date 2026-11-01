@@ -301,6 +301,7 @@ Replaying the events rebuilds the list the history agent held. Without the setti
 * `update_last/2` and `mark_interrupted/1` always change memory and then try to write, because the caller already holds the answer. A failed write there is logged once and the reply is unchanged.
 * A closed turn that never reached the disk comes back after a restart still in progress, so it is continued when it can be and marked interrupted otherwise.
 * A write that fails is rolled back to the size the file had before it.
+* Every sync goes through `Mead.Session.Record.sync/2` and `sync_directory/1`. On Linux they call `fsync`. On macOS, where `:file.sync/1` is only `F_BARRIERFSYNC` (writes ordered, but left in the drive's cache), they call `fcntl(F_FULLFSYNC)` through `Mead.Native`, a NIF built from `c_src/` by the `mead_native` Mix compiler into the app's `priv/` under `_build`; it costs about 10 times as much per sync (about 8 ms against 0.8 ms, measured on an Apple SSD), and a file system with no `F_FULLFSYNC` gets `fsync`.
 * Every file is created through `Mead.Session.Record.create_private/1`, which syncs the directory and its parent when it creates one, so a power cut cannot lose a new file's name while keeping the data a later sync wrote into it.
 * Resuming and deleting the same id are serialised with a lock.
 

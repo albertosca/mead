@@ -8,7 +8,7 @@ Runtime for LLM-backed assistants on Elixir/OTP: supervised sessions, a local/cl
 
 ## Quickstart
 
-Requires Elixir 1.20+ on Erlang/OTP 29. Add mead to your dependencies in `mix.exs`:
+Requires Elixir 1.20+ on Erlang/OTP 29; on macOS it also needs a C compiler (`xcode-select --install`), because it builds a small native function that flushes writes to the drive. Add mead to your dependencies in `mix.exs`:
 
 ```elixir
 def deps do

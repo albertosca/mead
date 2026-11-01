@@ -90,7 +90,7 @@ defmodule Mead.Deck.EventLog do
          {:ok, device} <- File.open(path, [:append, :binary]) do
       outcome =
         with :ok <- IO.binwrite(device, Record.encode(event)),
-             do: :file.sync(device)
+             do: Record.sync(device, path)
 
       File.close(device)
       if outcome != :ok, do: Record.truncate(path, size_before)

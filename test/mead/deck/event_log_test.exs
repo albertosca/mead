@@ -30,18 +30,17 @@ defmodule Mead.Deck.EventLogTest do
 
   # An event a client was sent must survive a power cut: a lost tail would hand its sequence
   # numbers to different events, and a client holding the old ones would never ask for the new.
-  # The appended file is opened through an io server, so its sync is the one called with a pid;
-  # the directory syncs of a first append use a raw descriptor.
+  # Record.sync/2 is what reaches the drive on every platform (F_FULLFSYNC on macOS).
   test "every append is synced: there is no unsynced mode", %{tmp_dir: directory} do
     Code.ensure_loaded!(EventLog)
     refute function_exported?(EventLog, :append, 3)
     {:ok, log} = EventLog.open(directory, @session_id)
+    path = Path.join(directory, @session_id <> ".events")
 
     file_syncs =
-      for {:file, :sync, [device]} <-
-            calls_to({:file, :sync, 1}, fn -> append_all(log, [1, 2]) end),
-          is_pid(device),
-          do: device
+      for {Mead.Session.Record, :sync, [_device, ^path]} <-
+            calls_to({Mead.Session.Record, :sync, 2}, fn -> append_all(log, [1, 2]) end),
+          do: path
 
     assert length(file_syncs) == 2
   end

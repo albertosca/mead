@@ -25,7 +25,7 @@ Um turno enviado com `client_turn_id` sobrevive a uma queda do servidor da sess�
 * Um turno cuja própria sessão continua falhando é continuado no máximo 3 vezes; depois disso termina `interrupted`, para que um turno que derruba quem o roda não entre em laço. Cortes causados por um reinício da infraestrutura em volta da sessão (o pool, o supervisor de turnos, o registry ou o nó) não contam para essas 3, só para um total de 20.
 * Uma queda do supervisor de turnos ou do registry deixa um turno com chave em andamento, e ele continua quando a árvore volta.
 * Uma chamada `:effect` cancelada, que estourou o tempo, perdeu a conexão, recebeu uma resposta ilegível ou quebrou enquanto rodava é informada ao modelo como uma que pode ou não ter tido efeito.
-* O diretório de todo arquivo novo é sincronizado, e todo evento do deck é sincronizado antes de um cliente recebê-lo, então uma queda de energia não perde nome de arquivo nem reaproveita número de sequência.
+* O diretório de todo arquivo novo é sincronizado, e todo evento do deck é sincronizado antes de um cliente recebê-lo, então uma queda de energia não perde nome de arquivo nem reaproveita número de sequência. No macOS a sincronização descarrega de fato o cache do disco (`F_FULLFSYNC`), e não só a barreira de ordem que o `:file.sync/1` do Erlang oferece ali.
 * `Mead.stop_session/1` é definitivo: o turno em andamento termina `interrupted` e nunca é continuado. Um turno sem chave, ou cujo handler não sabe retomar, também termina `interrupted` depois de uma queda.
 
 ### Compactação e corte

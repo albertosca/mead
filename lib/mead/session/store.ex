@@ -168,7 +168,7 @@ defmodule Mead.Session.Store do
          :ok <- Record.create_private(path),
          {:ok, %File.Stat{size: size_before}} <- File.stat(path),
          {:ok, device} <- File.open(path, [:append, :binary]) do
-      outcome = write_record(device, event)
+      outcome = write_record(device, path, event)
       File.close(device)
       if outcome != :ok, do: rollback(path, size_before)
       outcome
@@ -179,8 +179,8 @@ defmodule Mead.Session.Store do
   @spec rollback(Path.t(), non_neg_integer()) :: :ok | {:error, term()}
   defdelegate rollback(path, size), to: Record, as: :truncate
 
-  defp write_record(device, event) do
-    with :ok <- IO.binwrite(device, Record.encode(event)), do: :file.sync(device)
+  defp write_record(device, path, event) do
+    with :ok <- IO.binwrite(device, Record.encode(event)), do: Record.sync(device, path)
   end
 
   @doc "Returns the turns of a session in chronological order, without touching the file."

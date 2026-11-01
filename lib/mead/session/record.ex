@@ -7,6 +7,8 @@ defmodule Mead.Session.Record do
   Payloads are decoded without `:safe`, for the reasons given in `Mead.Session.Store`.
   """
 
+  alias Mead.Native
+
   @header_size 12
 
   @doc "Frames `term` as one record."
@@ -101,10 +103,20 @@ defmodule Mead.Session.Record do
   @spec write_synced(Path.t(), binary()) :: :ok | {:error, term()}
   def write_synced(path, binary) do
     with {:ok, device} <- :file.open(path, [:write, :binary]) do
-      result = with :ok <- :file.write(device, binary), do: :file.sync(device)
+      result = with :ok <- :file.write(device, binary), do: sync(device, path)
       :file.close(device)
       result
     end
+  end
+
+  @doc """
+  Syncs `device`, open on the file at `path`, to the drive.
+
+  On macOS `:file.sync/1` is `F_BARRIERFSYNC`, which orders writes but leaves them in the drive's cache, so the file at `path` is flushed with `Mead.Native.full_fsync/1` instead. Elsewhere `:file.sync/1` is `fsync`, which already flushes.
+  """
+  @spec sync(:file.io_device(), Path.t()) :: :ok | {:error, term()}
+  def sync(device, path) do
+    if Native.loaded?(), do: Native.full_fsync(path), else: :file.sync(device)
   end
 
   @doc """
@@ -112,9 +124,13 @@ defmodule Mead.Session.Record do
   """
   @spec sync_directory(Path.t()) :: :ok
   def sync_directory(directory) do
-    with {:ok, device} <- :file.open(directory, [:read, :raw, :directory]) do
-      :file.sync(device)
-      :file.close(device)
+    if Native.loaded?() do
+      Native.full_fsync(directory)
+    else
+      with {:ok, device} <- :file.open(directory, [:read, :raw, :directory]) do
+        :file.sync(device)
+        :file.close(device)
+      end
     end
 
     :ok
