@@ -6,7 +6,9 @@ defmodule Mead.Router.Interaction do
   behaviour for every tool the model asks for, in this order: `tool_updated/2` with status
   `:pending`, `request_permission/2`, and, when the answer is `:allow`, `tool_updated/2` with
   `register_call/3` and `:in_progress` (with `cancellable: true`), the tool itself, then `tool_updated/2` with `:completed` or `:failed`. A denied
-  call never reaches the hub; the model receives an error result that says why. A tool the model
+  call never reaches the hub; the model receives an error result that says why (`:rejected` by the
+  person, `:expired` when nobody answered in time, `:unattended` when a turn continued after a
+  restart with nobody attached to ask). A tool the model
   named wrongly is reported `:failed` without asking anyone.
 
   The callbacks run in the process that runs the turn, one call at a time, so `request_permission/2`
@@ -32,7 +34,7 @@ defmodule Mead.Router.Interaction do
         }
 
   @callback request_permission(context :: term(), request()) ::
-              :allow | {:deny, :rejected | :expired}
+              :allow | {:deny, :rejected | :expired | :unattended}
   @callback tool_updated(context :: term(), update()) :: :ok
 
   @type choice :: %{

@@ -31,6 +31,12 @@ defmodule Mead.Test.FakeHub do
     end
   end
 
+  # Tells the test that a continued turn waited for the tool servers; they are always ready here.
+  def await_ready(timeout) do
+    send(settings().test_pid, {:hub_awaited, timeout})
+    :ok
+  end
+
   # The class of a tool defaults to :read; `classes: %{"server__tool" => :effect}` overrides it. A
   # name with no configured result is unknown, as it is for call_tool/3.
   def describe_tool(name, _options) do

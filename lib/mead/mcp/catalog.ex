@@ -43,6 +43,27 @@ defmodule Mead.MCP.Catalog do
     ArgumentError -> :unavailable
   end
 
+  @doc """
+  The configured servers, by name, and the ones that registered, tools or not; both `[]` when the
+  table is missing.
+  """
+  @spec readiness(atom()) :: {configured :: [atom()], registered :: [atom()]}
+  def readiness(catalog) do
+    [{:servers, servers}] = :ets.lookup(catalog, :servers)
+    {Enum.map(servers, & &1.name), registered_servers(catalog)}
+  rescue
+    ArgumentError -> {[], []}
+  end
+
+  @doc "The names of the servers that registered, tools or not; `[]` when the table is missing."
+  @spec registered_servers(atom()) :: [atom()]
+  def registered_servers(catalog) do
+    for {{:tools, server}, _owner, _tools} <- :ets.match_object(catalog, {{:tools, :_}, :_, :_}),
+        do: server
+  rescue
+    ArgumentError -> []
+  end
+
   @impl GenServer
   def init(options) do
     table =

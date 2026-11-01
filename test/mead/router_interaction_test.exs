@@ -106,6 +106,17 @@ defmodule Mead.RouterInteractionTest do
              "The person did not answer in time, so this tool call was not run."
   end
 
+  test "a call nobody was there to approve has its own text" do
+    hub()
+    route(tool_use_step([@call]), [{:deny, :unattended}])
+
+    refute_received {:tool_called, _name, _arguments, _options}
+    assert %{content: [result]} = List.last(second_conversation_messages())
+
+    assert result.content ==
+             "Nobody was attached to approve this tool call after the server restarted, so it was not run."
+  end
+
   test "an unknown tool is reported failed without asking anyone" do
     hub()
     unknown = %{@call | name: "files__nope"}
