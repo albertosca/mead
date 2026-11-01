@@ -8,8 +8,9 @@ defmodule Mead.Session.History do
   that cannot be recorded is refused and memory is left untouched, so a conversation never accepts
   what it would forget. `update_last/2` and
   `mark_interrupted/1` always change memory and then try to write, because the caller already
-  holds the answer; a closed turn that never reached the disk comes back after a restart as an
-  interrupted one, which is accurate.
+  holds the answer; a closed turn that never reached the disk comes back after a restart still in
+  progress, so the server continues it when it can (see `Mead.Session.Server`) and marks it
+  interrupted otherwise.
 
   When the file passes `:compact_after_bytes` the history rewrites it from memory with
   `Mead.Session.Store.compact/3`; a failed rewrite is logged and never fails a write.

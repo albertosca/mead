@@ -17,6 +17,7 @@ graph TD
         MCPHub["Mead.MCP.Hub - Tool Registry & Protocol"]
         MCPServer["Mead.MCP.Server - HTTP Listener for Clients"]
         Metrics["Mead.Ledger - Token Usage Aggregates"]
+        Keeper["Mead.Session.Keeper - Resumes Cut Turns"]
     end
 
     RootSup --> SessionSup
@@ -24,6 +25,7 @@ graph TD
     RootSup --> MCPHub
     RootSup --> MCPServer
     RootSup --> Metrics
+    RootSup --> Keeper
 
     subgraph active_session ["Active Session - Actor Per Conversation"]
         SessionProc["Session GenServer - Conversation Process"]
@@ -45,7 +47,9 @@ graph TD
 6. **`Mead.Ledger`:** A ledger of what the router sends to providers, the first child of the root supervisor. It keeps usage aggregates per session and per route and a ring of the last 100 turns, written by a telemetry handler in the process that emitted the event, and journals them to a separate file in the storage directory so they survive a restart. Budgets and prices are not part of it.
 7. **`Mead.MCP.Server`:** The server side of MCP. A supervisor, the last child of the root, that starts a `Bandit` listener running `Mead.MCP.Server.Plug` only when `config :mead, :mcp_server` has a token. Clients such as the deck use it to start sessions, submit turns, read the history, stop, resume, delete, list, and compact sessions as nine MCP tools.
 
-8. **`Mead.Deck.ChannelSupervisor`, `Mead.Deck.Tickets`:** The deck transport (section 9): a `DynamicSupervisor` with one `Mead.Deck.Channel` per session that has a deck attached, and the table of single-use WebSocket tickets. The shared listener started by `Mead.MCP.Server` serves the deck too.
+8. **`Mead.Session.Keeper`:** The child right after the session pool. When it starts (at boot, and again whenever a restart of the pool or of anything before it restarts it), it resumes every session that has a marker under `Mead.Session.Pending`, a session whose keyed turn was in progress, so the turn continues. At an orderly shutdown the application's `prep_stop/1` suspends every running session through it, so the turn stays in progress instead of recording failures the shutdown caused. Without a storage directory it does nothing.
+
+9. **`Mead.Deck.ChannelSupervisor`, `Mead.Deck.Tickets`:** The deck transport (section 9): a `DynamicSupervisor` with one `Mead.Deck.Channel` per session that has a deck attached, and the table of single-use WebSocket tickets. The shared listener started by `Mead.MCP.Server` serves the deck too.
 
 Implemented so far: the registry, the turn supervisor, the session pool, the router core with the Anthropic provider, the ledger, and both sides of MCP: the hub (client) and the HTTP server. The Ollama provider fills the local slot with text and tools, and session persistence writes each conversation to disk so it can be resumed.
 
@@ -80,8 +84,11 @@ Each conversation is a `Mead.Session.Supervisor` started by `Mead.Session.Pool`.
 
 ### Failure handling
 
-* The history starts first, so a crashed server restarts with the same session id and the same history. A turn that was running is marked `interrupted`.
-* A server that crashes more than three times in five seconds takes its whole pair down, and that conversation is gone. Neighbouring conversations are never affected.
+* The history starts first, so a crashed server restarts with the same session id and the same history. A turn that was running continues from its checkpoint when it was submitted with a `client_turn_id`, its options were recorded, and the handler implements `resume_turn/4`; a caller that submits again with the key joins it. Any other turn that was running is marked `interrupted`.
+* A turn is continued at most 3 times; the 4th start with it in progress marks it `interrupted`, so a turn that crashes whatever runs it cannot loop.
+* Every step of a routed turn (its route, each model response, each tool call as it starts and as it ends) is recorded as a checkpoint, and a continued turn replays them instead of asking again. A `:read` call that was running is run again; an `:effect` call that was running is never run again: the model is told it may or may not have taken effect.
+* A continued turn has no person attached. The session hands its handler `Mead.Session.InteractionRelay`, which waits up to `interaction_grace` (30 seconds by default) for a caller to attach an interaction before it denies a permission as `:unattended`.
+* The session supervisor tolerates 5 restarts in 5 seconds. More take the whole pair down, and that conversation is gone. Neighbouring conversations are never affected.
 * A turn runs in a task under `Mead.TurnSupervisor`, linked to the server, which traps exits.
 * A handler that raises, exits, returns garbage, or exceeds the turn timeout fails only that turn, with the status `failed` or `timeout`.
 * A server death takes its running task with it.
@@ -247,7 +254,7 @@ A bug in the dispatcher becomes a generic 500. Its log line names only the excep
 * `usage` reads the ledger through `Mead.usage/1` and `Mead.session_usage/2`. It returns the totals over every route with the dropped count, the totals per route and provider, and the latest 0 to 100 turns (20 by default), or the totals of one session. The three parts are separate reads, not one snapshot, so a turn counted meanwhile may show in only some of them. Providers are shown as module names and times as ISO 8601. A ledger that is not running is an error result.
 * A tool that fails while running (an unknown session, a failed turn, a timeout) is a result with `isError: true` and a fixed message, never a stack trace or provider text.
 * `submit_turn` holds the request until the turn ends, bounded by the session's `turn_timeout`, which a client may set to at most one hour in `start_session`. A client that disconnects does not abort the turn.
-* `submit_turn` takes an optional `client_turn_id` (1 to 128 characters, no control characters). A turn submitted with a key runs at most once per session: a repeat with the same input waits for the running turn or returns the stored outcome of an ended one, an interrupted turn included, and a repeat with another input is an error that quotes the start time, status and first 60 characters of the original turn. The key is stored on the turn, survives restarts, and `history` shows it. With `max_turns` set, a key counts as new only once a compaction (explicit, automatic past `compact_after_bytes`, or at resume) has dropped its turn. Characters are code points, as JSON Schema counts them, so a key is at most 512 bytes, and over MCP a `null` key is the same as none.
+* `submit_turn` takes an optional `client_turn_id` (1 to 128 characters, no control characters). A turn submitted with a key runs at most once per session: a repeat with the same input waits for the running turn or returns the stored outcome of an ended one, an interrupted turn included, and a repeat with another input is an error that quotes the start time, status and first 60 characters of the original turn. When the session restarts under a keyed call, the error says the turn continues on its own and to submit again with the same `client_turn_id` to get its result. The key is stored on the turn, survives restarts, and `history` shows it. With `max_turns` set, a key counts as new only once a compaction (explicit, automatic past `compact_after_bytes`, or at resume) has dropped its turn. Characters are code points, as JSON Schema counts them, so a key is at most 512 bytes, and over MCP a `null` key is the same as none.
 * `tools: "effect"` is honoured only when the operator set `allow_effect: true`. Otherwise nothing runs.
 
 ### Limits
@@ -276,6 +283,8 @@ A session is one append-only file named after its id. Each record has this layou
 Each record is the encoding of one event:
 
 * `{:append, turn}` when a turn starts;
+* `{:step, step}` when the turn in progress records a checkpoint;
+* `{:resume, count}` when the turn in progress is continued after a restart;
 * `{:replace_last, turn}` when the newest turn is closed;
 * `:interrupt` when turns still running became interrupted.
 
@@ -287,7 +296,7 @@ Replaying the events rebuilds the list the history agent held. Without the setti
 
 * Only `append/2` is write-first. A turn that cannot be recorded is refused with `{:error, {:persistence, reason}}` before the handler starts, and memory is left untouched.
 * `update_last/2` and `mark_interrupted/1` always change memory and then try to write, because the caller already holds the answer. A failed write there is logged once and the reply is unchanged.
-* A closed turn that never reached the disk comes back after a restart as an interrupted turn.
+* A closed turn that never reached the disk comes back after a restart still in progress, so it is continued when it can be and marked interrupted otherwise.
 * A write that fails is rolled back to the size the file had before it.
 * Resuming and deleting the same id are serialised with a lock.
 
@@ -301,8 +310,9 @@ Replaying the events rebuilds the list the history agent held. Without the setti
 
 ### Resume, stop and delete
 
-* `Mead.resume_session/2` takes the options of `start_session/1` (the handler and the timeout are not stored), loads the file, and starts the pair with the stored turns. The server then marks the turns that were running as interrupted and records that.
-* `Mead.stop_session/1` keeps the file.
+* `Mead.resume_session/2` takes the options of `start_session/1` (the handler and the timeout are not stored), loads the file, and starts the pair with the stored turns. The server then continues the turn that was running when it can (see section 3) and marks any other as interrupted.
+* A session with a keyed turn in progress has a marker under `<storage>/pending/` that holds its handler and turn timeout, so `Mead.Session.Keeper` can resume it at boot without being told. The marker goes when the turn ends, when the session is stopped or deleted, and when its file is gone or damaged.
+* `Mead.stop_session/1` keeps the file, and ends a running turn as interrupted for good: a deliberate stop is never continued.
 * `Mead.delete_session/1` removes the file and the ledger aggregate.
 * `Mead.Session.Pool.stop_session/1` returns only once the registry has released the id, so a stop followed at once by a resume or start of the same id cannot find the old entry.
 
@@ -332,7 +342,7 @@ Compaction runs at three points:
 
 A failed compaction only logs a warning. It never fails a turn, a resume or a stop.
 
-A resume marks the turns that were running as interrupted before it compacts, so a file that shrinks is already canonical after one resume. One with nothing to remove is left alone, and the history writes the interrupt marker as before.
+A resume compacts the turns as stored, a turn in progress included with its checkpoint steps, because the server decides afterwards whether that turn continues or ends interrupted. A file with nothing to remove is left alone.
 
 ### Trimming old turns
 
@@ -386,7 +396,8 @@ config :mead, :deck,
 * Every sequenced event is appended to `<id>.events` before anyone is sent it. The log is `Mead.Deck.EventLog`: mode 0600, one record per event on the session file framing, a torn tail cut on open. A log that cannot be written stops the channel.
 * `prompt.send` is idempotent on `client_message_id`.
 * Prompts wait behind at most `queue_limit` others.
-* Each turn runs through `Mead.submit_turn/3` with `route: :auto, tools: :effect`.
+* Each turn runs through `Mead.submit_turn/3` with `route: :auto, tools: :effect` and a `client_turn_id`: `"turn-<sequence>"` with storage, `"turn-<sequence>-<epoch>"` without (the epoch is drawn when the channel starts, since the in-memory log starts again at 0).
+* The channel monitors the session supervisor, not the server. A server that crashes and restarts keeps the channel: the turn task submits again with the same key on `:session_crashed` or `:not_found`, every 50 ms for at most 5 seconds, and joins the turn the restarted server continues.
 * When a turn ends and nothing is queued, a log longer than `event_log_limit` is compacted. `EventLog.compact/2` keeps the newest events plus the latest `policy.updated`, rewritten through a temporary file and a rename.
 * `session.snapshot` carries `first_sequence`, the lowest sequence a replay can start from, so a client resuming from an older one knows the middle is gone.
 * A dropped prompt's `client_message_id` is forgotten, so a resend of that old message would be accepted again.
@@ -445,6 +456,7 @@ When a turn has an interaction and at least one other tool, the router offers th
 ### Streaming and cancellation
 
 * Each fragment a streaming provider produces becomes a sequenced `text.delta`, and a turn that streamed does not emit its final text again. A provider that cannot stream still emits its whole answer as one `text.delta`.
+* The channel keeps the text it streamed for the running turn. When the final text begins with it, only the rest is sent, as one `text.delta`, and nothing when there is no rest. When it does not (a restart cut a stream and the continued turn answered differently), the channel emits `text.reset {turn_id}`, which tells the client to drop the text it was shown for that turn, and then the whole text as one `text.delta`. A client that ignores `text.reset` shows the text repeated but complete.
 * A running tool call is registered with the channel (`register_call/3`), so `tool_call.cancel` can stop it. The model sees the call as failed.
 * Each finished turn emits two `metric.updated` events, `tokens_in` and `tokens_out`.
 * A turn that ends in an error emits `turn.failed {turn_id, reason}`. A stream cut off midway keeps its fragments and then fails. Tool cards still open at that moment are killed and closed as `failed`.
@@ -464,7 +476,7 @@ For a client that cannot hold a WebSocket (a proxy that strips the upgrade, a pl
 
 Each turn ends with one `tokens_out` metric that carries its `turn_id`. A new channel uses it to find the prompts that never finished in the log.
 
-* The first of them was running when the channel died. It is reported as `turn.failed` with reason `interrupted`, and its open tool cards are closed as `failed`.
+* The first of them was running when the channel died. Its open tool cards are closed as `failed`. When the session has a turn under its key, the channel submits it again with the same text and key, which joins the turn or returns its outcome, and the text it already streamed is rebuilt from the log's `text.delta` events. Otherwise (the prompt never reached the session, or it predates keyed turns) it is reported as `turn.failed` with reason `interrupted`.
 * The ones behind it run again.
 
 ### Live test

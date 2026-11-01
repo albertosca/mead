@@ -24,6 +24,6 @@ config :mead, :mcp,
 
 Ele expõe nove ferramentas: `start_session`, `submit_turn`, `history`, `stop_session`, `resume_session`, `delete_session`, `list_sessions`, `compact_session` e `usage`. `tools: "effect"` só vale quando o operador definiu `allow_effect: true`.
 
-`submit_turn` aceita um `client_turn_id` opcional. Depois de perder a conexão, mande o mesmo id de novo: o turno roda uma vez só, e a nova chamada espera por ele ou recebe a resposta já gravada.
+`submit_turn` aceita um `client_turn_id` opcional. Depois de perder a conexão, mande o mesmo id de novo: o turno roda uma vez só, e a nova chamada espera por ele ou recebe a resposta já gravada. Se a sessão reiniciar enquanto um turno com chave roda, a chamada falha com uma mensagem dizendo isso; o turno continua sozinho, e mandar de novo o mesmo `client_turn_id` devolve o resultado dele.
 
 Acrescente `certfile` e `keyfile` para servir HTTPS. A lista completa de limites e códigos de status está no [ARCHITECTURE.md](https://github.com/albertosca/mead/blob/main/docs/ARCHITECTURE.md) (em inglês).

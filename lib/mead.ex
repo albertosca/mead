@@ -195,7 +195,10 @@ defmodule Mead do
 
   Returns `{:error, :not_found}` for an unknown session, `{:error, :session_stopped}` when the
   session was stopped with `stop_session/1` while the turn was running, and
-  `{:error, :session_crashed}` when the session's server died for any other reason.
+  `{:error, :session_crashed}` when the session's server died for any other reason. For a keyed
+  turn whose handler implements `resume_turn/4`, `:session_crashed` does not mean the turn is
+  lost: the restarted server continues it from its checkpoint, and submitting again with the same
+  key and input joins it, or returns its outcome once it ended.
   """
   @spec submit_turn(String.t(), term(), keyword()) :: {:ok, term()} | {:error, term()}
   def submit_turn(session_id, input, options \\ []) do

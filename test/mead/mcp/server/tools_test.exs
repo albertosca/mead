@@ -319,6 +319,33 @@ defmodule Mead.MCP.Server.ToolsTest do
                  "send a new client_turn_id to try again"
     end
 
+    test "a keyed turn cut by a server crash says it goes on and how to get its result" do
+      session_id = start_session!()
+      Process.register(self(), :mcp_text_handler_test)
+
+      caller = Task.async(fn -> submit(session_id, "block", %{"client_turn_id" => "key-1"}) end)
+      assert_receive {:handler_started, _handler}, 10_000
+      Process.exit(Mead.Session.whereis(session_id, :server), :kill)
+
+      assert {:ok, %{"isError" => true} = result} = Task.await(caller)
+
+      assert text(result) ==
+               "the session restarted while the turn ran; it continues on its own, " <>
+                 "so submit again with the same client_turn_id to get its result"
+    end
+
+    test "a turn without a key cut by a server crash says the session crashed" do
+      session_id = start_session!()
+      Process.register(self(), :mcp_text_handler_test)
+
+      caller = Task.async(fn -> submit(session_id, "block") end)
+      assert_receive {:handler_started, _handler}, 10_000
+      Process.exit(Mead.Session.whereis(session_id, :server), :kill)
+
+      assert {:ok, %{"isError" => true} = result} = Task.await(caller)
+      assert text(result) == "the session crashed during the turn"
+    end
+
     test "a key reused with another input names the key, the original turn and the way out" do
       session_id = start_session!()
       {:ok, _result} = submit(session_id, "echo first", %{"client_turn_id" => "key-1"})

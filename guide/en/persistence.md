@@ -14,6 +14,17 @@ Each session is one append-only file named after its id, with a checksum on ever
 * A record cut short at the end of the file, which is what a crash leaves, is dropped with a warning. Damage anywhere else is `{:error, :corrupt_history}`.
 * The files are private (mode 0600). The directory must be trusted and have a single writer.
 
+### Durable turns
+
+A turn submitted with a `client_turn_id` survives a crash of its session server, a restart of the session pool and a stop of the whole node, as long as its handler implements `resume_turn/4` (the router does).
+
+* Every step of a routed turn is recorded as a checkpoint: its route, each model response, each tool call as it starts and as it ends. A continued turn replays them instead of asking again.
+* A `:read` tool call that was running is run again. An `:effect` call that was running is never run again: the model is told it may or may not have taken effect, so it can check before calling it again.
+* A session with a keyed turn in progress leaves a marker under `<directory>/pending/`. `Mead.Session.Keeper` resumes those sessions at boot, so the turn continues without anyone asking. An orderly shutdown suspends running turns instead of failing them.
+* Submitting again with the same key and input joins the running turn or returns its outcome.
+* A turn is continued at most 3 times; after that it ends `interrupted`, so a turn that crashes whatever runs it cannot loop.
+* `Mead.stop_session/1` is final: the running turn ends `interrupted` and is never continued. An unkeyed turn, or one whose handler cannot resume, also ends `interrupted` after a crash.
+
 ### Compaction and trimming
 
 A file is rewritten as one record per turn on resume, when it passes `compact_after_bytes` (default 1 MiB), and on request through `Mead.compact_session/1`. Compaction keeps every turn unless you set `max_turns`:

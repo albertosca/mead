@@ -20,7 +20,7 @@ defmodule Mead.Session.Keeper do
     * any other error, a handler that no longer validates included, is logged and the marker is
       kept, so a later start can try again. One bad session never stops the others.
 
-  `suspend_all/0`, called by `Mead.Application.prep_stop/1` before any child stops, suspends every
+  `suspend_all/0`, called by the application's `prep_stop/1` callback before any child stops, suspends every
   running session server, so no turn records a failure the shutdown itself caused; each continues
   at the next boot.
   """

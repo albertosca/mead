@@ -204,7 +204,7 @@ defmodule Mead.MCP.Server.Tools do
       else
         effect_options = if effect_requested, do: [tools: :effect], else: []
         options = [route: route] ++ effect_options ++ key_options
-        {:ok, turn_result(Mead.submit_turn(session_id, input, options))}
+        {:ok, turn_result(Mead.submit_turn(session_id, input, options), key_options != [])}
       end
     end
   end
@@ -257,8 +257,17 @@ defmodule Mead.MCP.Server.Tools do
     end
   end
 
-  defp turn_result({:ok, output}), do: success(text_of(output))
-  defp turn_result({:error, reason}), do: failure(turn_failure(reason))
+  defp turn_result({:ok, output}, _keyed), do: success(text_of(output))
+
+  # A keyed turn is continued by the restarted server, so its caller only has to ask again.
+  defp turn_result({:error, :session_crashed}, true),
+    do:
+      failure(
+        "the session restarted while the turn ran; it continues on its own, " <>
+          "so submit again with the same client_turn_id to get its result"
+      )
+
+  defp turn_result({:error, reason}, _keyed), do: failure(turn_failure(reason))
 
   defp turn_failure(:not_found), do: "unknown session"
   defp turn_failure(:session_stopped), do: "the session was stopped during the turn"

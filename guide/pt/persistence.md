@@ -14,6 +14,17 @@ Cada sessão é um arquivo só de acréscimo, com o nome do seu id e um checksum
 * Um registro cortado no fim do arquivo, que é o que uma queda deixa, é descartado com um aviso. Dano em qualquer outro ponto é `{:error, :corrupt_history}`.
 * Os arquivos são privados (modo 0600). O diretório precisa ser confiável e ter um único escritor.
 
+### Turnos duráveis
+
+Um turno enviado com `client_turn_id` sobrevive a uma queda do servidor da sessão, a um reinício do pool de sessões e à parada do nó inteiro, desde que o handler implemente `resume_turn/4` (o router implementa).
+
+* Cada passo de um turno roteado é gravado como checkpoint: a rota, cada resposta do modelo, cada chamada de ferramenta ao começar e ao terminar. Um turno continuado reproduz esses passos em vez de perguntar de novo.
+* Uma chamada de ferramenta `:read` que estava rodando roda de novo. Uma chamada `:effect` que estava rodando nunca roda de novo: o modelo é avisado de que ela pode ou não ter tido efeito, para conferir antes de chamá-la outra vez.
+* Uma sessão com turno com chave em andamento deixa um marcador em `<diretório>/pending/`. O `Mead.Session.Keeper` retoma essas sessões no boot, então o turno continua sem ninguém pedir. Um desligamento ordenado suspende os turnos em andamento em vez de fazê-los falhar.
+* Mandar de novo a mesma chave e a mesma entrada junta-se ao turno em andamento ou devolve o resultado dele.
+* Um turno é continuado no máximo 3 vezes; depois disso termina `interrupted`, para que um turno que derruba quem o roda não entre em laço.
+* `Mead.stop_session/1` é definitivo: o turno em andamento termina `interrupted` e nunca é continuado. Um turno sem chave, ou cujo handler não sabe retomar, também termina `interrupted` depois de uma queda.
+
 ### Compactação e corte
 
 Um arquivo é reescrito como um registro por turno ao retomar, quando passa de `compact_after_bytes` (padrão 1 MiB) e sob pedido por `Mead.compact_session/1`. A compactação guarda todos os turnos, a menos que você defina `max_turns`:
