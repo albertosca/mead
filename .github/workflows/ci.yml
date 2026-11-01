@@ -50,5 +50,13 @@ jobs:
           restore-keys: mix-${{ runner.os }}-${{ env.BEAM_VERSIONS }}-
       - run: mix local.hex --force && mix local.rebar --force
       - run: mix deps.get
+      # Homebrew ships its latest versions, not pinned ones, so the job stops when that Elixir no
+      # longer meets the project's requirement instead of testing on a version mead does not support.
+      - name: Check the Elixir version against mix.exs
+        run: |
+          mix run --no-compile --no-start -e '
+            requirement = Mix.Project.config()[:elixir]
+            Version.match?(System.version(), requirement) ||
+              Mix.raise("Elixir #{System.version()} does not meet #{requirement}")'
       - run: mix compile --warnings-as-errors
       - run: mix test
