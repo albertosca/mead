@@ -31,6 +31,12 @@ defmodule Mead.Session.Server do
   and every turn that cannot continue, marks it interrupted. While a turn that can continue runs,
   the session has a marker under `Mead.Session.Pending`, so recovery after a node stop finds it.
 
+  A session that is stopped on purpose goes through `abandon/1` first: its running turn ends
+  interrupted for good, its waiters get `{:error, :session_stopped}`, and its marker goes. An
+  orderly shutdown of the node goes through `suspend/1` instead, which only stops the running task,
+  so the turn stays in progress with its marker and continues at the next boot. After either, the
+  server refuses every submit with `{:error, :session_stopped}` until it terminates.
+
   A reader that bypasses the server can observe an interrupted turn as in progress in the moment
   between the new server registering its name and finishing `init/1`.
   """
@@ -70,6 +76,32 @@ defmodule Mead.Session.Server do
   @spec resume_clock(String.t()) :: :ok | {:error, :not_found}
   def resume_clock(session_id), do: clock_call(session_id, :resume_clock)
 
+  @doc """
+  Ends the running turn as interrupted, answers its waiters `{:error, :session_stopped}`, removes
+  the pending marker, and refuses every later submit. Called before a session is stopped on
+  purpose, so that turn is never continued. `:ok` for an unknown session too.
+  """
+  @spec abandon(String.t()) :: :ok
+  def abandon(session_id), do: stopping_call(session_id, :abandon)
+
+  @doc """
+  Stops the running task without closing its turn, which stays in progress with its marker so it
+  continues when the session comes back, and refuses every later submit. Its waiters get no
+  answer: it is called only when the node stops, and they stop with it. `:ok` for an unknown
+  session too.
+  """
+  @spec suspend(String.t()) :: :ok
+  def suspend(session_id), do: stopping_call(session_id, :suspend)
+
+  defp stopping_call(session_id, request) do
+    case Session.whereis(session_id, :server) do
+      nil -> :ok
+      server -> GenServer.call(server, request, :infinity)
+    end
+  catch
+    :exit, _reason -> :ok
+  end
+
   defp clock_call(session_id, request) do
     case Session.whereis(session_id, :server) do
       nil -> {:error, :not_found}
@@ -90,7 +122,8 @@ defmodule Mead.Session.Server do
       handler: Keyword.fetch!(options, :handler),
       turn_timeout: Keyword.fetch!(options, :turn_timeout),
       directory: Keyword.get(options, :directory),
-      running: nil
+      running: nil,
+      stopping: false
     }
 
     if continuable?(History.newest(session_id), state.handler) do
@@ -181,6 +214,9 @@ defmodule Mead.Session.Server do
     do: fn step -> History.append_step(session_id, attempt, step) end
 
   @impl true
+  def handle_call({:submit, _input, _options}, _from, %{stopping: true} = state),
+    do: {:reply, {:error, :session_stopped}, state}
+
   def handle_call({:submit, input, options}, from, state) do
     {client_turn_id, options} = Keyword.pop(options, :client_turn_id)
     running = state.running
@@ -198,6 +234,33 @@ defmodule Mead.Session.Server do
       %Turn{} = turn ->
         {:reply, {:error, {:client_turn_id_conflict, conflict_details(turn)}}, state}
     end
+  end
+
+  # A task that finished just before the stop already holds the answer, which is told as it is.
+  # Otherwise the turn ends interrupted; every turn still in progress is closed, which also covers
+  # one a suspend left behind.
+  def handle_call(:abandon, _from, state) do
+    state =
+      case stop_task(state.running) do
+        {:ok, result} -> state |> conclude_now(normalize(result)) |> Map.put(:running, nil)
+        _stopped -> answer_stopped(state)
+      end
+
+    record(History.mark_interrupted(state.session_id), state.session_id)
+    clear_marker(state)
+    {:reply, :ok, %{state | stopping: true}}
+  end
+
+  def handle_call(:suspend, _from, state) do
+    stop_task(state.running)
+
+    if state.running do
+      Enum.each(state.running.waiters, fn {_from, monitor} ->
+        Process.demonitor(monitor, [:flush])
+      end)
+    end
+
+    {:reply, :ok, %{state | running: nil, stopping: true}}
   end
 
   def handle_call(request, _from, %{running: nil} = state)
@@ -369,11 +432,31 @@ defmodule Mead.Session.Server do
     end
   end
 
+  defp stop_task(nil), do: nil
+
+  defp stop_task(running) do
+    if running.timer, do: Process.cancel_timer(running.timer)
+    kill_task(running.task)
+  end
+
+  defp answer_stopped(%{running: nil} = state), do: state
+
+  defp answer_stopped(state) do
+    Enum.each(state.running.waiters, fn {from, monitor} ->
+      Process.demonitor(monitor, [:flush])
+      GenServer.reply(from, {:error, :session_stopped})
+    end)
+
+    %{state | running: nil}
+  end
+
   defp normalize({:ok, output}), do: {:ok, output}
   defp normalize({:error, reason}), do: {:failed, reason}
   defp normalize(other), do: {:failed, {:bad_return, other}}
 
-  defp conclude(state, {status, output} = outcome) do
+  defp conclude(state, outcome), do: {:noreply, %{conclude_now(state, outcome) | running: nil}}
+
+  defp conclude_now(state, {status, output} = outcome) do
     %{waiters: waiters, timer: timer, marked: marked} = state.running
 
     if timer, do: Process.cancel_timer(timer)
@@ -392,7 +475,7 @@ defmodule Mead.Session.Server do
       GenServer.reply(from, reply)
     end)
 
-    {:noreply, %{state | running: nil}}
+    state
   end
 
   # The caller already has the answer, so a failed write is logged and never replaces the reply.

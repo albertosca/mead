@@ -16,6 +16,7 @@ defmodule Mead do
   alias Mead.Session
   alias Mead.Session.EchoHandler
   alias Mead.Session.History
+  alias Mead.Session.Pending
   alias Mead.Session.Pool
   alias Mead.Session.Store
   alias Mead.Session.Turn
@@ -362,7 +363,8 @@ defmodule Mead do
       stored = directory != nil and Store.exists?(directory, session_id)
 
       with :ok <- delete_file(directory, session_id),
-           :ok <- delete_events(directory, session_id) do
+           :ok <- delete_events(directory, session_id),
+           :ok <- delete_marker(directory, session_id) do
         if stopped or stored, do: :ok, else: {:error, :not_found}
       end
     end)
@@ -372,6 +374,13 @@ defmodule Mead do
 
   defp delete_events(directory, session_id) do
     case Mead.Deck.EventLog.delete(directory, session_id) do
+      :ok -> :ok
+      {:error, reason} -> {:error, {:persistence, reason}}
+    end
+  end
+
+  defp delete_marker(directory, session_id) do
+    case Pending.clear(directory, session_id) do
       :ok -> :ok
       {:error, reason} -> {:error, {:persistence, reason}}
     end

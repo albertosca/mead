@@ -10,6 +10,7 @@ defmodule Mead.Session.Pool do
   use DynamicSupervisor
 
   alias Mead.Session
+  alias Mead.Session.Server
 
   @default_maximum_sessions 1_000
   @roles [:supervisor, :server, :history]
@@ -38,12 +39,21 @@ defmodule Mead.Session.Pool do
     DynamicSupervisor.start_child(pool, {Session.Supervisor, options})
   end
 
-  @doc "Stops a conversation's supervisor pair; a stored conversation stays on disk."
+  @doc """
+  Stops a conversation's supervisor pair; a stored conversation stays on disk.
+
+  The server abandons its running turn first (`Mead.Session.Server.abandon/1`), so a stop on
+  purpose ends that turn interrupted instead of leaving it to be continued.
+  """
   @spec stop_session(String.t()) :: :ok | {:error, :not_found}
   def stop_session(session_id) do
     case Session.whereis(session_id, :supervisor) do
-      nil -> {:error, :not_found}
-      pid -> terminate(pid, session_id)
+      nil ->
+        {:error, :not_found}
+
+      pid ->
+        Server.abandon(session_id)
+        terminate(pid, session_id)
     end
   end
 
