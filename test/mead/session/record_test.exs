@@ -77,6 +77,35 @@ defmodule Mead.Session.RecordTest do
       assert File.read!(path) == "kept"
     end
 
+    test "create_private syncs the directory and its parent when it makes the file, and only then",
+         %{tmp_dir: directory} do
+      folder = Path.join(directory, "new_folder")
+      File.mkdir_p!(folder)
+      path = Path.join(folder, "private")
+      test_process = self()
+
+      worker =
+        spawn(fn ->
+          receive do
+            :go ->
+              Record.create_private(path)
+              Record.create_private(path)
+              send(test_process, :done)
+          end
+        end)
+
+      :erlang.trace_pattern({Record, :sync_directory, 1}, true, [:local])
+      :erlang.trace(worker, true, [:call])
+      on_exit(fn -> :erlang.trace_pattern({Record, :sync_directory, 1}, false, [:local]) end)
+
+      send(worker, :go)
+      assert_receive :done
+
+      assert_receive {:trace, ^worker, :call, {Record, :sync_directory, [^folder]}}
+      assert_receive {:trace, ^worker, :call, {Record, :sync_directory, [^directory]}}
+      refute_receive {:trace, ^worker, :call, _call}, 100
+    end
+
     test "truncate cuts the file to the given size", %{tmp_dir: directory} do
       path = Path.join(directory, "cut")
       File.write!(path, "0123456789")

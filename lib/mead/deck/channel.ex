@@ -364,10 +364,12 @@ defmodule Mead.Deck.Channel do
 
     send(socket, {:deck_event, Events.encode(snapshot(state, current))})
 
-    if last_sequence <= current do
-      for envelope <- EventLog.read_after(state.log, last_sequence) do
-        send(socket, {:deck_event, Events.encode(envelope)})
-      end
+    # A client ahead of the log holds events the log no longer has; it gets all of it again, and
+    # the snapshot's current_sequence below its own tells it to drop what it holds.
+    replay_from = if last_sequence <= current, do: last_sequence, else: 0
+
+    for envelope <- EventLog.read_after(state.log, replay_from) do
+      send(socket, {:deck_event, Events.encode(envelope)})
     end
 
     {:reply, :ok, state}
@@ -437,7 +439,7 @@ defmodule Mead.Deck.Channel do
     case state.running do
       %{turn_id: ^turn_id} = running when is_binary(text) and text != "" ->
         if String.valid?(text) do
-          case emit(state, "text.delta", %{"turn_id" => turn_id, "text" => text}, sync: false) do
+          case emit(state, "text.delta", %{"turn_id" => turn_id, "text" => text}) do
             {:ok, state, _envelope} ->
               running = Map.update!(running, :streamed_text, &(&1 <> text))
               {:reply, :ok, %{state | running: running}}
@@ -1070,12 +1072,12 @@ defmodule Mead.Deck.Channel do
     end)
   end
 
-  # Writes the event to the log first, then sends it to every attached socket.
-  defp emit(state, type, payload, options \\ []) do
+  # Writes the event to the log and syncs it first, then sends it to every attached socket.
+  defp emit(state, type, payload) do
     sequence = EventLog.last_sequence(state.log) + 1
     envelope = Events.envelope(sequence, state.session_id, type, payload, DateTime.utc_now())
 
-    case EventLog.append(state.log, envelope, options) do
+    case EventLog.append(state.log, envelope) do
       {:ok, log} ->
         encoded = Events.encode(envelope)
         for socket <- Map.keys(state.sockets), do: send(socket, {:deck_event, encoded})

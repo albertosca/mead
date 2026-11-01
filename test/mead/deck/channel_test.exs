@@ -155,15 +155,19 @@ defmodule Mead.Deck.ChannelTest do
     refute_receive {:deck_event, _}, 100
   end
 
-  test "a last_sequence in the future gets the snapshot only", %{channel: channel} do
+  # A client ahead of the log holds events the server no longer has (a log lost or restored from
+  # an older copy), so it is told where the log stands and given all of it to rebuild from.
+  test "a last_sequence beyond the log gets the snapshot and the whole log again",
+       %{channel: channel} do
     attach(channel)
     prompt(channel, "echo hi")
     collect(4)
 
     :ok = Channel.resume(channel, self(), 99)
-    snapshot = next_event()
-    assert snapshot["type"] == "session.snapshot"
-    assert snapshot["payload"]["current_sequence"] == 4
+    events = collect(5)
+    assert hd(events)["type"] == "session.snapshot"
+    assert hd(events)["payload"]["current_sequence"] == 4
+    assert sequences(events) == [nil, 1, 2, 3, 4]
     refute_receive {:deck_event, _}, 100
   end
 

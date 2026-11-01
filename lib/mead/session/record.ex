@@ -69,13 +69,19 @@ defmodule Mead.Session.Record do
 
   @doc """
   Creates an empty file readable only by its owner, unless the path exists, so the content is never readable by anyone else, not even between a write and a later chmod.
+
+  A file it creates has its directory synced, and that directory's parent too (the directory may be new as well), so a power cut cannot lose the file's name while keeping the data a later sync wrote into it.
   """
   @spec create_private(Path.t()) :: :ok | {:error, term()}
   def create_private(path) do
     if File.exists?(path) do
       :ok
     else
-      with :ok <- File.touch(path), do: File.chmod(path, 0o600)
+      with :ok <- File.touch(path), :ok <- File.chmod(path, 0o600) do
+        folder = Path.dirname(path)
+        sync_directory(folder)
+        sync_directory(Path.dirname(folder))
+      end
     end
   end
 

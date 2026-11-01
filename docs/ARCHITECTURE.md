@@ -89,7 +89,8 @@ Each conversation is a `Mead.Session.Supervisor` started by `Mead.Session.Pool`.
 * Every step of a routed turn (its route, each model response, each tool call as it starts and as it ends) is recorded as a checkpoint, and a continued turn replays them instead of asking again. A `:read` call that was running is run again; an `:effect` call that was running is never run again: the model is told it may or may not have taken effect.
 * A continued turn has no person attached. The session hands its handler `Mead.Session.InteractionRelay`, which waits up to `interaction_grace` (30 seconds by default) for a caller to attach an interaction before it denies a permission as `:unattended`.
 * The session supervisor tolerates 5 restarts in 5 seconds. More take the whole pair down, and that conversation is gone. Neighbouring conversations are never affected.
-* A turn runs in a task under `Mead.TurnSupervisor`, linked to the server, which traps exits.
+* A turn runs in a task under `Mead.TurnSupervisor`, linked to the server, which traps exits. A task that dies because the turn supervisor died was cut by the infrastructure, not by its turn: a keyed turn is left in progress with its marker, as a suspend leaves it, and the keeper continues it once the pool has restarted.
+* A crash of the registry knocks every session down (the registry links to the processes it names), and the keeper continues their keyed turns once the tree is back. The shutdown guard finds the servers to suspend through the pool, not the registry, so it works while the registry is down. A registry killed from outside with `:kill` is not a crash it can survive: its partition still holds the name when the root restarts it, the restart fails until the root gives up, and the node stops; marked turns continue at the next boot.
 * A handler that raises, exits, returns garbage, or exceeds the turn timeout fails only that turn, with the status `failed` or `timeout`.
 * A server death takes its running task with it.
 
@@ -198,6 +199,8 @@ A result longer than 50 000 characters is truncated with a marker, and non-text 
 When the provider of the chosen slot implements `converse/3` (on either route) and the policy shows at least one tool, `Mead.Router` runs a loop of up to eight provider calls through the optional callback `c:Mead.Provider.converse/3`.
 
 * Tool errors, denials, and unknown tools go back to the model as error results. They never fail the turn.
+* An `:effect` call whose outcome is unknown, because it was cancelled while running, timed out, lost its connection, or its process crashed, is reported with "It may or may not have taken effect; check before calling it again." A call that never reached the tool server is a plain failure.
+* A continued turn offers the tools the servers show after the restart. A call in doubt to a tool that is gone fails as an unknown tool; when no tool is left, the answer is asked for again without tools and nothing recorded runs again.
 * The route event carries the sum of the tokens of every call and a `tool_calls` count.
 * The whole loop runs inside the turn timeout, so a conversation that uses tools may need a `:turn_timeout` above the default of 30 seconds.
 
@@ -298,6 +301,7 @@ Replaying the events rebuilds the list the history agent held. Without the setti
 * `update_last/2` and `mark_interrupted/1` always change memory and then try to write, because the caller already holds the answer. A failed write there is logged once and the reply is unchanged.
 * A closed turn that never reached the disk comes back after a restart still in progress, so it is continued when it can be and marked interrupted otherwise.
 * A write that fails is rolled back to the size the file had before it.
+* Every file is created through `Mead.Session.Record.create_private/1`, which syncs the directory and its parent when it creates one, so a power cut cannot lose a new file's name while keeping the data a later sync wrote into it.
 * Resuming and deleting the same id are serialised with a lock.
 
 ### Reading and damage
@@ -387,13 +391,13 @@ config :mead, :deck,
    * Redeeming is an atomic ETS take, so two attempts with one ticket upgrade at most one.
    * A request that is not a valid upgrade is refused with 426 before the ticket is touched.
    * The `Origin` rule is the same as MCP's (`Mead.Origin`).
-3. **Resume.** The socket's first message must be `session.resume {last_sequence}` within `resume_deadline_ms`. The server answers with an unsequenced `session.snapshot` and replays every sequenced event after `last_sequence` from the log.
+3. **Resume.** The socket's first message must be `session.resume {last_sequence}` within `resume_deadline_ms`. The server answers with an unsequenced `session.snapshot` and replays every sequenced event after `last_sequence` from the log. A `last_sequence` beyond the snapshot's `current_sequence` (the log was lost or restored from an older copy) gets the whole log replayed, and the client drops what it holds.
 
 ### The channel and the event log
 
 `Mead.Deck.Channel` is the state: one process per session that owns the event sequence, the prompt queue and the running turn. A reconnect or a second device therefore finds the same state.
 
-* Every sequenced event is appended to `<id>.events` before anyone is sent it. The log is `Mead.Deck.EventLog`: mode 0600, one record per event on the session file framing, a torn tail cut on open. A log that cannot be written stops the channel.
+* Every sequenced event is appended to `<id>.events` and synced before anyone is sent it, streamed text included, so a power cut never hands a sequence a client has seen to a different event. The log is `Mead.Deck.EventLog`: mode 0600, one record per event on the session file framing, a torn tail cut on open. A log that cannot be written stops the channel.
 * `prompt.send` is idempotent on `client_message_id`.
 * Prompts wait behind at most `queue_limit` others.
 * Each turn runs through `Mead.submit_turn/3` with `route: :auto, tools: :effect` and a `client_turn_id`: `"turn-<sequence>"` with storage, `"turn-<sequence>-<epoch>"` without (the epoch is drawn when the channel starts, since the in-memory log starts again at 0).

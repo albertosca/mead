@@ -69,32 +69,28 @@ defmodule Mead.Deck.EventLog do
   defp last_sequence_of(events), do: events |> List.last() |> Map.fetch!("sequence")
 
   @doc """
-  Appends `event`. With `sync: false` the file is written and closed but not forced to disk, for
-  the many small events (streamed text) whose loss in a power cut costs nothing the next synced
-  event does not make up for: that sync flushes everything written before it.
+  Appends `event` and syncs it to disk before returning, streamed text included: the channel sends an event only after this, and an event a client was sent but a power cut took from the log would see its sequence number reused by a different event.
   """
-  @spec append(t(), map(), keyword()) :: {:ok, t()} | {:error, :out_of_order | term()}
-  def append(log, event, options \\ [])
-
-  def append(%__MODULE__{last_sequence: last} = log, %{"sequence" => sequence} = event, options)
+  @spec append(t(), map()) :: {:ok, t()} | {:error, :out_of_order | term()}
+  def append(%__MODULE__{last_sequence: last} = log, %{"sequence" => sequence} = event)
       when is_integer(sequence) and sequence > last do
-    with :ok <- write(log.path, event, Keyword.get(options, :sync, true)) do
+    with :ok <- write(log.path, event) do
       {:ok, %{log | events: [event | log.events], last_sequence: sequence, count: log.count + 1}}
     end
   end
 
-  def append(%__MODULE__{}, _event, _options), do: {:error, :out_of_order}
+  def append(%__MODULE__{}, _event), do: {:error, :out_of_order}
 
-  defp write(nil, _event, _sync), do: :ok
+  defp write(nil, _event), do: :ok
 
-  defp write(path, event, sync) do
+  defp write(path, event) do
     with :ok <- File.mkdir_p(Path.dirname(path)),
          :ok <- Record.create_private(path),
          {:ok, %File.Stat{size: size_before}} <- File.stat(path),
          {:ok, device} <- File.open(path, [:append, :binary]) do
       outcome =
         with :ok <- IO.binwrite(device, Record.encode(event)),
-             do: if(sync, do: :file.sync(device), else: :ok)
+             do: :file.sync(device)
 
       File.close(device)
       if outcome != :ok, do: Record.truncate(path, size_before)

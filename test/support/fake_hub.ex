@@ -26,6 +26,10 @@ defmodule Mead.Test.FakeHub do
           :release -> {:ok, %{content: "released", is_error: false}}
         end
 
+      # A tool whose process crashes while the call is out.
+      :crash ->
+        raise "the tool process crashed"
+
       result ->
         result
     end

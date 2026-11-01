@@ -3,6 +3,7 @@ defmodule Mead.Session.ShutdownGuardTest do
   # tests.
   use ExUnit.Case, async: false
 
+  import ExUnit.CaptureLog
   import Mead.TestHelpers
 
   alias Mead.Session.Turn
@@ -64,6 +65,88 @@ defmodule Mead.Session.ShutdownGuardTest do
     assert_receive {:handler_at, continued_pid, [:a, :b]}
     send(continued_pid, :release)
     wait_until(fn -> finished?(session_id) end)
+  end
+
+  # A crash that restarts the pool can knock the session more than once (each continued attempt
+  # replays what the last recorded), and the session is not running once its turn is over, so
+  # the outcome is read from its file.
+  defp assert_continues(session_id, directory) do
+    assert_receive {:resumed_with, [:a | _rest]}, 10_000
+    release_handlers()
+
+    wait_until(fn ->
+      release_handlers()
+      match?({:ok, [%Turn{status: :ok}]}, Mead.Session.Store.load(directory, session_id))
+    end)
+  end
+
+  defp release_handlers do
+    receive do
+      {:handler_at, handler_pid, _steps} ->
+        send(handler_pid, :release)
+        release_handlers()
+    after
+      0 -> :ok
+    end
+  end
+
+  test "a turn supervisor crash leaves the turn in progress, and it continues",
+       %{session_id: session_id, tmp_dir: directory} do
+    kill_root_child(Mead.TurnSupervisor)
+    assert_continues(session_id, directory)
+  end
+
+  # The registry fails the way it can on its own: its partition crashes more often than the
+  # registry's supervisor tolerates (3 in 5 seconds), so that supervisor stops its children and
+  # exits, and the root restarts it and everything after it.
+  test "a registry crash leaves the turn in progress, and it continues",
+       %{session_id: session_id, tmp_dir: directory} do
+    registry = Process.whereis(Mead.Registry)
+    registry_monitor = Process.monitor(registry)
+
+    outcome =
+      Enum.reduce_while(1..10, nil, fn _attempt, previous ->
+        partition = wait_until(fn -> partition_other_than(previous) end)
+        Process.exit(partition, :kill)
+
+        receive do
+          {:DOWN, ^registry_monitor, :process, _pid, _reason} -> {:halt, :down}
+        after
+          50 -> {:cont, partition}
+        end
+      end)
+
+    assert outcome == :down
+    wait_until(fn -> Process.whereis(Mead.Registry) not in [nil, registry] end)
+    assert_continues(session_id, directory)
+  end
+
+  # The guard finds the servers through the pool, so a registry that is gone does not crash it
+  # before it suspends anything.
+  test "suspend_all works while the registry is down" do
+    log =
+      capture_log(fn ->
+        registry = Process.whereis(Mead.Registry)
+        :ok = Supervisor.terminate_child(Mead.Supervisor, Mead.Registry)
+
+        try do
+          assert Process.whereis(Mead.Registry) == nil
+          assert Mead.Session.Keeper.suspend_all() == :ok
+        after
+          {:ok, _pid} = Supervisor.restart_child(Mead.Supervisor, Mead.Registry)
+          refute Process.whereis(Mead.Registry) in [nil, registry]
+        end
+      end)
+
+    refute log =~ "unknown registry"
+  end
+
+  defp partition_other_than(previous) do
+    case Process.whereis(Mead.Registry.PIDPartition0) do
+      nil -> false
+      ^previous -> false
+      partition -> partition
+    end
   end
 
   test "a hub crash leaves the running turns alone",

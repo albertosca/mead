@@ -157,6 +157,42 @@ defmodule Mead.RouterReplayTest do
              recorded_steps()
   end
 
+  # The servers that come back after a restart may offer other tools: the continued turn offers
+  # the model what is there now, and a call in doubt to a tool that is gone fails plainly.
+  test "a continued turn whose tool is gone after the restart tells the model and goes on" do
+    other_tool = %{name: "notes__list", description: "List", input_schema: %{"type" => "object"}}
+    FakeHub.configure(test_pid: self(), tools: [other_tool], results: %{})
+    tool_step = FakeProvider.tool_step([{"t1", "files__read_file", %{}}])
+    steps = [{:route, :cloud, :forced}, response(tool_step), {:tool_started, "t1", :read}]
+
+    assert Router.replay(
+             [],
+             "read /a",
+             steps,
+             options(),
+             slots([FakeProvider.text_step("ok")]),
+             FakeHub
+           ) == {:ok, "ok"}
+
+    assert_received {:provider_conversed, messages, [%{name: "notes__list"}]}
+
+    assert %{content: [%{content: "The tool call failed: unknown tool.", is_error: true}]} =
+             List.last(messages)
+  end
+
+  # With no tool left the turn cannot go on as a tool loop: the answer is asked for again
+  # without tools, and nothing recorded runs again.
+  test "a continued turn with no tools left asks for its answer again and runs nothing" do
+    FakeHub.configure(test_pid: self(), tools: [], results: %{})
+    tool_step = FakeProvider.tool_step([{"t1", "files__read_file", %{}}])
+    steps = [{:route, :cloud, :forced}, response(tool_step), {:tool_started, "t1", :effect}]
+    slots = [cloud: {FakeProvider, test_pid: self()}]
+
+    assert Router.replay([], "read /a", steps, options(), slots, FakeHub) == {:ok, "fake reply"}
+    refute_received {:tool_called, _name, _arguments, _options}
+    refute_received {:provider_conversed, _messages, _tools}
+  end
+
   test "calls that reuse an id are replayed by position" do
     hub()
     first = FakeProvider.tool_step([{"call_1", "files__read_file", %{"n" => 1}}])

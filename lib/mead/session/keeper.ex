@@ -49,12 +49,28 @@ defmodule Mead.Session.Keeper do
     end)
   end
 
-  @doc "Suspends the running turn of every session on this node. Always `:ok`."
+  @doc """
+  Suspends the running turn of every session on this node. Always `:ok`.
+
+  The servers are found through the pool's supervision tree, not the registry, so this works when the registry is the child whose crash is taking the rest down.
+  """
   @spec suspend_all() :: :ok
   def suspend_all do
-    Mead.Registry
-    |> Registry.select([{{{:server, :"$1"}, :_, :_}, [], [:"$1"]}])
-    |> Enum.each(&Server.suspend/1)
+    for {_id, session, _type, _modules} <- children(Pool),
+        is_pid(session),
+        {Server, server, _type, _modules} <- children(session),
+        is_pid(server) do
+      Server.suspend(server)
+    end
+
+    :ok
+  end
+
+  # A supervisor that is gone or stopping has no children to suspend.
+  defp children(supervisor) do
+    Supervisor.which_children(supervisor)
+  catch
+    :exit, _reason -> []
   end
 
   @impl true

@@ -97,9 +97,16 @@ defmodule Mead.Session.Server do
   Stops the running task without closing its turn, which stays in progress with its marker so it
   continues when the session comes back, and refuses every later submit. Its waiters get no
   answer: it is called only when the node stops, and they stop with it. `:ok` for an unknown
-  session too.
+  session too. Takes the session id or the server's pid; the pid needs no registry, so a suspend
+  still works while the registry is down.
   """
-  @spec suspend(String.t()) :: :ok
+  @spec suspend(String.t() | pid()) :: :ok
+  def suspend(server) when is_pid(server) do
+    GenServer.call(server, :suspend, :infinity)
+  catch
+    :exit, _reason -> :ok
+  end
+
   def suspend(session_id), do: stopping_call(session_id, :suspend, :ok)
 
   @doc """
@@ -305,14 +312,7 @@ defmodule Mead.Session.Server do
 
   def handle_call(:suspend, _from, state) do
     stop_task(state.running)
-
-    if state.running do
-      Enum.each(state.running.waiters, fn {_from, monitor} ->
-        Process.demonitor(monitor, [:flush])
-      end)
-    end
-
-    {:reply, :ok, %{state | running: nil, stopping: true}}
+    {:reply, :ok, suspended(state)}
   end
 
   def handle_call(request, _from, %{running: nil} = state)
@@ -440,12 +440,27 @@ defmodule Mead.Session.Server do
     end
   end
 
-  # The interaction a turn was submitted with is the only one that streams.
+  defp suspended(state) do
+    if state.running do
+      Enum.each(state.running.waiters, fn {_from, monitor} ->
+        Process.demonitor(monitor, [:flush])
+      end)
+    end
+
+    %{state | running: nil, stopping: true}
+  end
+
+  defp alive?(nil), do: false
+  defp alive?(pid), do: Process.alive?(pid)
+
+  # The interaction a turn was submitted with is the only one that streams. The turn supervisor
+  # is the one the task was just started under.
   defp new_running(task, waiters, marked, turn_timeout, interaction \\ nil) do
     start_timer(
       %{
         waiters: waiters,
         task: task,
+        turn_supervisor: Process.whereis(Mead.TurnSupervisor),
         generation: 0,
         pauses: 0,
         marked: marked,
@@ -492,9 +507,16 @@ defmodule Mead.Session.Server do
 
   def handle_info(
         {:DOWN, reference, :process, _pid, reason},
-        %{running: %{task: %Task{ref: reference}}} = state
+        %{running: %{task: %Task{ref: reference}} = running} = state
       ) do
-    conclude(state, {:failed, reason})
+    # A task that died with the turn supervisor was cut by the infrastructure, not by its turn:
+    # the pool restarts right after (rest_for_one), and a turn that can continue is left in
+    # progress with its marker, as a suspend leaves it, so the keeper brings it back.
+    if running.marked and not alive?(running.turn_supervisor) do
+      {:noreply, suspended(state)}
+    else
+      conclude(state, {:failed, reason})
+    end
   end
 
   def handle_info({:DOWN, reference, :process, _pid, _reason}, %{running: running} = state)

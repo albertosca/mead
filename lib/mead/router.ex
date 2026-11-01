@@ -50,6 +50,10 @@ defmodule Mead.Router do
   replaying, it waits for the MCP servers to reconnect (`Mead.MCP.Hub.await_ready/2`, at most
   `config :mead, :recovery, hub_wait:` milliseconds, 10 seconds by default). The usage and the
   tool calls of the event cover the replayed steps too, so a continued turn is counted once.
+
+  The same holds for a live `:effect` call whose outcome is unknown: one cancelled while running,
+  timed out, cut by a lost connection, or whose process crashed is reported to the model as one
+  that may or may not have taken effect, never as a plain failure.
   """
 
   @behaviour Mead.Session.TurnHandler
@@ -71,6 +75,11 @@ defmodule Mead.Router do
   @tool_wait 20_000
   @default_hub_wait 10_000
   @in_doubt "This call was already running when the server stopped. It may or may not have taken effect; check before calling it again."
+  @doubt " It may or may not have taken effect; check before calling it again."
+
+  # Hub errors that come after the request may have reached the tool server: the call went out
+  # and no answer came back. Every other hub error means it was never sent.
+  @doubtful_errors [:timeout, :connection_lost]
 
   @impl true
   def handle_turn(history, input, options), do: resume_turn(history, input, [], options)
@@ -538,14 +547,25 @@ defmodule Mead.Router do
     end
   end
 
-  defp run_tool(context, %{id: id, name: name, input: input}) do
-    {content, is_error} =
-      case context.hub.call_tool(name, input, context.options) do
-        {:ok, %{content: content, is_error: is_error}} -> {content, is_error}
-        {:error, reason} -> {"The tool call failed: #{describe(reason)}.", true}
-      end
+  # `class` is asked for only when the outcome is in doubt: an effect call that may have run is
+  # reported so, and the model checks before calling it again.
+  defp run_tool(context, %{id: id, name: name, input: input} = tool_use, class) do
+    case context.hub.call_tool(name, input, context.options) do
+      {:ok, %{content: content, is_error: is_error}} ->
+        %{type: :tool_result, tool_use_id: id, content: content, is_error: is_error}
 
-    %{type: :tool_result, tool_use_id: id, content: content, is_error: is_error}
+      {:error, reason} when reason in @doubtful_errors ->
+        doubtful_result(tool_use, "The tool call failed: #{describe(reason)}.", class)
+
+      {:error, reason} ->
+        error_result(tool_use, "The tool call failed: #{describe(reason)}.")
+    end
+  end
+
+  defp doubtful_result(tool_use, text, class) do
+    if class.() == :effect,
+      do: error_result(tool_use, text <> @doubt),
+      else: error_result(tool_use, text)
   end
 
   # Without an interaction the old path runs untouched; with one, every call is announced, asked
@@ -553,8 +573,9 @@ defmodule Mead.Router do
   defp run_tool_for_turn(context, tool_use) do
     case Keyword.get(context.options, :interaction) do
       nil ->
-        record_start(context, tool_use, fn -> class_of(context, tool_use) end)
-        run_tool(context, tool_use)
+        class = fn -> class_of(context, tool_use) end
+        record_start(context, tool_use, class)
+        run_tool(context, tool_use, class)
 
       interaction ->
         if tool_use.name == AskUser.name(),
@@ -615,14 +636,16 @@ defmodule Mead.Router do
            module.request_permission(interaction_context, permission_request(tool_use, target)) do
       record_start(context, tool_use, fn -> target.class end)
 
-      case run_cancellable(context, module, interaction_context, tool_use) do
+      class = fn -> target.class end
+
+      case run_cancellable(context, module, interaction_context, tool_use, class) do
         {:finished, result} ->
           update.(if(result.is_error, do: :failed, else: :completed), %{})
           result
 
         :cancelled ->
           update.(:failed, %{current_step: "cancelled"})
-          error_result(tool_use, "The person cancelled this tool call.")
+          doubtful_result(tool_use, "The person cancelled this tool call.", class)
       end
     else
       {:deny, reason} ->
@@ -637,13 +660,15 @@ defmodule Mead.Router do
 
   # The tool runs in its own process so that whoever holds the pid (registered with the
   # interaction) can cancel it by killing it. Only that kill reads as a cancellation.
-  defp run_cancellable(context, module, interaction_context, tool_use) do
+  # A tool process that crashed, was cancelled or ran out of time was stopped while the call was
+  # out, so an effect call is reported as one that may have run.
+  defp run_cancellable(context, module, interaction_context, tool_use, class) do
     owner = self()
 
     task =
       Task.Supervisor.async_nolink(Mead.TurnSupervisor, fn ->
         watch_owner(owner)
-        run_tool(context, tool_use)
+        run_tool(context, tool_use, class)
       end)
 
     module.register_call(interaction_context, tool_use.id, task.pid)
@@ -661,10 +686,12 @@ defmodule Mead.Router do
         :cancelled
 
       {:exit, reason} ->
-        {:finished, error_result(tool_use, "The tool call failed: #{describe(reason)}.")}
+        {:finished,
+         doubtful_result(tool_use, "The tool call failed: #{describe(reason)}.", class)}
 
       nil ->
-        {:finished, error_result(tool_use, "The tool call failed: #{describe(:timeout)}.")}
+        {:finished,
+         doubtful_result(tool_use, "The tool call failed: #{describe(:timeout)}.", class)}
     end
   end
 

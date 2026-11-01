@@ -200,6 +200,84 @@ defmodule Mead.RouterInteractionTest do
              List.last(second_conversation_messages()).content |> hd()
   end
 
+  describe "an effect call whose outcome is unknown" do
+    @doubt " It may or may not have taken effect; check before calling it again."
+
+    defp tool_result_content do
+      [result] = List.last(second_conversation_messages()).content
+      assert result.is_error
+      result.content
+    end
+
+    defp effect_hub(result) do
+      hub(
+        results: %{"files__read_file" => result},
+        classes: %{"files__read_file" => :effect}
+      )
+    end
+
+    for {reason, text} <- [
+          timeout: "The tool call failed: it took too long.",
+          connection_lost: "The tool call failed: the connection to the tool server was lost."
+        ] do
+      test "#{reason} tells the model it may have taken effect" do
+        effect_hub({:error, unquote(reason)})
+        route(tool_use_step([@call]), [:allow])
+        assert tool_result_content() == unquote(text) <> @doubt
+      end
+
+      test "#{reason} without an interaction tells the model the same" do
+        effect_hub({:error, unquote(reason)})
+        Router.route([], "read /a", [route: :cloud], slots(tool_use_step([@call])), FakeHub)
+        assert tool_result_content() == unquote(text) <> @doubt
+      end
+
+      test "#{reason} of a read call is a plain failure" do
+        hub(results: %{"files__read_file" => {:error, unquote(reason)}})
+        route(tool_use_step([@call]), [:allow])
+        assert tool_result_content() == unquote(text)
+      end
+    end
+
+    test "a tool process that crashes tells the model it may have taken effect" do
+      effect_hub(:crash)
+      route(tool_use_step([@call]), [:allow])
+      assert tool_result_content() =~ ~r/^The tool call failed: .+\.#{Regex.escape(@doubt)}$/
+    end
+
+    test "an effect call that never reached the tool server is a plain failure" do
+      effect_hub({:error, :connection_unavailable})
+      route(tool_use_step([@call]), [:allow])
+      assert tool_result_content() == "The tool call failed: the tool server is not connected."
+    end
+
+    test "cancelling a running effect call tells the model it may have taken effect" do
+      context = FakeInteraction.start([:allow])
+      options = [route: :cloud, interaction: {FakeInteraction, context}]
+      configured_slots = slots(tool_use_step([@call]))
+      test_pid = self()
+
+      turn =
+        Task.async(fn ->
+          FakeHub.configure(
+            test_pid: test_pid,
+            tools: [@tool],
+            results: %{"files__read_file" => :block},
+            classes: %{"files__read_file" => :effect}
+          )
+
+          Router.route([], "read /a", options, configured_slots, FakeHub)
+        end)
+
+      assert_receive {:register_call, "call-1", task_pid}, 2_000
+      assert_receive {:tool_blocked, _blocked_pid}, 2_000
+      Process.exit(task_pid, :kill)
+      assert {:ok, "fake reply"} = Task.await(turn)
+
+      assert tool_result_content() == "The person cancelled this tool call." <> @doubt
+    end
+  end
+
   test "a turn without an interaction makes no interaction calls" do
     hub()
 
