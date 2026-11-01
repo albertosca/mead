@@ -9,4 +9,8 @@ defmodule Mead.Session.EchoHandler do
 
   @impl true
   def handle_turn(_history, input, _options), do: {:ok, input}
+
+  # Answering is pure, so a continued turn just answers again.
+  @impl true
+  def resume_turn(history, input, _steps, options), do: handle_turn(history, input, options)
 end

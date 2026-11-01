@@ -2,6 +2,7 @@ defmodule Mead.Session.RecordTest do
   use ExUnit.Case, async: true
 
   import Bitwise
+  import Mead.TestHelpers
 
   alias Mead.Session.Record
 
@@ -77,6 +78,24 @@ defmodule Mead.Session.RecordTest do
       assert File.read!(path) == "kept"
     end
 
+    test "create_private syncs the directory and its parent when it makes the file, and only then",
+         %{tmp_dir: directory} do
+      folder = Path.join(directory, "new_folder")
+      File.mkdir_p!(folder)
+      path = Path.join(folder, "private")
+
+      calls =
+        calls_to({Record, :sync_directory, 1}, fn ->
+          Record.create_private(path)
+          Record.create_private(path)
+        end)
+
+      assert calls == [
+               {Record, :sync_directory, [folder]},
+               {Record, :sync_directory, [directory]}
+             ]
+    end
+
     test "truncate cuts the file to the given size", %{tmp_dir: directory} do
       path = Path.join(directory, "cut")
       File.write!(path, "0123456789")
@@ -96,6 +115,47 @@ defmodule Mead.Session.RecordTest do
       assert Record.remove_leftover(path) == :ok
       assert Record.remove_leftover(path) == :ok
       refute File.exists?(path)
+    end
+
+    if :os.type() == {:unix, :darwin} do
+      # On macOS :file.sync/1 is F_BARRIERFSYNC, which does not flush the drive's cache.
+      test "sync flushes the file at the path to the drive", %{tmp_dir: directory} do
+        path = Path.join(directory, "flushed")
+        {:ok, device} = File.open(path, [:append, :binary])
+        IO.binwrite(device, "data")
+
+        full = calls_to({Mead.Native, :full_fsync, 1}, fn -> Record.sync(device, path) end)
+        ordered = calls_to({:file, :sync, 1}, fn -> Record.sync(device, path) end)
+        File.close(device)
+
+        assert full == [{Mead.Native, :full_fsync, [path]}]
+        assert ordered == []
+      end
+
+      # The refusal of a directory sync is tolerated, so the only proof the directory reached the
+      # disk is that the flush ran on it.
+      test "sync_directory really flushes the directory", %{tmp_dir: directory} do
+        assert calls_to({Mead.Native, :full_fsync, 1}, fn ->
+                 Record.sync_directory(directory)
+               end) == [{Mead.Native, :full_fsync, [directory]}]
+      end
+    else
+      test "sync syncs the device", %{tmp_dir: directory} do
+        path = Path.join(directory, "synced")
+        {:ok, device} = File.open(path, [:append, :binary])
+
+        assert [{:file, :sync, [^device]}] =
+                 calls_to({:file, :sync, 1}, fn -> Record.sync(device, path) end)
+
+        File.close(device)
+      end
+
+      # A directory opened without the :directory mode is refused with :eisdir, and the refusal
+      # is tolerated, so the only proof the directory reached the disk is that the sync ran on it.
+      test "sync_directory really syncs the directory", %{tmp_dir: directory} do
+        assert [{:file, :sync, [_device]}] =
+                 calls_to({:file, :sync, 1}, fn -> Record.sync_directory(directory) end)
+      end
     end
 
     test "sync_directory never fails", %{tmp_dir: directory} do

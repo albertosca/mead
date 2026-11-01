@@ -4,11 +4,13 @@ defmodule Mead.Session.History do
   session has a storage directory.
 
   The state holds the turns with the newest first and the directory, or `nil` when persistence
-  is off. Only `append/2` is write-first: a turn that cannot be recorded is refused and memory is
-  left untouched, so a conversation never accepts a turn it would forget. `update_last/2` and
+  is off. `append/2`, `append_step/3` and `begin_resume/2` are write-first: a turn or a checkpoint
+  that cannot be recorded is refused and memory is left untouched, so a conversation never accepts
+  what it would forget. `update_last/2` and
   `mark_interrupted/1` always change memory and then try to write, because the caller already
-  holds the answer; a closed turn that never reached the disk comes back after a restart as an
-  interrupted one, which is accurate.
+  holds the answer; a closed turn that never reached the disk comes back after a restart still in
+  progress, so the server continues it when it can (see `Mead.Session.Server`) and marks it
+  interrupted otherwise.
 
   When the file passes `:compact_after_bytes` the history rewrites it from memory with
   `Mead.Session.Store.compact/3`; a failed rewrite is logged and never fails a write.
@@ -25,6 +27,10 @@ defmodule Mead.Session.History do
   alias Mead.Session.Turn
 
   @type persistence_error :: {:error, {:persistence, term()}}
+
+  # Infrastructure restarts cut a turn through no fault of its own, but one that takes the
+  # infrastructure down with it each time must still stop somewhere.
+  @default_total_resumes 20
 
   @doc """
   Starts the history for `options[:session_id]`, registered under `Mead.Registry`.
@@ -101,6 +107,104 @@ defmodule Mead.Session.History do
     session_id
     |> Session.via(:history)
     |> Agent.get(&Enum.reverse(&1.turns))
+  end
+
+  @doc """
+  Returns the newest turn recorded under `client_turn_id`, or `nil`.
+
+  The search runs inside the agent, so only the matching turn is copied out.
+  """
+  @spec find_by_client_turn_id(String.t(), String.t()) :: Turn.t() | nil
+  def find_by_client_turn_id(session_id, client_turn_id) do
+    session_id
+    |> Session.via(:history)
+    |> Agent.get(fn state -> Enum.find(state.turns, &(&1.client_turn_id == client_turn_id)) end)
+  end
+
+  @doc "Returns the newest turn, or `nil` when there is none."
+  @spec newest(String.t()) :: Turn.t() | nil
+  def newest(session_id) do
+    session_id
+    |> Session.via(:history)
+    |> Agent.get(&List.first(&1.turns))
+  end
+
+  @doc """
+  Records one checkpoint step of the turn in progress, write-first like `append/2`.
+
+  The step applies only while the newest turn is in progress and was continued exactly `attempt`
+  times. Anything else answers `{:error, :stale}` and writes nothing, so a late write from an
+  attempt that was killed (its message can already wait in this agent's mailbox) never reaches
+  the attempt that replaced it, nor a closed turn.
+  """
+  @spec append_step(String.t(), non_neg_integer(), term()) ::
+          :ok | {:error, :stale} | persistence_error()
+  def append_step(session_id, attempt, step) do
+    Agent.get_and_update(Session.via(session_id, :history), fn
+      %{turns: [%Turn{status: :in_progress, resumes: ^attempt} = newest | older]} = state ->
+        case persist(state, session_id, {:step, step}) do
+          :ok ->
+            turns = [%{newest | steps: newest.steps ++ [step]} | older]
+            {:ok, compact_if_due(%{state | turns: turns}, session_id)}
+
+          error ->
+            {error, state}
+        end
+
+      state ->
+        {{:error, :stale}, state}
+    end)
+  end
+
+  @doc """
+  Counts one more continuation of the turn in progress, write-first, and returns the turn.
+
+  The continuation runs under `options[:generation]` (default `nil`). When that is the generation
+  the last attempt ran under, nothing restarted around the session, so the session itself cut
+  the attempt, and the continuation spends one of `maximum` crash continuations. A changed
+  generation means an infrastructure restart cut it, and it spends only the total budget,
+  `options[:total_maximum]` (default #{@default_total_resumes}). `options[:infrastructure]` set to
+  `true` says the same without a generation change: the caller knows the infrastructure cut the
+  attempt (a suspension that no pool restart followed).
+
+  `{:error, :exhausted}` once either budget is spent, and `{:error, :nothing_to_resume}` when the
+  newest turn is not in progress.
+  """
+  @spec begin_resume(String.t(), non_neg_integer(), keyword()) ::
+          {:ok, Turn.t()} | {:error, :exhausted | :nothing_to_resume} | persistence_error()
+  def begin_resume(session_id, maximum, options \\ []) do
+    generation = Keyword.get(options, :generation)
+    total_maximum = Keyword.get(options, :total_maximum, @default_total_resumes)
+    session_cut = not Keyword.get(options, :infrastructure, false)
+
+    Agent.get_and_update(Session.via(session_id, :history), fn
+      %{turns: [%Turn{status: :in_progress} = newest | older]} = state ->
+        crash_count =
+          newest.crash_resumes +
+            if(session_cut and newest.generation == generation, do: 1, else: 0)
+
+        count = newest.resumes + 1
+
+        if crash_count > maximum or count > total_maximum do
+          {{:error, :exhausted}, state}
+        else
+          continue_turn(state, session_id, newest, older, {count, crash_count, generation})
+        end
+
+      state ->
+        {{:error, :nothing_to_resume}, state}
+    end)
+  end
+
+  defp continue_turn(state, session_id, newest, older, {count, crash_count, generation}) do
+    case persist(state, session_id, {:resume, count, crash_count, generation}) do
+      :ok ->
+        continued = %{newest | resumes: count, crash_resumes: crash_count, generation: generation}
+        {{:ok, continued}, compact_if_due(%{state | turns: [continued | older]}, session_id)}
+
+      error ->
+        {error, state}
+    end
   end
 
   @doc """

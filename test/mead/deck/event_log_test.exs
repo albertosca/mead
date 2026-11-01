@@ -1,6 +1,8 @@
 defmodule Mead.Deck.EventLogTest do
   use ExUnit.Case, async: true
 
+  import Mead.TestHelpers
+
   alias Mead.Deck.EventLog
 
   @moduletag :tmp_dir
@@ -26,13 +28,21 @@ defmodule Mead.Deck.EventLogTest do
 
   defp events_path(directory), do: Path.join(directory, @session_id <> ".events")
 
-  test "an event appended without a sync is still on disk after a reopen", %{tmp_dir: directory} do
+  # An event a client was sent must survive a power cut: a lost tail would hand its sequence
+  # numbers to different events, and a client holding the old ones would never ask for the new.
+  # Record.sync/2 is what reaches the drive on every platform (F_FULLFSYNC on macOS).
+  test "every append is synced: there is no unsynced mode", %{tmp_dir: directory} do
+    Code.ensure_loaded!(EventLog)
+    refute function_exported?(EventLog, :append, 3)
     {:ok, log} = EventLog.open(directory, @session_id)
-    {:ok, log} = EventLog.append(log, event(1), sync: false)
-    {:ok, _log} = EventLog.append(log, event(2))
+    path = Path.join(directory, @session_id <> ".events")
 
-    {:ok, reopened} = EventLog.open(directory, @session_id)
-    assert Enum.map(EventLog.read_after(reopened, 0), & &1["sequence"]) == [1, 2]
+    file_syncs =
+      for {Mead.Session.Record, :sync, [_device, ^path]} <-
+            calls_to({Mead.Session.Record, :sync, 2}, fn -> append_all(log, [1, 2]) end),
+          do: path
+
+    assert length(file_syncs) == 2
   end
 
   test "an empty log has last_sequence 0", %{tmp_dir: directory} do

@@ -2,6 +2,7 @@ defmodule Mead.Session.StoreTest do
   use ExUnit.Case, async: true
 
   import ExUnit.CaptureLog
+  import Mead.TestHelpers
 
   alias Mead.Session.Store
   alias Mead.Session.Turn
@@ -18,6 +19,18 @@ defmodule Mead.Session.StoreTest do
   end
 
   defp encoded(event), do: record(:erlang.term_to_binary(event))
+
+  # A turn the client was told about must survive a power cut; Record.sync/2 is what reaches the
+  # drive on every platform (F_FULLFSYNC on macOS).
+  test "append syncs the session file to the drive", context do
+    path = Path.join(context.directory, context.session_id <> ".log")
+    event = {:append, Turn.start("hello")}
+
+    assert [{Mead.Session.Record, :sync, [_device, ^path]}] =
+             calls_to({Mead.Session.Record, :sync, 2}, fn ->
+               :ok = Store.append(context.directory, context.session_id, event)
+             end)
+  end
 
   defp file_of(directory, session_id), do: Path.join(directory, session_id <> ".log")
 

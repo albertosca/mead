@@ -26,9 +26,19 @@ defmodule Mead.Test.FakeHub do
           :release -> {:ok, %{content: "released", is_error: false}}
         end
 
+      # A tool whose process crashes while the call is out.
+      :crash ->
+        raise "the tool process crashed"
+
       result ->
         result
     end
+  end
+
+  # Tells the test that a continued turn waited for the tool servers; they are always ready here.
+  def await_ready(timeout) do
+    send(settings().test_pid, {:hub_awaited, timeout})
+    :ok
   end
 
   # The class of a tool defaults to :read; `classes: %{"server__tool" => :effect}` overrides it. A

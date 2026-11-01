@@ -3,19 +3,23 @@ defmodule Mead.ApplicationTest do
   # with the asynchronous tests.
   use ExUnit.Case, async: false
 
-  # The root supervisor tolerates 10 restarts in 5 seconds, well above the 3 of OTP's default,
-  # so a test may kill a root child without the suite's earlier kills (this file kills the turn
-  # supervisor and the hub, and ledger_session_test.exs kills the turn supervisor) having spent
-  # the budget. That the server, the last child, restarts alone follows from rest_for_one and
-  # the order test below.
+  # The root supervisor tolerates 10 restarts in 5 seconds, well above the 3 of OTP's default.
+  # This file kills the turn supervisor and the hub, ledger_session_test.exs the turn supervisor,
+  # and shutdown_guard_test.exs the registry, the turn supervisor and the hub several times, so
+  # each of them waits for room in that budget before a test. That the server, the last child,
+  # restarts alone follows from rest_for_one and the order test below.
 
   import Mead.TestHelpers
+
+  setup do
+    await_root_restart_budget(2)
+  end
 
   # An earlier test may have killed the hub or an earlier child, and the server, restarted last,
   # may not be registered yet.
   defp running_server, do: wait_until(fn -> Process.whereis(Mead.MCP.Server) end)
 
-  test "the root supervisor starts the ledger, the registry, the turn supervisor, the pool, the deck channels, the MCP hub, the deck tickets, and the MCP server in that order" do
+  test "the root supervisor starts the ledger, the registry, the turn supervisor, the pool, the keeper, the deck channels, the MCP hub, the shutdown guard, the deck tickets, and the MCP server in that order" do
     child_ids =
       Mead.Supervisor
       |> Supervisor.which_children()
@@ -27,8 +31,10 @@ defmodule Mead.ApplicationTest do
              Mead.Registry,
              Mead.TurnSupervisor,
              Mead.Session.Pool,
+             Mead.Session.Keeper,
              Mead.Deck.ChannelSupervisor,
              Mead.MCP.Hub,
+             Mead.Session.ShutdownGuard,
              Mead.Deck.Tickets,
              Mead.MCP.Server
            ]

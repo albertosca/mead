@@ -3,10 +3,13 @@ defmodule Mead.Session.Supervisor do
   Supervises the two processes of one conversation.
 
   The history is started before the server and the strategy is `:rest_for_one`, so a server
-  crash restarts only the server and leaves the history untouched. The default restart
-  intensity applies: a server that crashes more than 3 times in 5 seconds takes the whole pair
-  down, which is a visible failure instead of a hidden loop. A stored conversation survives that
-  and can be brought back with `Mead.resume_session/2`; one without storage is gone.
+  crash restarts only the server and leaves the history untouched. The restart intensity is 5
+  restarts in 5 seconds: a turn in progress is continued by at most 3 server starts and the 4th
+  interrupts it, so a turn that crashes its server every time ends interrupted before the pair
+  gives up (the default of 3 would take the pair down first and leave the turn stranded). A
+  server that keeps crashing beyond that takes the whole pair down, which is a visible failure
+  instead of a hidden loop. A stored conversation survives that and can be brought back with
+  `Mead.resume_session/2`; one without storage is gone.
   """
 
   use Supervisor, restart: :transient
@@ -29,6 +32,6 @@ defmodule Mead.Session.Supervisor do
       {Server, options}
     ]
 
-    Supervisor.init(children, strategy: :rest_for_one)
+    Supervisor.init(children, strategy: :rest_for_one, max_restarts: 5, max_seconds: 5)
   end
 end

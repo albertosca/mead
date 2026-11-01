@@ -15,10 +15,24 @@ defmodule Mead.Deck.Channel do
   `prompt.accepted` again and starts nothing. A new prompt is accepted, queued behind at most
   `queue_limit` others (a prompt over the limit is dropped without any event), and the queue runs
   one turn at a time through `Mead.submit_turn/3` in a task under `Mead.TurnSupervisor`. When a
-  turn ends, its text arrives as a `text.delta` (unless it was already streamed), and
+  turn ends, its text arrives as a `text.delta` (only the part not already streamed), and
   `metric.updated` reports the session's token totals from the ledger. A turn that ends in an
   error emits `turn.failed`; one that succeeds with an empty or invalid answer emits neither text
   nor failure.
+
+  ## Durable turns
+
+  Every turn is submitted with a `client_turn_id`: `"turn-<sequence>"` with storage, and
+  `"turn-<sequence>-<epoch>"` without, where the epoch is drawn when the channel starts because
+  the in-memory log starts again at 0. The channel monitors the session supervisor, so a session
+  server that crashes and restarts keeps the channel. A keyed `Mead.submit_turn/3` already waits
+  through its server's restarts and returns what the continued turn returns; the turn task only
+  submits again, every 50 ms for at most 5 seconds, on a `:not_found` from a session whose server
+  has not come back yet when the turn starts. A channel that starts again resubmits the turn that was running
+  when the last one died, if the session recorded a turn under its key, instead of reporting it
+  interrupted. When the final text does not begin with what was streamed (a restart cut a stream
+  and the new answer differs), the channel emits `text.reset` with the `turn_id`, telling the deck
+  to drop the streamed text of that turn, and then the whole text.
 
   ## Permissions
 
@@ -54,6 +68,9 @@ defmodule Mead.Deck.Channel do
   alias Mead.Session.Store
 
   @protocol_version 1
+  # How long a turn keeps submitting again while its session server restarts, and how often.
+  @restart_wait 5_000
+  @restart_retry_interval 50
   @permission_options [
     %{"option_id" => "allow_once", "label" => "Allow once", "kind" => "allow_once"},
     %{
@@ -102,7 +119,7 @@ defmodule Mead.Deck.Channel do
     session_id = Keyword.fetch!(options, :session_id)
 
     with {:ok, configuration} <- fetch_configuration(options),
-         {:ok, server} <- fetch_session_server(session_id),
+         {:ok, supervisor} <- fetch_session_supervisor(session_id),
          directory = Keyword.get_lazy(options, :storage_directory, &Store.directory/0),
          {:ok, log} <- open_log(directory, session_id),
          {:ok, state} <-
@@ -110,7 +127,8 @@ defmodule Mead.Deck.Channel do
              session_id: session_id,
              configuration: configuration,
              log: log,
-             session_monitor: Process.monitor(server),
+             session_monitor: Process.monitor(supervisor),
+             epoch: epoch_for(directory),
              sockets: %{},
              devices: %{},
              next_device: 1,
@@ -135,8 +153,10 @@ defmodule Mead.Deck.Channel do
 
   # What an earlier channel left in the log. Dangling requests are expired; a prompt whose turn has
   # no closing metric (each turn ends with exactly one `tokens_out`, which carries its turn id) did
-  # not finish: the first of them was running when the channel died and is reported as interrupted
-  # with its open tool cards closed, and the ones behind it are queued again.
+  # not finish. The first of them was running when the channel died: its open tool cards are
+  # closed, and it is submitted again under its key when the session recorded a turn under that key
+  # (the resubmission joins the turn or gets its outcome), or reported as interrupted when it did
+  # not. The ones behind it are queued again.
   defp recover(state) do
     with {:ok, state} <- expire_dangling(state) do
       events = EventLog.read_after(state.log, 0)
@@ -156,27 +176,50 @@ defmodule Mead.Deck.Channel do
             not MapSet.member?(finished, "turn-#{sequence}"),
             do: {sequence, text}
 
-      interrupt(state, events, unfinished)
+      recover_unfinished(state, events, unfinished)
     end
   end
 
-  defp interrupt(state, _events, []), do: {:ok, state}
+  defp recover_unfinished(state, _events, []), do: {:ok, state}
 
-  defp interrupt(state, events, [{sequence, _text} | queued]) do
+  defp recover_unfinished(state, events, [{sequence, text} | queued]) do
     turn_id = "turn-#{sequence}"
+    queued = for {queued_sequence, queued_text} <- queued, do: {queued_sequence, queued_text, ""}
     state = %{state | open_cards: open_cards_in(events)}
 
     with {:ok, state} <- close_open_cards(state),
-         {:ok, state} <-
-           emit_all(
-             state,
-             [{"turn.failed", %{"turn_id" => turn_id, "reason" => "interrupted"}}] ++
-               metric_events(state.session_id, turn_id)
-           ) do
-      {:ok, %{state | queue: :queue.from_list(queued)}}
+         {:ok, state} <- resubmit_or_interrupt(state, events, {sequence, text}, turn_id) do
+      {:ok, %{state | queue: :queue.join(state.queue, :queue.from_list(queued))}}
     else
       {:error, reason} -> {:error, {:event_log, reason}}
     end
+  end
+
+  defp resubmit_or_interrupt(state, events, {sequence, text}, turn_id) do
+    if recorded_turn?(state.session_id, turn_key(state, sequence)) do
+      streamed_text = streamed_text_in(events, turn_id)
+      {:ok, %{state | queue: :queue.in({sequence, text, streamed_text}, state.queue)}}
+    else
+      emit_all(
+        state,
+        [{"turn.failed", %{"turn_id" => turn_id, "reason" => "interrupted"}}] ++
+          metric_events(state.session_id, turn_id)
+      )
+    end
+  end
+
+  defp recorded_turn?(session_id, key) do
+    case Mead.history(session_id) do
+      {:ok, turns} -> Enum.any?(turns, &(&1.client_turn_id == key))
+      {:error, _reason} -> false
+    end
+  end
+
+  # The text the deck was already shown for `turn_id`, rebuilt from its `text.delta` events.
+  defp streamed_text_in(events, turn_id) do
+    for %{"type" => "text.delta", "payload" => %{"turn_id" => ^turn_id, "text" => text}} <- events,
+        into: "",
+        do: text
   end
 
   # The tool cards of the log whose last update is not a final status.
@@ -248,12 +291,22 @@ defmodule Mead.Deck.Channel do
     end
   end
 
-  defp fetch_session_server(session_id) do
-    case Session.whereis(session_id, :server) do
+  # The supervisor, not the server: a server that crashes and restarts keeps the session, and the
+  # channel with it; only the session going away ends the channel.
+  defp fetch_session_supervisor(session_id) do
+    case Session.whereis(session_id, :supervisor) do
       nil -> {:error, :session_not_found}
       pid -> {:ok, pid}
     end
   end
+
+  # Without storage the log starts again at sequence 0 with every channel, so a key made of the
+  # sequence alone could name a turn an earlier channel left in the session's memory.
+  defp epoch_for(nil), do: Base.url_encode64(:crypto.strong_rand_bytes(9), padding: false)
+  defp epoch_for(_directory), do: nil
+
+  defp turn_key(%{epoch: nil}, sequence), do: "turn-#{sequence}"
+  defp turn_key(%{epoch: epoch}, sequence), do: "turn-#{sequence}-#{epoch}"
 
   defp open_log(directory, session_id) do
     case EventLog.open(directory, session_id) do
@@ -312,10 +365,12 @@ defmodule Mead.Deck.Channel do
 
     send(socket, {:deck_event, Events.encode(snapshot(state, current))})
 
-    if last_sequence <= current do
-      for envelope <- EventLog.read_after(state.log, last_sequence) do
-        send(socket, {:deck_event, Events.encode(envelope)})
-      end
+    # A client ahead of the log holds events the log no longer has; it gets all of it again, and
+    # the snapshot's current_sequence below its own tells it to drop what it holds.
+    replay_from = if last_sequence <= current, do: last_sequence, else: 0
+
+    for envelope <- EventLog.read_after(state.log, replay_from) do
+      send(socket, {:deck_event, Events.encode(envelope)})
     end
 
     {:reply, :ok, state}
@@ -385,9 +440,10 @@ defmodule Mead.Deck.Channel do
     case state.running do
       %{turn_id: ^turn_id} = running when is_binary(text) and text != "" ->
         if String.valid?(text) do
-          case emit(state, "text.delta", %{"turn_id" => turn_id, "text" => text}, sync: false) do
+          case emit(state, "text.delta", %{"turn_id" => turn_id, "text" => text}) do
             {:ok, state, _envelope} ->
-              {:reply, :ok, %{state | running: Map.put(running, :streamed, true)}}
+              running = Map.update!(running, :streamed_text, &(&1 <> text))
+              {:reply, :ok, %{state | running: running}}
 
             {:error, reason} ->
               stop_for_log_failure(reason, state)
@@ -728,7 +784,7 @@ defmodule Mead.Deck.Channel do
         state = %{
           state
           | accepted: Map.put(state.accepted, client_message_id, sequence),
-            queue: :queue.in({sequence, text}, state.queue)
+            queue: :queue.in({sequence, text, ""}, state.queue)
         }
 
         continue(start_next_turn(state))
@@ -747,21 +803,24 @@ defmodule Mead.Deck.Channel do
 
   defp start_next_turn(%{running: nil} = state) do
     case :queue.out(state.queue) do
-      {{:value, {sequence, text}}, queue} ->
+      {{:value, {sequence, text, streamed_text}}, queue} ->
         session_id = state.session_id
         turn_id = "turn-#{sequence}"
-        interaction = {Mead.Deck.Interaction, %{channel: self(), turn_id: turn_id}}
+
+        options = [
+          route: :auto,
+          tools: :effect,
+          interaction: {Mead.Deck.Interaction, %{channel: self(), turn_id: turn_id}},
+          client_turn_id: turn_key(state, sequence)
+        ]
 
         task =
           Task.Supervisor.async_nolink(Mead.TurnSupervisor, fn ->
-            Mead.submit_turn(session_id, text,
-              route: :auto,
-              tools: :effect,
-              interaction: interaction
-            )
+            submit_through_restarts(session_id, text, options, nil)
           end)
 
-        %{state | queue: queue, running: %{ref: task.ref, turn_id: turn_id}}
+        running = %{ref: task.ref, turn_id: turn_id, streamed_text: streamed_text}
+        %{state | queue: queue, running: running}
 
       {:empty, _queue} ->
         state
@@ -769,6 +828,28 @@ defmodule Mead.Deck.Channel do
   end
 
   defp start_next_turn(state), do: state
+
+  # A keyed submission waits through the restarts of a server it reached, but answers
+  # `:not_found` at once when the session has no server, which is also what a session that is
+  # restarting looks like when the turn starts (a channel that starts again resubmits its turn
+  # then). The same submission joins the continued turn, or gets its outcome, and attaches the
+  # interaction again.
+  defp submit_through_restarts(session_id, text, options, deadline) do
+    case Mead.submit_turn(session_id, text, options) do
+      {:error, :not_found} = result ->
+        deadline = deadline || System.monotonic_time(:millisecond) + @restart_wait
+
+        if System.monotonic_time(:millisecond) < deadline do
+          Process.sleep(@restart_retry_interval)
+          submit_through_restarts(session_id, text, options, deadline)
+        else
+          result
+        end
+
+      result ->
+        result
+    end
+  end
 
   @impl GenServer
   def handle_info({reference, result}, %{running: %{ref: reference}} = state) do
@@ -892,13 +973,28 @@ defmodule Mead.Deck.Channel do
 
   defp provider_reason(_reason), do: "failed"
 
-  # A turn that streamed already sent its text piece by piece; the whole of it is not sent again.
-  defp text_events(%{streamed: true}, _turn_id, _result), do: []
+  # The final text, against what the deck was already shown of it: all of it when nothing streamed,
+  # only the rest when the stream is its beginning (a stream that ran to the end leaves no rest),
+  # and, when a restart cut a stream that the new answer does not continue, `text.reset` followed by
+  # all of it.
+  defp text_events(%{streamed_text: streamed}, turn_id, {:ok, output})
+       when is_binary(output) and output != "" do
+    cond do
+      not String.valid?(output) ->
+        []
 
-  defp text_events(_running, turn_id, {:ok, output}) when is_binary(output) and output != "" do
-    if String.valid?(output),
-      do: [{"text.delta", %{"turn_id" => turn_id, "text" => output}}],
-      else: []
+      String.starts_with?(output, streamed) ->
+        case binary_part(output, byte_size(streamed), byte_size(output) - byte_size(streamed)) do
+          "" -> []
+          rest -> [{"text.delta", %{"turn_id" => turn_id, "text" => rest}}]
+        end
+
+      true ->
+        [
+          {"text.reset", %{"turn_id" => turn_id}},
+          {"text.delta", %{"turn_id" => turn_id, "text" => output}}
+        ]
+    end
   end
 
   defp text_events(_running, _turn_id, _result), do: []
@@ -977,12 +1073,12 @@ defmodule Mead.Deck.Channel do
     end)
   end
 
-  # Writes the event to the log first, then sends it to every attached socket.
-  defp emit(state, type, payload, options \\ []) do
+  # Writes the event to the log and syncs it first, then sends it to every attached socket.
+  defp emit(state, type, payload) do
     sequence = EventLog.last_sequence(state.log) + 1
     envelope = Events.envelope(sequence, state.session_id, type, payload, DateTime.utc_now())
 
-    case EventLog.append(state.log, envelope, options) do
+    case EventLog.append(state.log, envelope) do
       {:ok, log} ->
         encoded = Events.encode(envelope)
         for socket <- Map.keys(state.sockets), do: send(socket, {:deck_event, encoded})

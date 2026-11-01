@@ -11,14 +11,46 @@ defmodule Mead.Session.Server do
   as a message instead of killing the server, while a server death takes the running task down
   with it, so no orphaned handler keeps running for a conversation that restarted.
 
+  A turn submitted with a `client_turn_id` runs at most once. The key is recorded on the turn, so
+  it survives restarts and resumes. A submit that repeats the key and the input of the running
+  turn joins its waiters and gets the same reply; one that repeats an ended turn gets the stored
+  outcome at once, an interrupted one included, and nothing runs again; one that repeats the key
+  with another input is a conflict. Waiters are monitored, and one that dies leaves the list
+  while the turn keeps running.
+
   The turn clock can be suspended with `pause_clock/1` and `resume_clock/1`, for a turn that waits
   for a person: while at least one pause is open the turn cannot time out, and the last resume
   restarts the timer with the time that was left. Pauses nest by counting, and neither call does
   anything when no turn is running, so a pause can never leak into the next turn.
 
-  When the server restarts after a crash, `init/1` marks every turn still recorded as in
-  progress as interrupted. A reader that bypasses the server can observe the old status in the
-  moment between the new server registering its name and finishing `init/1`.
+  Every turn gets a `:checkpoint` option that records its steps in the history. When the server
+  starts and the newest turn is still in progress, it continues that turn when it can: the turn
+  has a `client_turn_id` (every turn gets one; `Mead.submit_turn/3` generates it when the caller
+  gives none), the options it was submitted with were recorded, and the handler implements
+  `resume_turn/4`, which `Mead.start_session/1` requires. The continuation runs with no waiters (a submit repeating the key
+  joins it) and gets the recorded steps. A turn whose own session cut it is continued at most 3
+  times, counted only while the infrastructure stays the same (`Mead.Session.Generation`); one cut
+  by a pool, turn supervisor, registry or node restart is continued up to 20 times in all. The
+  next start past either budget, and every turn that cannot continue, marks it interrupted. While a turn that can continue runs,
+  the session has a marker under `Mead.Session.Pending`, so recovery after a node stop finds it.
+
+  A session that is stopped on purpose goes through `abandon/1` first: its running turn ends
+  interrupted for good, its waiters get `{:error, :session_stopped}`, and its marker goes. An
+  orderly shutdown of the node goes through `suspend/1` instead, which only stops the running task,
+  so the turn stays in progress with its marker and continues at the next boot. After either, the
+  server refuses every submit until it terminates: with `{:error, :session_stopped}` after
+  `abandon/1`, and with `{:error, :session_suspended}`, which a caller waits through, after
+  `suspend/1`.
+
+  A turn never holds the caller's interaction itself. Its handler gets
+  `interaction: {Mead.Session.InteractionRelay, %{session_id: id}}` whenever the turn is
+  interactive, and the server keeps the caller's interaction as the one attached to the running
+  turn: the submitted one first (the only one that receives streamed text), then the one of any
+  submit that joins the turn, which replaces it. A continued turn starts with none attached; see
+  `Mead.Session.InteractionRelay` for what happens until one is.
+
+  A reader that bypasses the server can observe an interrupted turn as in progress in the moment
+  between the new server registering its name and finishing `init/1`.
   """
 
   use GenServer
@@ -26,8 +58,16 @@ defmodule Mead.Session.Server do
   require Logger
 
   alias Mead.Session
+  alias Mead.Session.Generation
   alias Mead.Session.History
+  alias Mead.Session.InteractionRelay
+  alias Mead.Session.Pending
   alias Mead.Session.Turn
+
+  # How many times one turn may be continued after its own session cut it, under the same
+  # infrastructure, before the next start interrupts it, so a turn that crashes its server every
+  # time cannot loop. Cuts by an infrastructure restart spend only History's total budget.
+  @maximum_resumes 3
 
   @doc """
   Starts the server for `options[:session_id]`, registered under `Mead.Registry`.
@@ -51,6 +91,91 @@ defmodule Mead.Session.Server do
   @spec resume_clock(String.t()) :: :ok | {:error, :not_found}
   def resume_clock(session_id), do: clock_call(session_id, :resume_clock)
 
+  @doc """
+  Ends the running turn as interrupted, answers its waiters `{:error, :session_stopped}`, removes
+  the pending marker, and refuses every later submit. Called before a session is stopped on
+  purpose, so that turn is never continued. `:unreachable` when no live server answered (the
+  session is unknown, or its server is restarting): the caller then closes the stored turn itself.
+  """
+  @spec abandon(String.t()) :: :ok | :unreachable
+  def abandon(session_id), do: stopping_call(session_id, :abandon, :unreachable)
+
+  @doc """
+  Stops the running task without closing its turn, which stays in progress with its marker so it
+  continues when the session comes back. Its waiters, and every later submit, get
+  `{:error, :session_suspended}`, which `Mead.submit_turn/3` waits through as it waits through a
+  crash: the tree comes back under a caller that outlives the stop. `:ok` for an unknown
+  session too. Takes the session id or the server's pid; the pid needs no registry, so a suspend
+  still works while the registry is down.
+  """
+  @spec suspend(String.t() | pid()) :: :ok
+  def suspend(server) when is_pid(server) do
+    GenServer.call(server, :suspend, :infinity)
+  catch
+    :exit, _reason -> :ok
+  end
+
+  def suspend(session_id), do: stopping_call(session_id, :suspend, :ok)
+
+  @doc """
+  Brings a suspended session back without restarting it: its turn continues from its checkpoint,
+  as after a restart, and it takes submits again. A suspension is normally followed by a pool
+  restart that replaces the server; this is for one that was not. The continuation does not spend
+  the turn's crash budget, since the suspension cut it. `:ok` for a server that is not suspended,
+  and for one that is gone.
+  """
+  @spec revive(pid()) :: :ok
+  def revive(server) when is_pid(server) do
+    GenServer.call(server, :revive)
+  catch
+    :exit, _reason -> :ok
+  end
+
+  @doc """
+  The interaction attached to the running turn, with whether it receives streamed text; `:none`
+  when nothing is attached, no turn runs, or the session is unknown.
+  """
+  @spec attached_interaction(String.t()) :: {:ok, {module(), term()}, boolean()} | :none
+  def attached_interaction(session_id), do: interaction_call(session_id, :attached_interaction)
+
+  @doc """
+  Like `attached_interaction/1`, but with nothing attached it waits up to `grace` milliseconds
+  for a submit that joins the turn with an interaction, with the turn clock paused. A wait that
+  ends with nothing attached makes the running attempt unattended: every later wait in it answers
+  `:none` at once, until an interaction attaches.
+  """
+  @spec await_interaction(String.t(), non_neg_integer()) ::
+          {:ok, {module(), term()}, boolean()} | :none
+  def await_interaction(session_id, grace),
+    do: interaction_call(session_id, {:await_interaction, grace})
+
+  @doc "Detaches `interaction` from the running turn, when it is still the one attached."
+  @spec detach_interaction(String.t(), {module(), term()}) :: :ok
+  def detach_interaction(session_id, interaction) do
+    case interaction_call(session_id, {:detach_interaction, interaction}) do
+      :none -> :ok
+      :ok -> :ok
+    end
+  end
+
+  defp interaction_call(session_id, request) do
+    case Session.whereis(session_id, :server) do
+      nil -> :none
+      server -> GenServer.call(server, request, :infinity)
+    end
+  catch
+    :exit, _reason -> :none
+  end
+
+  defp stopping_call(session_id, request, unreachable) do
+    case Session.whereis(session_id, :server) do
+      nil -> unreachable
+      server -> GenServer.call(server, request, :infinity)
+    end
+  catch
+    :exit, _reason -> unreachable
+  end
+
   defp clock_call(session_id, request) do
     case Session.whereis(session_id, :server) do
       nil -> {:error, :not_found}
@@ -65,70 +190,364 @@ defmodule Mead.Session.Server do
     Process.flag(:trap_exit, true)
 
     session_id = Keyword.fetch!(options, :session_id)
-    record(History.mark_interrupted(session_id), session_id)
 
     state = %{
       session_id: session_id,
       handler: Keyword.fetch!(options, :handler),
       turn_timeout: Keyword.fetch!(options, :turn_timeout),
-      running: nil
+      directory: Keyword.get(options, :directory),
+      running: nil,
+      stopping: false
     }
 
-    {:ok, state}
+    if continuable?(History.newest(session_id), state.handler) do
+      {:ok, state, {:continue, :resume}}
+    else
+      {:ok, abandon_in_progress(state)}
+    end
   end
 
   @impl true
-  def handle_call({:submit, _input, _options}, _from, %{running: running} = state)
-      when running != nil do
-    {:reply, {:error, :turn_in_progress}, state}
-  end
+  def handle_continue(:resume, state), do: continue_resumed(state, false)
 
-  def handle_call({:submit, input, options}, from, state) do
-    handler = state.handler
-    history = History.all(state.session_id)
-    handler_options = Keyword.put(options, :session_id, state.session_id)
+  def handle_continue(:revive, state), do: continue_resumed(state, true)
 
-    case History.append(state.session_id, Turn.start(input)) do
-      :ok ->
+  defp continue_resumed(state, infrastructure) do
+    case History.begin_resume(state.session_id, @maximum_resumes,
+           generation: Generation.current(),
+           infrastructure: infrastructure
+         ) do
+      {:ok, turn} ->
+        earlier = state.session_id |> History.all() |> Enum.drop(-1)
+        handler = state.handler
+
+        options =
+          turn.turn_options
+          |> handler_options(state.session_id)
+          |> Keyword.put(:checkpoint, checkpoint(state.session_id, turn.resumes))
+          |> put_relay(Map.get(turn.turn_options, :interactive, false), state.session_id)
+
         task =
           Task.Supervisor.async(Mead.TurnSupervisor, fn ->
-            handler.handle_turn(history, input, handler_options)
+            handler.resume_turn(earlier, turn.input, turn.steps, options)
           end)
 
-        running =
-          start_timer(%{from: from, task: task, generation: 0, pauses: 0}, state.turn_timeout)
+        {:noreply, %{state | running: new_running(task, [], true, state.turn_timeout)}}
 
-        {:noreply, %{state | running: running}}
+      {:error, reason} ->
+        Logger.warning(
+          "could not continue the turn of session #{state.session_id}: #{inspect(reason)}"
+        )
 
-      {:error, _reason} = error ->
-        {:reply, error, state}
+        {:noreply, abandon_in_progress(state)}
     end
   end
+
+  # Only a keyed turn that recorded its options can be continued, and only by a handler that
+  # knows how; a turn recorded before keys were generated or options were kept is not.
+  defp continuable?(
+         %Turn{status: :in_progress, client_turn_id: key, turn_options: turn_options},
+         handler
+       )
+       when is_binary(key) and turn_options != %{},
+       do: resumable?(handler)
+
+  defp continuable?(_newest, _handler), do: false
+
+  defp resumable?(handler),
+    do: Code.ensure_loaded?(handler) and function_exported?(handler, :resume_turn, 4)
+
+  # The turn left in progress cannot continue: it ends interrupted (in memory even when the write
+  # fails), and the marker it may have left goes with it.
+  defp abandon_in_progress(state) do
+    record(History.mark_interrupted(state.session_id), state.session_id)
+    clear_marker(state)
+    state
+  end
+
+  defp clear_marker(state) do
+    case Pending.clear(state.directory, state.session_id) do
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning(
+          "could not remove the pending marker of session #{state.session_id}: #{inspect(reason)}"
+        )
+    end
+  end
+
+  # What the handler needs to continue the turn, kept on the turn. Never a pid or a context.
+  defp turn_options(options) do
+    %{
+      route: Keyword.get(options, :route, :auto),
+      tools: Keyword.get(options, :tools),
+      interactive: Keyword.has_key?(options, :interaction)
+    }
+  end
+
+  defp handler_options(%{route: route, tools: tools}, session_id) do
+    [route: route]
+    |> then(fn options -> if tools, do: Keyword.put(options, :tools, tools), else: options end)
+    |> Keyword.put(:session_id, session_id)
+  end
+
+  defp put_relay(options, false, _session_id), do: options
+
+  defp put_relay(options, true, session_id),
+    do: Keyword.put(options, :interaction, {InteractionRelay, %{session_id: session_id}})
+
+  defp checkpoint(session_id, attempt),
+    do: fn step -> History.append_step(session_id, attempt, step) end
+
+  @impl true
+  def handle_call({:submit, _input, _options}, _from, %{stopping: :abandoned} = state),
+    do: {:reply, {:error, :session_stopped}, state}
+
+  # A suspended session comes back, at the next boot or when the watchdog restarts the tree, so
+  # the caller is told to wait for it rather than that it is gone.
+  def handle_call({:submit, _input, _options}, _from, %{stopping: :suspended} = state),
+    do: {:reply, {:error, :session_suspended}, state}
+
+  def handle_call({:submit, input, options}, from, state) do
+    {client_turn_id, options} = Keyword.pop(options, :client_turn_id)
+    running = state.running
+
+    case earlier_turn(state.session_id, client_turn_id) do
+      nil ->
+        start_turn(state, input, options, client_turn_id, from)
+
+      %Turn{input: ^input, status: :in_progress} when running != nil ->
+        running = attach(running, Keyword.get(options, :interaction))
+        {:noreply, %{state | running: %{running | waiters: [waiter(from) | running.waiters]}}}
+
+      %Turn{input: ^input} = turn ->
+        {:reply, reply_for({turn.status, turn.output}), state}
+
+      %Turn{} = turn ->
+        {:reply, {:error, {:client_turn_id_conflict, conflict_details(turn)}}, state}
+    end
+  end
+
+  # A task that finished just before the stop already holds the answer, which is told as it is.
+  # Otherwise the turn ends interrupted; every turn still in progress is closed, which also covers
+  # one a suspend left behind.
+  def handle_call(:abandon, _from, state) do
+    state =
+      case stop_task(state.running) do
+        {:ok, result} -> state |> conclude_now(normalize(result)) |> Map.put(:running, nil)
+        _stopped -> answer_stopped(state)
+      end
+
+    record(History.mark_interrupted(state.session_id), state.session_id)
+    clear_marker(state)
+    {:reply, :ok, %{state | stopping: :abandoned}}
+  end
+
+  def handle_call(:suspend, _from, state) do
+    stop_task(state.running)
+    {:reply, :ok, suspended(state)}
+  end
+
+  def handle_call(:revive, _from, %{stopping: :suspended} = state) do
+    state = %{state | stopping: false}
+
+    if continuable?(History.newest(state.session_id), state.handler),
+      do: {:reply, :ok, state, {:continue, :revive}},
+      else: {:reply, :ok, abandon_in_progress(state)}
+  end
+
+  def handle_call(:revive, _from, state), do: {:reply, :ok, state}
 
   def handle_call(request, _from, %{running: nil} = state)
       when request in [:pause_clock, :resume_clock],
       do: {:reply, :ok, state}
 
-  def handle_call(:pause_clock, _from, %{running: running} = state) do
-    running =
-      if running.pauses == 0 do
-        Process.cancel_timer(running.timer)
-        %{running | timer: nil, remaining: max(running.deadline - now(), 1)}
-      else
-        running
-      end
-
-    {:reply, :ok, %{state | running: %{running | pauses: running.pauses + 1}}}
-  end
-
-  def handle_call(:resume_clock, _from, %{running: %{pauses: 0}} = state),
-    do: {:reply, :ok, state}
-
-  def handle_call(:resume_clock, _from, %{running: %{pauses: 1} = running} = state),
-    do: {:reply, :ok, %{state | running: start_timer(%{running | pauses: 0}, running.remaining)}}
+  def handle_call(:pause_clock, _from, %{running: running} = state),
+    do: {:reply, :ok, %{state | running: pause(running)}}
 
   def handle_call(:resume_clock, _from, %{running: running} = state),
-    do: {:reply, :ok, %{state | running: %{running | pauses: running.pauses - 1}}}
+    do: {:reply, :ok, %{state | running: resume(running)}}
+
+  def handle_call({:detach_interaction, interaction}, _from, %{running: running} = state)
+      when running != nil and running.interaction == interaction,
+      do: {:reply, :ok, %{state | running: %{running | interaction: nil, streaming: false}}}
+
+  def handle_call({:detach_interaction, _interaction}, _from, state), do: {:reply, :ok, state}
+
+  def handle_call(request, _from, %{running: nil} = state)
+      when request == :attached_interaction or
+             (is_tuple(request) and elem(request, 0) == :await_interaction),
+      do: {:reply, :none, state}
+
+  def handle_call(:attached_interaction, _from, state),
+    do: {:reply, attached(state.running), state}
+
+  def handle_call({:await_interaction, grace}, from, %{running: running} = state) do
+    cond do
+      running.interaction != nil ->
+        {:reply, attached(running), state}
+
+      running.unattended ->
+        {:reply, :none, state}
+
+      true ->
+        reference = make_ref()
+        timer = Process.send_after(self(), {:interaction_grace, reference}, grace)
+        waiter = {from, reference, timer}
+
+        running = %{
+          pause(running)
+          | interaction_waiters: [waiter | running.interaction_waiters]
+        }
+
+        {:noreply, %{state | running: running}}
+    end
+  end
+
+  defp attached(%{interaction: nil}), do: :none
+  defp attached(running), do: {:ok, running.interaction, running.streaming}
+
+  # A joining submit's interaction replaces the attached one, never streams (it missed the start
+  # of the answer), ends an unattended attempt, and answers everyone waiting for one.
+  defp attach(running, nil), do: running
+
+  defp attach(running, interaction) do
+    running = %{running | interaction: interaction, streaming: false, unattended: false}
+
+    Enum.reduce(running.interaction_waiters, %{running | interaction_waiters: []}, fn
+      {from, _reference, timer}, running ->
+        Process.cancel_timer(timer)
+        GenServer.reply(from, {:ok, interaction, false})
+        resume(running)
+    end)
+  end
+
+  # The clock stops at the first open pause and restarts, with the time that was left, when the
+  # last one closes.
+  defp pause(%{pauses: 0} = running) do
+    Process.cancel_timer(running.timer)
+    %{running | timer: nil, remaining: max(running.deadline - now(), 1), pauses: 1}
+  end
+
+  defp pause(running), do: %{running | pauses: running.pauses + 1}
+
+  defp resume(%{pauses: 0} = running), do: running
+  defp resume(%{pauses: 1} = running), do: start_timer(%{running | pauses: 0}, running.remaining)
+  defp resume(running), do: %{running | pauses: running.pauses - 1}
+
+  defp start_turn(%{running: running} = state, _input, _options, _client_turn_id, _from)
+       when running != nil,
+       do: {:reply, {:error, :turn_in_progress}, state}
+
+  defp start_turn(state, input, options, client_turn_id, from) do
+    handler = state.handler
+    history = History.all(state.session_id)
+    marked = is_binary(client_turn_id) and resumable?(handler)
+    interaction = Keyword.get(options, :interaction)
+
+    handler_options =
+      options
+      |> Keyword.delete(:interaction)
+      |> Keyword.put(:session_id, state.session_id)
+      |> Keyword.put(:checkpoint, checkpoint(state.session_id, 0))
+      |> put_relay(interaction != nil, state.session_id)
+
+    turn = %{
+      Turn.start(input, client_turn_id, turn_options(options))
+      | generation: Generation.current()
+    }
+
+    # The marker is written before the turn, so a turn that can continue is never recorded without
+    # the marker that lets recovery find it; a marker that cannot be written refuses the turn.
+    with :ok <- mark(state, marked),
+         :ok <- History.append(state.session_id, turn) do
+      task =
+        Task.Supervisor.async(Mead.TurnSupervisor, fn ->
+          handler.handle_turn(history, input, handler_options)
+        end)
+
+      running = new_running(task, [waiter(from)], marked, state.turn_timeout, interaction)
+      {:noreply, %{state | running: running}}
+    else
+      {:error, _reason} = error ->
+        if marked, do: clear_marker(state)
+        {:reply, error, state}
+    end
+  end
+
+  defp mark(_state, false), do: :ok
+
+  defp mark(state, true) do
+    settings = %{handler: state.handler, turn_timeout: state.turn_timeout}
+
+    case Pending.mark(state.directory, state.session_id, settings) do
+      :ok -> :ok
+      {:error, reason} -> {:error, {:persistence, reason}}
+    end
+  end
+
+  # The waiters are told the session is suspended, so a caller that outlives the stop (the watchdog
+  # restarts the tree under it) keeps waiting for the turn instead of giving up on it.
+  defp suspended(state) do
+    if state.running do
+      Enum.each(state.running.waiters, fn {from, monitor} ->
+        Process.demonitor(monitor, [:flush])
+        GenServer.reply(from, {:error, :session_suspended})
+      end)
+    end
+
+    %{state | running: nil, stopping: :suspended}
+  end
+
+  defp alive?(nil), do: false
+  defp alive?(pid), do: Process.alive?(pid)
+
+  # The interaction a turn was submitted with is the only one that streams. The turn supervisor
+  # is the one the task was just started under.
+  defp new_running(task, waiters, marked, turn_timeout, interaction \\ nil) do
+    start_timer(
+      %{
+        waiters: waiters,
+        task: task,
+        turn_supervisor: Process.whereis(Mead.TurnSupervisor),
+        generation: 0,
+        pauses: 0,
+        marked: marked,
+        interaction: interaction,
+        streaming: interaction != nil,
+        unattended: false,
+        interaction_waiters: []
+      },
+      turn_timeout
+    )
+  end
+
+  # A waiter is monitored, so one that dies while the turn runs leaves the list instead of
+  # holding a reply nobody will read.
+  defp waiter({pid, _tag} = from), do: {from, Process.monitor(pid)}
+
+  # The newest turn recorded under the key; a key is recorded once, because a second use never
+  # starts a turn.
+  #
+  # A turn found :in_progress while no turn runs would be replied as {:error, :in_progress}. That
+  # state cannot be reached: init/1 either continues such a turn (a task runs it from
+  # handle_continue/2, before any submit is handled) or marks it interrupted (in memory even when
+  # the write fails), and the history restarting restarts the server too (rest_for_one). A change
+  # to any of those must keep that true.
+  defp earlier_turn(_session_id, nil), do: nil
+
+  defp earlier_turn(session_id, client_turn_id),
+    do: History.find_by_client_turn_id(session_id, client_turn_id)
+
+  defp conflict_details(turn) do
+    %{
+      client_turn_id: turn.client_turn_id,
+      input: turn.input,
+      status: turn.status,
+      started_at: turn.started_at
+    }
+  end
 
   @impl true
   def handle_info({reference, result}, %{running: %{task: %Task{ref: reference}}} = state) do
@@ -138,9 +557,22 @@ defmodule Mead.Session.Server do
 
   def handle_info(
         {:DOWN, reference, :process, _pid, reason},
-        %{running: %{task: %Task{ref: reference}}} = state
+        %{running: %{task: %Task{ref: reference}} = running} = state
       ) do
-    conclude(state, {:failed, reason})
+    # A task that died with the turn supervisor was cut by the infrastructure, not by its turn:
+    # the pool restarts right after (rest_for_one), and a turn that can continue is left in
+    # progress with its marker, as a suspend leaves it, so the keeper brings it back.
+    if running.marked and not alive?(running.turn_supervisor) do
+      {:noreply, suspended(state)}
+    else
+      conclude(state, {:failed, reason})
+    end
+  end
+
+  def handle_info({:DOWN, reference, :process, _pid, _reason}, %{running: running} = state)
+      when running != nil do
+    waiters = Enum.reject(running.waiters, fn {_from, monitor} -> monitor == reference end)
+    {:noreply, %{state | running: %{running | waiters: waiters}}}
   end
 
   def handle_info(
@@ -151,6 +583,20 @@ defmodule Mead.Session.Server do
       {:ok, result} -> conclude(state, normalize(result))
       {:exit, reason} -> conclude(state, {:failed, reason})
       nil -> conclude(state, {:timeout, nil})
+    end
+  end
+
+  # Nothing attached within the grace: this attempt is unattended from now on.
+  def handle_info({:interaction_grace, reference}, %{running: running} = state)
+      when running != nil do
+    case List.keytake(running.interaction_waiters, reference, 1) do
+      {{from, ^reference, _timer}, rest} ->
+        GenServer.reply(from, :none)
+        running = resume(%{running | interaction_waiters: rest, unattended: true})
+        {:noreply, %{state | running: running}}
+
+      nil ->
+        {:noreply, state}
     end
   end
 
@@ -190,12 +636,32 @@ defmodule Mead.Session.Server do
     end
   end
 
+  defp stop_task(nil), do: nil
+
+  defp stop_task(running) do
+    if running.timer, do: Process.cancel_timer(running.timer)
+    kill_task(running.task)
+  end
+
+  defp answer_stopped(%{running: nil} = state), do: state
+
+  defp answer_stopped(state) do
+    Enum.each(state.running.waiters, fn {from, monitor} ->
+      Process.demonitor(monitor, [:flush])
+      GenServer.reply(from, {:error, :session_stopped})
+    end)
+
+    %{state | running: nil}
+  end
+
   defp normalize({:ok, output}), do: {:ok, output}
   defp normalize({:error, reason}), do: {:failed, reason}
   defp normalize(other), do: {:failed, {:bad_return, other}}
 
-  defp conclude(state, {status, output} = outcome) do
-    %{from: from, timer: timer} = state.running
+  defp conclude(state, outcome), do: {:noreply, %{conclude_now(state, outcome) | running: nil}}
+
+  defp conclude_now(state, {status, output} = outcome) do
+    %{waiters: waiters, timer: timer, marked: marked} = state.running
 
     if timer, do: Process.cancel_timer(timer)
 
@@ -204,9 +670,16 @@ defmodule Mead.Session.Server do
       state.session_id
     )
 
-    GenServer.reply(from, reply_for(outcome))
+    if marked, do: clear_marker(state)
 
-    {:noreply, %{state | running: nil}}
+    reply = reply_for(outcome)
+
+    Enum.each(waiters, fn {from, monitor} ->
+      Process.demonitor(monitor, [:flush])
+      GenServer.reply(from, reply)
+    end)
+
+    state
   end
 
   # The caller already has the answer, so a failed write is logged and never replaces the reply.

@@ -27,3 +27,36 @@ jobs:
       - run: mix compile --warnings-as-errors
       - name: Tests with the coverage gate
         run: mix test --cover
+
+  # The full drive flush on macOS goes through a NIF (Mead.Native, F_FULLFSYNC) that is built
+  # only there, so the suite runs on macOS too; native_test asserts the NIF loaded.
+  # erlef/setup-beam has no macOS support, so Erlang and Elixir come from Homebrew.
+  test-macos:
+    runs-on: macos-latest
+    env:
+      MIX_ENV: test
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install Erlang and Elixir
+        run: |
+          brew install erlang elixir
+          echo "BEAM_VERSIONS=$(brew list --versions erlang elixir | tr '\n ' '--')" >> "$GITHUB_ENV"
+      - uses: actions/cache@v6
+        with:
+          path: |
+            deps
+            _build
+          key: mix-${{ runner.os }}-${{ env.BEAM_VERSIONS }}-${{ hashFiles('mix.lock') }}
+          restore-keys: mix-${{ runner.os }}-${{ env.BEAM_VERSIONS }}-
+      - run: mix local.hex --force && mix local.rebar --force
+      - run: mix deps.get
+      # Homebrew ships its latest versions, not pinned ones, so the job stops when that Elixir no
+      # longer meets the project's requirement instead of testing on a version mead does not support.
+      - name: Check the Elixir version against mix.exs
+        run: |
+          mix run --no-compile --no-start -e '
+            requirement = Mix.Project.config()[:elixir]
+            Version.match?(System.version(), requirement) ||
+              Mix.raise("Elixir #{System.version()} does not meet #{requirement}")'
+      - run: mix compile --warnings-as-errors
+      - run: mix test

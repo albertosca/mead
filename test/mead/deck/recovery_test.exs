@@ -1,6 +1,7 @@
 defmodule Mead.Deck.RecoveryTest do
   # What a new channel makes of the log an earlier one left behind: queued prompts still run, the
-  # turn that was running is reported as interrupted, and tool cards left open are closed.
+  # turn that was running is submitted again under its key and shows its outcome, and tool cards
+  # left open are closed.
   use ExUnit.Case, async: false
 
   alias Mead.Test.DeckServer
@@ -73,7 +74,7 @@ defmodule Mead.Deck.RecoveryTest do
         envelope["payload"]["turn_id"] == turn_id
     end
 
-  test "a prompt that was queued behind a running turn runs after the session restarts",
+  test "a prompt that was queued behind a running turn runs after the channel restarts",
        %{directory: directory} do
     server = DeckServer.start(directory, [], session_options: [handler: Mead.Test.DeckHandler])
     {client, session_id} = open_new(server)
@@ -102,11 +103,11 @@ defmodule Mead.Deck.RecoveryTest do
     client = reconnect(server, session_id)
     {_client, events} = events_until(client, tokens_out_of?("turn-2"))
 
-    failed = Enum.find(events, &(&1["type"] == "turn.failed"))
-    assert failed["payload"] == %{"turn_id" => "turn-1", "reason" => "interrupted"}
+    refute Enum.find(events, &(&1["type"] == "turn.failed"))
 
+    # The turn that was running is submitted again under its key and gets its stored outcome.
     texts = for %{"type" => "text.delta", "payload" => %{"text" => text}} <- events, do: text
-    assert texts == ["second"]
+    assert texts == ["released block first", "second"]
   end
 
   test "a tool card left open by a dead channel is closed as failed", %{directory: directory} do
@@ -139,8 +140,15 @@ defmodule Mead.Deck.RecoveryTest do
 
     stop_and_wait(channel_of(session_id), :kill)
 
+    # The turn itself is still blocked on the tool, and the new channel joins it; the card the
+    # dead channel left open is closed all the same.
     client = reconnect(server, session_id)
-    {_client, events} = events_until(client, tokens_out_of?("turn-1"))
+
+    {_client, events} =
+      events_until(
+        client,
+        &(&1["type"] == "tool_call.updated" and &1["payload"]["status"] == "failed")
+      )
 
     statuses =
       for %{"type" => "tool_call.updated", "payload" => payload} <- events, do: payload["status"]

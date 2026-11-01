@@ -16,12 +16,19 @@ defmodule Mead.Session do
     {:via, Registry, {Mead.Registry, {role, session_id}}}
   end
 
-  @doc "Returns the pid registered for a conversation's role, or `nil` when there is none."
+  @doc """
+  Returns the pid registered for a conversation's role, or `nil` when there is none, which is also
+  the answer while the registry itself is down (a registry crash, or a root the watchdog has not
+  started again yet).
+  """
   @spec whereis(String.t(), role()) :: pid() | nil
   def whereis(session_id, role) when role in @roles do
     case Registry.lookup(Mead.Registry, {role, session_id}) do
       [{pid, _value}] -> pid
       [] -> nil
     end
+  rescue
+    # Registry.lookup/2 raises for a registry that is not running.
+    ArgumentError -> nil
   end
 end

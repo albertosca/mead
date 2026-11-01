@@ -16,6 +16,7 @@ defmodule Mead do
   alias Mead.Session
   alias Mead.Session.EchoHandler
   alias Mead.Session.History
+  alias Mead.Session.Pending
   alias Mead.Session.Pool
   alias Mead.Session.Store
   alias Mead.Session.Turn
@@ -32,8 +33,8 @@ defmodule Mead do
 
   ## Options
 
-    * `:handler` - module implementing `Mead.Session.TurnHandler`; defaults to the
-      `:turn_handler` application setting, then to `Mead.Session.EchoHandler`.
+    * `:handler` - module implementing `Mead.Session.TurnHandler`, `resume_turn/4` included;
+      defaults to the `:turn_handler` application setting, then to `Mead.Session.EchoHandler`.
     * `:turn_timeout` - milliseconds a single turn may run; defaults to the `:turn_timeout`
       application setting, then to 30 seconds.
 
@@ -50,7 +51,9 @@ defmodule Mead do
   Starts a session again from the conversation stored under `session_id`.
 
   It takes the options of `start_session/1`, because the handler and the timeout are not stored.
-  Turns that were still running when the session ended come back as `:interrupted`. Needs
+  A turn that was still running when the session ended continues from its checkpoint (see
+  `Mead.Session.Server`); only one recorded before turns kept their options, or one past its
+  resume budget, comes back as `:interrupted`. Needs
   `config :mead, :storage, directory: ...`; without it nothing is stored and the answer is
   `{:error, :not_found}`, which is also the answer for an id with no file or one that is not a
   session id. A running session is `{:error, :already_running}`, and a file damaged anywhere but
@@ -73,8 +76,9 @@ defmodule Mead do
         {:error, :already_running}
       else
         with {:ok, recovered} <- Store.recover(directory, session_id) do
-          # Interrupted before compacting, so the file is already what the history would write.
-          turns = recovered |> Enum.map(&Turn.interrupt/1) |> Store.window(Store.max_turns())
+          # Kept as stored: the server's init/1 decides whether a turn in progress continues or
+          # ends interrupted.
+          turns = Store.window(recovered, Store.max_turns())
           compact_quietly(directory, session_id, turns)
           launch(session_id, options, resume: turns)
         end
@@ -138,11 +142,20 @@ defmodule Mead do
   end
 
   defp validate_handler!(handler) when is_atom(handler) and handler not in [nil, true, false] do
-    if Code.ensure_loaded?(handler) and function_exported?(handler, :handle_turn, 3) do
-      handler
-    else
-      raise ArgumentError,
-            "handler #{inspect(handler)} must be a module that defines handle_turn/3"
+    cond do
+      not (Code.ensure_loaded?(handler) and function_exported?(handler, :handle_turn, 3)) ->
+        raise ArgumentError,
+              "handler #{inspect(handler)} must be a module that defines handle_turn/3"
+
+      not function_exported?(handler, :resume_turn, 4) ->
+        raise ArgumentError,
+              "handler #{inspect(handler)} must define resume_turn/4, so a turn it runs can " <>
+                "continue after a crash; a handler with nothing to checkpoint can resume by " <>
+                "calling handle_turn/3 again when running the turn twice is safe, and otherwise " <>
+                "return {:error, :not_resumable}, which ends the cut turn as failed"
+
+      true ->
+        handler
     end
   end
 
@@ -176,10 +189,29 @@ defmodule Mead do
     * `:interaction` - a `{module, context}` pair, `module` implementing `Mead.Router.Interaction`;
       `Mead.Router` then asks it for permission around every tool call. Anything else returns
       `{:error, :invalid_interaction}` before a turn is recorded.
+    * `:client_turn_id` - the caller's idempotency key for this turn, a string of 1 to 128
+      characters without control characters. A turn submitted with a key runs at most once per
+      session: repeating the key with the same input while the turn runs waits for its reply,
+      and after it ended returns the stored outcome without running anything, `{:error,
+      :interrupted}` included for a turn a restart cut short. Repeating it with a different
+      input returns `{:error, {:client_turn_id_conflict, details}}`, where `details` has the
+      original `:client_turn_id`, `:input`, `:status` and `:started_at`. Keys are looked up in
+      the turns the history holds. With `config :mead, :storage, max_turns:` set, a key counts
+      as new only once a compaction has dropped its turn: an explicit `compact_session/1`, the
+      automatic one past `compact_after_bytes`, or the one at resume. Until then it is still
+      found, however old. Anything else returns `{:error, :invalid_client_turn_id}` before a
+      turn is recorded. Without it mead generates `"mead-<uuid>"`, which the history shows, so
+      every turn can be continued after a crash; only the caller's own key lets a resubmission
+      join the turn.
 
   Returns `{:error, :not_found}` for an unknown session, `{:error, :session_stopped}` when the
   session was stopped with `stop_session/1` while the turn was running, and
-  `{:error, :session_crashed}` when the session's server died for any other reason.
+  `{:error, :session_crashed}` when the session's server died for any other reason. The call
+  does not return on that crash: it waits for the restarted server, which continues the turn from
+  its checkpoint, and returns that turn's outcome. Each crash starts a 5-second wait again, so a turn that keeps
+  crashing ends when the server's resume budget does; only a server that does not come back
+  within the wait returns `:session_crashed`, and even then the turn is continued once it does,
+  so submitting again with the same key and input joins it or returns its outcome.
   """
   @spec submit_turn(String.t(), term(), keyword()) :: {:ok, term()} | {:error, term()}
   def submit_turn(session_id, input, options \\ []) do
@@ -188,6 +220,7 @@ defmodule Mead do
     cond do
       Keyword.fetch!(options, :route) not in @routes -> {:error, :invalid_route}
       invalid_interaction?(options) -> {:error, :invalid_interaction}
+      invalid_client_turn_id?(options) -> {:error, :invalid_client_turn_id}
       true -> run_turn(session_id, input, options)
     end
   end
@@ -197,15 +230,100 @@ defmodule Mead do
       not Mead.Router.Interaction.valid?(Keyword.fetch!(options, :interaction))
   end
 
+  defp invalid_client_turn_id?(options) do
+    case Keyword.fetch(options, :client_turn_id) do
+      {:ok, key} -> not valid_client_turn_id?(key)
+      :error -> false
+    end
+  end
+
+  @maximum_client_turn_id_length 128
+  # A code point takes at most four bytes in UTF-8.
+  @maximum_client_turn_id_bytes @maximum_client_turn_id_length * 4
+
+  @doc """
+  Whether `key` is accepted as a `:client_turn_id`: a valid UTF-8 string of 1 to 128 characters
+  with no control character.
+
+  Characters are Unicode code points, as JSON Schema's `maxLength` counts them, and not
+  graphemes: a letter with a combining accent is two, so a key is never larger than 512 bytes.
+  """
+  @spec valid_client_turn_id?(term()) :: boolean()
+  def valid_client_turn_id?(key) when is_binary(key) do
+    byte_size(key) in 1..@maximum_client_turn_id_bytes and String.valid?(key) and
+      length(String.codepoints(key)) <= @maximum_client_turn_id_length and
+      not String.match?(key, ~r/[[:cntrl:]]/u)
+  end
+
+  def valid_client_turn_id?(_key), do: false
+
   defp validate_submit_options!(options) do
     if Keyword.keyword?(options) do
-      Keyword.validate!(options, [:tools, :interaction, route: :auto])
+      Keyword.validate!(options, [:tools, :interaction, :client_turn_id, route: :auto])
     else
       raise ArgumentError, "options must be a keyword list, got: #{inspect(options)}"
     end
   end
 
+  # How long a keyed submission waits for its session's server to come back, and how often it
+  # asks again meanwhile. The wait is read on each failure, so a test can shorten it.
+  @default_restart_wait 5_000
+  @restart_retry_interval 50
+
+  # A turn submitted without a key gets a fresh one, so every turn is continued after a crash and
+  # its caller waits through the restart for the outcome. Nobody else knows the key, so the turn
+  # never joins or repeats another.
   defp run_turn(session_id, input, options) do
+    options = Keyword.put_new_lazy(options, :client_turn_id, &generated_client_turn_id/0)
+    run_through_restarts(session_id, input, options, nil)
+  end
+
+  @generated_key_prefix "mead-"
+
+  defp generated_client_turn_id, do: @generated_key_prefix <> Mead.UUID.generate()
+
+  # A server that crashes answers `:session_crashed` to the turn it was running, and the session
+  # has no server while its supervisor (or the pool, or the keeper) starts it again. The restarted
+  # server continues the turn, or ends it interrupted once its budget is spent, and the same
+  # submission joins it or gets its outcome, so the caller sees the turn's result instead of the
+  # restart.
+  #
+  # A `:not_found` before any crash is an unknown session and returns at once. Each crash starts
+  # the wait again, since it proves a server came back and took the turn: the turn may run for
+  # longer than the wait before the next one. That loop is bounded by the server's resume budget,
+  # which ends a turn that keeps crashing as interrupted. A server that does not come back within
+  # the wait returns `:session_crashed`, the cause, even when the session has no server by then.
+  defp run_through_restarts(session_id, input, options, deadline) do
+    case call_server(session_id, input, options) do
+      {:error, :not_found} = result when deadline == nil ->
+        result
+
+      {:error, reason} when reason in [:session_crashed, :session_suspended, :not_found] ->
+        deadline =
+          cond do
+            reason == :session_crashed -> restart_deadline()
+            deadline == nil -> restart_deadline()
+            true -> deadline
+          end
+
+        if System.monotonic_time(:millisecond) < deadline do
+          Process.sleep(@restart_retry_interval)
+          run_through_restarts(session_id, input, options, deadline)
+        else
+          {:error, :session_crashed}
+        end
+
+      result ->
+        result
+    end
+  end
+
+  defp restart_deadline do
+    System.monotonic_time(:millisecond) +
+      Application.get_env(:mead, :restart_wait, @default_restart_wait)
+  end
+
+  defp call_server(session_id, input, options) do
     case Session.whereis(session_id, :server) do
       nil ->
         {:error, :not_found}
@@ -214,8 +332,9 @@ defmodule Mead do
         try do
           GenServer.call(pid, {:submit, input, options}, :infinity)
         catch
-          :exit, {{:shutdown, _detail}, _call} -> {:error, :session_stopped}
-          :exit, {:shutdown, _call} -> {:error, :session_stopped}
+          # A deliberate stop answers `:session_stopped` before the server goes, so a server that
+          # exits under a call, `:shutdown` included, was taken down by a crash or a restart
+          # around it, and the turn continues once it is back.
           :exit, _reason -> {:error, :session_crashed}
         end
     end
@@ -319,7 +438,8 @@ defmodule Mead do
       stored = directory != nil and Store.exists?(directory, session_id)
 
       with :ok <- delete_file(directory, session_id),
-           :ok <- delete_events(directory, session_id) do
+           :ok <- delete_events(directory, session_id),
+           :ok <- delete_marker(directory, session_id) do
         if stopped or stored, do: :ok, else: {:error, :not_found}
       end
     end)
@@ -329,6 +449,13 @@ defmodule Mead do
 
   defp delete_events(directory, session_id) do
     case Mead.Deck.EventLog.delete(directory, session_id) do
+      :ok -> :ok
+      {:error, reason} -> {:error, {:persistence, reason}}
+    end
+  end
+
+  defp delete_marker(directory, session_id) do
+    case Pending.clear(directory, session_id) do
       :ok -> :ok
       {:error, reason} -> {:error, {:persistence, reason}}
     end

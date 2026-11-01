@@ -103,7 +103,7 @@ defmodule Mead.Ledger.JournalFile do
          {:ok, device} <- File.open(journal, [:append, :binary]) do
       outcome =
         with :ok <- IO.binwrite(device, Enum.map(events, &Record.encode/1)),
-             do: :file.sync(device)
+             do: Record.sync(device, journal)
 
       File.close(device)
       if outcome != :ok, do: Record.truncate(journal, size_before)

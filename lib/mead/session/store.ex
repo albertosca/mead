@@ -2,7 +2,7 @@ defmodule Mead.Session.Store do
   @moduledoc """
   Keeps the turns of each conversation in one append-only file per session.
 
-  A file is a sequence of records framed by `Mead.Session.Record`, each the encoding of one event: `{:append, turn}` when a turn starts, `{:replace_last, turn}` when the newest turn is closed, and `:interrupt` when every turn still in progress became interrupted. Replaying the events in order rebuilds the list the history agent held.
+  A file is a sequence of records framed by `Mead.Session.Record`, each the encoding of one event: `{:append, turn}` when a turn starts, `{:step, step}` when the turn in progress records a checkpoint step, `{:resume, count, crash_count, generation}` when it is continued after a restart (`{:resume, count}` in files written before generations existed, read as `count` crash continuations), `{:replace_last, turn}` when the newest turn is closed, and `:interrupt` when every turn still in progress became interrupted. Replaying the events in order rebuilds the list the history agent held; a step or a resume that finds no turn in progress is `:corrupt_history`.
 
   A last record that is cut short or fails its payload checksum is what a crash during a write
   leaves, so it is dropped with a warning. The length has a checksum of its own, so a flipped bit
@@ -38,7 +38,13 @@ defmodule Mead.Session.Store do
   @default_compact_after_bytes 1_048_576
   @default_ledger_journal_max_bytes 1_048_576
 
-  @type event :: {:append, Turn.t()} | {:replace_last, Turn.t()} | :interrupt
+  @type event ::
+          {:append, Turn.t()}
+          | {:step, term()}
+          | {:resume, non_neg_integer()}
+          | {:resume, non_neg_integer(), non_neg_integer(), term()}
+          | {:replace_last, Turn.t()}
+          | :interrupt
 
   @doc "Returns the configured storage directory, or `nil` when persistence is off."
   @spec directory() :: String.t() | nil
@@ -162,7 +168,7 @@ defmodule Mead.Session.Store do
          :ok <- Record.create_private(path),
          {:ok, %File.Stat{size: size_before}} <- File.stat(path),
          {:ok, device} <- File.open(path, [:append, :binary]) do
-      outcome = write_record(device, event)
+      outcome = write_record(device, path, event)
       File.close(device)
       if outcome != :ok, do: rollback(path, size_before)
       outcome
@@ -173,8 +179,8 @@ defmodule Mead.Session.Store do
   @spec rollback(Path.t(), non_neg_integer()) :: :ok | {:error, term()}
   defdelegate rollback(path, size), to: Record, as: :truncate
 
-  defp write_record(device, event) do
-    with :ok <- IO.binwrite(device, Record.encode(event)), do: :file.sync(device)
+  defp write_record(device, path, event) do
+    with :ok <- IO.binwrite(device, Record.encode(event)), do: Record.sync(device, path)
   end
 
   @doc "Returns the turns of a session in chronological order, without touching the file."
@@ -255,13 +261,33 @@ defmodule Mead.Session.Store do
   defp chronological({:ok, turns}), do: {:ok, Enum.reverse(turns)}
   defp chronological({:error, _reason} = error), do: error
 
-  defp apply_event({:append, %Turn{} = turn}, turns), do: {:ok, [turn | turns]}
+  defp apply_event({:append, %Turn{} = turn}, turns), do: {:ok, [current(turn) | turns]}
 
   defp apply_event({:replace_last, %Turn{} = turn}, [_newest | older]),
-    do: {:ok, [turn | older]}
+    do: {:ok, [current(turn) | older]}
+
+  defp apply_event({:step, step}, [%Turn{status: :in_progress} = newest | older]),
+    do: {:ok, [%{newest | steps: newest.steps ++ [step]} | older]}
+
+  defp apply_event({:resume, count}, [%Turn{status: :in_progress} = newest | older])
+       when is_integer(count) and count >= 0,
+       do: {:ok, [%{newest | resumes: count, crash_resumes: count} | older]}
+
+  defp apply_event(
+         {:resume, count, crash_count, generation},
+         [%Turn{status: :in_progress} = newest | older]
+       )
+       when is_integer(count) and is_integer(crash_count) and crash_count in 0..count//1,
+       do:
+         {:ok,
+          [%{newest | resumes: count, crash_resumes: crash_count, generation: generation} | older]}
 
   defp apply_event(:interrupt, turns), do: {:ok, Enum.map(turns, &Turn.interrupt/1)}
   defp apply_event(_other, _turns), do: {:error, :corrupt_history}
+
+  # A turn written before a field existed decodes as a %Turn{} map without that key, and reading
+  # the field would raise. Rebuilding it fills every missing field with its default.
+  defp current(turn), do: struct(Turn, Map.from_struct(turn))
 
   @doc """
   Lists the stored sessions, newest first, as maps with the `:session_id` and the `:updated_at` of

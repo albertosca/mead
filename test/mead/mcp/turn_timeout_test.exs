@@ -21,6 +21,9 @@ defmodule Mead.MCP.TurnTimeoutTest do
         {:error, reason} -> {:error, reason}
       end
     end
+
+    @impl true
+    def resume_turn(history, input, _steps, options), do: handle_turn(history, input, options)
   end
 
   defp start_hub do

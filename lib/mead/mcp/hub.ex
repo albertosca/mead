@@ -25,6 +25,7 @@ defmodule Mead.MCP.Hub do
   alias Mead.MCP.{Catalog, Configuration, Connection, Policy}
 
   @tool_timeout 15_000
+  @ready_poll 50
 
   @default_transports %{
     stdio: {Mead.MCP.Transport.Stdio, []},
@@ -93,6 +94,36 @@ defmodule Mead.MCP.Hub do
   def describe_tool(name, options, hub \\ __MODULE__) do
     with {:ok, entries, servers} <- snapshot(hub) do
       Policy.authorize(name, entries, servers, options)
+    end
+  end
+
+  @doc """
+  Waits until every configured server has registered with the catalog, tools or not, polling every
+  50 ms for at most `timeout` milliseconds. `:timeout` when the bound passed first, and when the
+  hub is not running.
+
+  A continued turn calls this before replaying, so the calls it already made are not answered
+  `:unknown_tool` just because the servers have not reconnected yet.
+  """
+  @spec await_ready(non_neg_integer(), atom()) :: :ok | :timeout
+  def await_ready(timeout, hub \\ __MODULE__) do
+    await_ready_until(catalog_name(hub), System.monotonic_time(:millisecond) + timeout)
+  end
+
+  defp await_ready_until(catalog, deadline) do
+    running = :ets.whereis(catalog) != :undefined
+    {configured, registered} = Catalog.readiness(catalog)
+
+    cond do
+      running and configured -- registered == [] ->
+        :ok
+
+      System.monotonic_time(:millisecond) >= deadline ->
+        :timeout
+
+      true ->
+        Process.sleep(min(@ready_poll, max(deadline - System.monotonic_time(:millisecond), 1)))
+        await_ready_until(catalog, deadline)
     end
   end
 

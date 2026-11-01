@@ -2,11 +2,22 @@ defmodule Mead.Ledger.JournalFileTest do
   use ExUnit.Case, async: true
 
   import ExUnit.CaptureLog
+  import Mead.TestHelpers
 
   alias Mead.Ledger.Journal
   alias Mead.Ledger.JournalFile
 
   @moduletag :tmp_dir
+
+  # Record.sync/2 is what reaches the drive on every platform (F_FULLFSYNC on macOS).
+  test "append syncs the journal to the drive", %{tmp_dir: directory} do
+    path = JournalFile.path(directory)
+
+    assert [{Mead.Session.Record, :sync, [_device, ^path]}] =
+             calls_to({Mead.Session.Record, :sync, 2}, fn ->
+               :ok = JournalFile.append(directory, [{:turn, entry(1)}])
+             end)
+  end
 
   defp entry(index) do
     %{

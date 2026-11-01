@@ -27,6 +27,9 @@ defmodule Mead.Deck.LiveOllamaTest.Handler do
       Mead.Deck.LiveOllamaTest.Hub
     )
   end
+
+  @impl true
+  def resume_turn(history, input, _steps, options), do: handle_turn(history, input, options)
 end
 
 defmodule Mead.Deck.LiveOllamaTest do

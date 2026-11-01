@@ -5,8 +5,11 @@ defmodule Mead.Deck.Interaction do
 
   The context is `%{channel: pid, turn_id: String.t()}`. `request_permission/2` returns only when
   the channel has an answer, however long that takes (the channel's own deadline ends the wait),
-  so the calls use an infinite timeout. A channel that is gone takes the turn down with it, which
-  is right: the session it belongs to is gone too.
+  so the calls use an infinite timeout. The router never holds this interaction itself: the
+  session hands the turn `Mead.Session.InteractionRelay`, which forwards each call here. A call
+  into a channel that is gone exits in the relay, which detaches it, so the turn goes on: the next
+  channel of the session submits the turn again under its key and attaches a new interaction, and
+  a question asked in between waits for it for the grace period of the relay.
   """
 
   @behaviour Mead.Router.Interaction

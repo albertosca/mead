@@ -58,6 +58,13 @@ defmodule Mead.MCP.Server.Tools do
               "enum" => ["effect"],
               "description" =>
                 "Also let the model use tools that have side effects. Only honoured when the operator enabled it."
+            },
+            "client_turn_id" => %{
+              "type" => "string",
+              "minLength" => 1,
+              "maxLength" => 128,
+              "description" =>
+                "Send the same id to retry after a lost connection; the turn runs once."
             }
           },
           "required" => ["session_id", "input"]
@@ -188,19 +195,35 @@ defmodule Mead.MCP.Server.Tools do
   defp submit_turn(arguments, context) do
     with {:ok, session_id} <- fetch_session_id(arguments),
          {:ok, input} <- fetch_input(arguments),
-         {:ok, route} <- fetch_route(arguments) do
+         {:ok, route} <- fetch_route(arguments),
+         {:ok, key_options} <- fetch_client_turn_id(arguments) do
       effect_requested = Map.get(arguments, "tools") == "effect"
 
-      cond do
-        effect_requested and not context.allow_effect ->
-          {:ok, failure("effect tools are not enabled by the operator")}
-
-        effect_requested ->
-          {:ok, turn_result(Mead.submit_turn(session_id, input, route: route, tools: :effect))}
-
-        true ->
-          {:ok, turn_result(Mead.submit_turn(session_id, input, route: route))}
+      if effect_requested and not context.allow_effect do
+        {:ok, failure("effect tools are not enabled by the operator")}
+      else
+        effect_options = if effect_requested, do: [tools: :effect], else: []
+        options = [route: route] ++ effect_options ++ key_options
+        {:ok, turn_result(Mead.submit_turn(session_id, input, options), key_options != [])}
       end
+    end
+  end
+
+  # JSON clients often send null for an optional field they leave unset, so null means no key.
+  defp fetch_client_turn_id(arguments) do
+    key = Map.get(arguments, "client_turn_id")
+
+    cond do
+      is_nil(key) ->
+        {:ok, []}
+
+      Mead.valid_client_turn_id?(key) ->
+        {:ok, [client_turn_id: key]}
+
+      true ->
+        invalid(
+          "client_turn_id must be a string of 1 to 128 characters without control characters"
+        )
     end
   end
 
@@ -234,17 +257,65 @@ defmodule Mead.MCP.Server.Tools do
     end
   end
 
-  defp turn_result({:ok, output}), do: success(text_of(output))
-  defp turn_result({:error, reason}), do: failure(turn_failure(reason))
+  defp turn_result({:ok, output}, _keyed), do: success(text_of(output))
+
+  # A keyed submission waits through its server's restarts and answers with the turn's own
+  # outcome, so a keyed `:session_crashed` means the server did not come back within that wait.
+  # The turn is continued once it does, or ends interrupted once its resume budget is spent;
+  # either way its caller only has to ask again to learn which.
+  defp turn_result({:error, :session_crashed}, true),
+    do:
+      failure(
+        "the session restarted while the turn ran and did not come back in time; a turn " <>
+          "that can continue does so on its own, so submit again with the same " <>
+          "client_turn_id to get its outcome"
+      )
+
+  # A turn without a key got one from mead that the client never saw, so the history is where the
+  # client finds the outcome of the continued turn.
+  defp turn_result({:error, :session_crashed}, false),
+    do:
+      failure(
+        "the session restarted while the turn ran and did not come back in time; the turn " <>
+          "continues on its own once it does, and the history tool shows its outcome"
+      )
+
+  defp turn_result({:error, reason}, _keyed), do: failure(turn_failure(reason))
 
   defp turn_failure(:not_found), do: "unknown session"
   defp turn_failure(:session_stopped), do: "the session was stopped during the turn"
-  defp turn_failure(:session_crashed), do: "the session crashed during the turn"
   defp turn_failure(:turn_in_progress), do: "a turn is already running in this session"
   defp turn_failure(:timeout), do: "the turn timed out"
   defp turn_failure({:persistence, _reason}), do: "the conversation could not be saved"
   defp turn_failure({:failed, _reason}), do: "the turn failed"
+
+  defp turn_failure(:interrupted),
+    do:
+      "the turn was interrupted by a server restart and will not run again; " <>
+        "send a new client_turn_id to try again"
+
+  defp turn_failure({:client_turn_id_conflict, details}), do: conflict_message(details)
   defp turn_failure(_other), do: "the turn did not complete"
+
+  @preview_characters 60
+
+  # The client that reads this sent the original input itself, so quoting it exposes nothing new,
+  # and it is the fastest way for the client to see which of its turns took the key.
+  defp conflict_message(details) do
+    "client_turn_id #{inspect(details.client_turn_id)} was already used in this session " <>
+      "for a different input. The original turn (started " <>
+      "#{DateTime.to_iso8601(details.started_at)}, status: #{details.status}) had the input " <>
+      "#{inspect(preview(details.input))}. To get the result of that turn, resend it with its " <>
+      "original input; to ask something new, send a new client_turn_id."
+  end
+
+  defp preview(input) do
+    text = text_of(input)
+
+    if String.length(text) > @preview_characters,
+      do: String.slice(text, 0, @preview_characters) <> "…",
+      else: text
+  end
 
   defp history(arguments) do
     with {:ok, session_id} <- fetch_session_id(arguments) do
@@ -260,7 +331,8 @@ defmodule Mead.MCP.Server.Tools do
       "input" => text_of(turn.input),
       "output" => visible_output(turn),
       "status" => Atom.to_string(turn.status),
-      "started_at" => DateTime.to_iso8601(turn.started_at)
+      "started_at" => DateTime.to_iso8601(turn.started_at),
+      "client_turn_id" => turn.client_turn_id
     }
   end
 

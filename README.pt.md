@@ -8,7 +8,7 @@ Runtime para assistentes baseados em LLM sobre Elixir/OTP: sessões supervisiona
 
 ## Início rápido
 
-Requer Elixir 1.20+ sobre Erlang/OTP 29. Adicione o mead às dependências no `mix.exs`:
+Requer Elixir 1.20+ sobre Erlang/OTP 29; no macOS também precisa de um compilador C (`xcode-select --install`), porque compila uma pequena função nativa que descarrega as escritas no disco. Adicione o mead às dependências no `mix.exs`:
 
 ```elixir
 def deps do

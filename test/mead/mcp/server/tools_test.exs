@@ -4,6 +4,9 @@ defmodule Mead.MCP.Server.ToolsTest.NonStringHandler do
 
   @impl true
   def handle_turn(_history, _input, _options), do: {:ok, %{reply: [1, 2, 3]}}
+
+  @impl true
+  def resume_turn(history, input, _steps, options), do: handle_turn(history, input, options)
 end
 
 defmodule Mead.MCP.Server.ToolsTest do
@@ -248,7 +251,263 @@ defmodule Mead.MCP.Server.ToolsTest do
     end
   end
 
+  describe "submit_turn with client_turn_id" do
+    test "the schema offers the key with its bounds" do
+      submit_turn = Enum.find(Tools.definitions(), &(&1["name"] == "submit_turn"))
+      property = submit_turn["inputSchema"]["properties"]["client_turn_id"]
+
+      assert property["type"] == "string"
+      assert property["minLength"] == 1
+      assert property["maxLength"] == 128
+      refute "client_turn_id" in submit_turn["inputSchema"]["required"]
+    end
+
+    test "a repeat after the turn ended returns the same answer and records one turn" do
+      session_id = start_session!()
+
+      assert {:ok, %{"isError" => false} = first} =
+               submit(session_id, "echo hi", %{"client_turn_id" => "key-1"})
+
+      assert {:ok, %{"isError" => false} = second} =
+               submit(session_id, "echo hi", %{"client_turn_id" => "key-1"})
+
+      assert text(first) == "hi"
+      assert text(second) == "hi"
+      assert {:ok, [_only_turn]} = Mead.history(session_id)
+    end
+
+    test "a repeat while the turn runs waits for it" do
+      session_id = start_session!()
+      Process.register(self(), :mcp_text_handler_test)
+
+      first = Task.async(fn -> submit(session_id, "block", %{"client_turn_id" => "key-1"}) end)
+      assert_receive {:handler_started, handler}, 10_000
+
+      second = Task.async(fn -> submit(session_id, "block", %{"client_turn_id" => "key-1"}) end)
+
+      wait_until(fn ->
+        match?(
+          %{running: %{waiters: [_second, _first]}},
+          :sys.get_state(Mead.Session.whereis(session_id, :server))
+        )
+      end)
+
+      send(handler, :release)
+      assert {:ok, %{"isError" => false} = first_result} = Task.await(first)
+      assert {:ok, %{"isError" => false} = second_result} = Task.await(second)
+      assert text(first_result) == "released"
+      assert text(second_result) == "released"
+    end
+
+    test "a repeat of a turn crashes interrupted says it will not run again" do
+      session_id = start_session!()
+      Process.register(self(), :mcp_text_handler_test)
+
+      spawn(fn -> submit(session_id, "block", %{"client_turn_id" => "key-1"}) end)
+      crash_until_interrupted(session_id)
+
+      assert {:ok, %{"isError" => true} = result} =
+               submit(session_id, "block", %{"client_turn_id" => "key-1"})
+
+      assert text(result) ==
+               "the turn was interrupted by a server restart and will not run again; " <>
+                 "send a new client_turn_id to try again"
+    end
+
+    test "a keyed turn cut by a server crash answers its caller with the turn's own outcome" do
+      session_id = start_session!()
+      Process.register(self(), :mcp_text_handler_test)
+
+      caller = Task.async(fn -> submit(session_id, "block", %{"client_turn_id" => "key-1"}) end)
+      assert_receive {:handler_started, _handler}, 10_000
+      Process.exit(Mead.Session.whereis(session_id, :server), :kill)
+
+      assert_receive {:handler_started, continued}, 10_000
+      send(continued, :release)
+
+      assert {:ok, %{"isError" => false} = result} = Task.await(caller)
+      assert text(result) == "released"
+    end
+
+    test "a keyed turn whose server does not come back in time says how to get its result" do
+      previous_wait = Application.fetch_env(:mead, :restart_wait)
+      Application.put_env(:mead, :restart_wait, 200)
+
+      on_exit(fn ->
+        case previous_wait do
+          {:ok, value} -> Application.put_env(:mead, :restart_wait, value)
+          :error -> Application.delete_env(:mead, :restart_wait)
+        end
+      end)
+
+      session_id = start_session!()
+      Process.register(self(), :mcp_text_handler_test)
+      supervisor = Mead.Session.whereis(session_id, :supervisor)
+
+      caller = Task.async(fn -> submit(session_id, "block", %{"client_turn_id" => "key-1"}) end)
+      assert_receive {:handler_started, _handler}, 10_000
+
+      # A suspended supervisor cannot start the server again until it is resumed.
+      :sys.suspend(supervisor)
+      Process.exit(Mead.Session.whereis(session_id, :server), :kill)
+
+      assert {:ok, %{"isError" => true} = result} = Task.await(caller)
+      :sys.resume(supervisor)
+
+      assert text(result) ==
+               "the session restarted while the turn ran and did not come back in time; a " <>
+                 "turn that can continue does so on its own, so submit again with the same " <>
+                 "client_turn_id to get its outcome"
+    end
+
+    test "a turn without a key whose server does not come back in time points to the history" do
+      previous_wait = Application.fetch_env(:mead, :restart_wait)
+      Application.put_env(:mead, :restart_wait, 200)
+
+      on_exit(fn ->
+        case previous_wait do
+          {:ok, value} -> Application.put_env(:mead, :restart_wait, value)
+          :error -> Application.delete_env(:mead, :restart_wait)
+        end
+      end)
+
+      session_id = start_session!()
+      Process.register(self(), :mcp_text_handler_test)
+      supervisor = Mead.Session.whereis(session_id, :supervisor)
+
+      caller = Task.async(fn -> submit(session_id, "block") end)
+      assert_receive {:handler_started, _handler}, 10_000
+
+      :sys.suspend(supervisor)
+      Process.exit(Mead.Session.whereis(session_id, :server), :kill)
+
+      assert {:ok, %{"isError" => true} = result} = Task.await(caller)
+      :sys.resume(supervisor)
+
+      assert text(result) ==
+               "the session restarted while the turn ran and did not come back in time; the " <>
+                 "turn continues on its own once it does, and the history tool shows its " <>
+                 "outcome"
+
+      assert_receive {:handler_started, continued}, 10_000
+      send(continued, :release)
+      wait_until(fn -> match?({:ok, [%{status: :ok}]}, Mead.history(session_id)) end)
+    end
+
+    test "a turn without a key cut by a server crash answers with the continued turn" do
+      session_id = start_session!()
+      Process.register(self(), :mcp_text_handler_test)
+
+      caller = Task.async(fn -> submit(session_id, "block") end)
+      assert_receive {:handler_started, _handler}, 10_000
+      Process.exit(Mead.Session.whereis(session_id, :server), :kill)
+
+      assert_receive {:handler_started, continued}, 10_000
+      send(continued, :release)
+
+      assert {:ok, %{"isError" => false} = result} = Task.await(caller)
+      assert text(result) == "released"
+    end
+
+    test "a key reused with another input names the key, the original turn and the way out" do
+      session_id = start_session!()
+      {:ok, _result} = submit(session_id, "echo first", %{"client_turn_id" => "key-1"})
+      {:ok, [%{started_at: started_at}]} = Mead.history(session_id)
+
+      assert {:ok, %{"isError" => true} = result} =
+               submit(session_id, "echo second", %{"client_turn_id" => "key-1"})
+
+      assert text(result) ==
+               ~s(client_turn_id "key-1" was already used in this session for a different input. ) <>
+                 "The original turn (started #{DateTime.to_iso8601(started_at)}, status: ok) " <>
+                 ~s(had the input "echo first". ) <>
+                 "To get the result of that turn, resend it with its original input; " <>
+                 "to ask something new, send a new client_turn_id."
+
+      assert {:ok, [_only_turn]} = Mead.history(session_id)
+    end
+
+    test "the conflict preview is cut at 60 characters and quotes stay escaped" do
+      session_id = start_session!()
+      long_input = "echo " <> String.duplicate("x", 100)
+      key = ~s(say "hi" \\ bye)
+      {:ok, _result} = submit(session_id, long_input, %{"client_turn_id" => key})
+
+      assert {:ok, %{"isError" => true} = result} =
+               submit(session_id, "echo other", %{"client_turn_id" => key})
+
+      message = text(result)
+      assert message =~ ~s(client_turn_id "say \\"hi\\" \\\\ bye" was already used)
+      assert message =~ ~s(had the input "echo #{String.duplicate("x", 55)}…".)
+    end
+
+    test "a conflict with the running turn shows status in_progress" do
+      session_id = start_session!()
+      Process.register(self(), :mcp_text_handler_test)
+      task = Task.async(fn -> submit(session_id, "block", %{"client_turn_id" => "key-1"}) end)
+      assert_receive {:handler_started, handler}, 10_000
+
+      assert {:ok, %{"isError" => true} = result} =
+               submit(session_id, "echo other", %{"client_turn_id" => "key-1"})
+
+      assert text(result) =~ "status: in_progress"
+
+      send(handler, :release)
+      Task.await(task)
+    end
+
+    test "an invalid key is invalid params and records nothing" do
+      session_id = start_session!()
+
+      for key <- ["", String.duplicate("a", 129), "a\nb", 42, %{"id" => 1}] do
+        assert submit(session_id, "echo hi", %{"client_turn_id" => key}) ==
+                 {:error,
+                  {:invalid_params,
+                   "client_turn_id must be a string of 1 to 128 characters without control characters"}}
+      end
+
+      assert Mead.history(session_id) == {:ok, []}
+    end
+
+    test "a null key is the same as no key, as JSON clients send for an unset field" do
+      session_id = start_session!()
+
+      assert {:ok, %{"isError" => false}} =
+               submit(session_id, "echo hi", %{"client_turn_id" => nil})
+
+      assert {:ok, %{"isError" => false}} =
+               submit(session_id, "echo hi", %{"client_turn_id" => nil})
+
+      # Each got a key of its own from mead, so the second did not repeat the first.
+      assert {:ok, [%{client_turn_id: "mead-" <> first}, %{client_turn_id: "mead-" <> second}]} =
+               Mead.history(session_id)
+
+      assert first != second
+    end
+
+    test "quotes and backslashes in the original input stay escaped in the preview" do
+      session_id = start_session!()
+      {:ok, _result} = submit(session_id, ~S(echo say "hi" \ there), %{"client_turn_id" => "k"})
+
+      assert {:ok, %{"isError" => true} = result} =
+               submit(session_id, "echo other", %{"client_turn_id" => "k"})
+
+      assert text(result) =~ ~S(had the input "echo say \"hi\" \\ there".)
+    end
+  end
+
   describe "history" do
+    test "shows each turn's client_turn_id, the one mead generated when it had none" do
+      session_id = start_session!()
+      {:ok, _result} = submit(session_id, "echo keyed", %{"client_turn_id" => "key-1"})
+      {:ok, _result} = submit(session_id, "echo plain")
+
+      assert {:ok, result} = Tools.call("history", %{"session_id" => session_id}, @closed)
+
+      assert [%{"client_turn_id" => "key-1"}, %{"client_turn_id" => "mead-" <> _generated}] =
+               JSON.decode!(text(result))
+    end
+
     test "lists the turns as JSON text" do
       session_id = start_session!()
       {:ok, _result} = submit(session_id, "echo hi")
