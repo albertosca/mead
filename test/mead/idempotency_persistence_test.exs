@@ -61,6 +61,24 @@ defmodule Mead.IdempotencyPersistenceTest do
     assert {:ok, [%Turn{client_turn_id: "key-1"}]} = Mead.history(session_id)
   end
 
+  test "with max_turns set, a key compacted out of the window counts as new",
+       %{directory: directory} do
+    Application.put_env(:mead, :storage, directory: directory, max_turns: 1)
+    {:ok, session_id} = Mead.start_session(handler: Mead.Test.ScriptedHandler)
+    on_exit(fn -> Mead.stop_session(session_id) end)
+
+    assert Mead.submit_turn(session_id, {:echo, "one"}, client_turn_id: "key-1") == {:ok, "one"}
+    assert Mead.submit_turn(session_id, {:echo, "two"}, client_turn_id: "key-2") == {:ok, "two"}
+    assert {:ok, _sizes} = Mead.compact_session(session_id)
+
+    assert Mead.submit_turn(session_id, {:echo, "three"}, client_turn_id: "key-1") ==
+             {:ok, "three"}
+
+    assert {:ok,
+            [%Turn{client_turn_id: "key-2"}, %Turn{client_turn_id: "key-1", output: "three"}]} =
+             Mead.history(session_id)
+  end
+
   test "a keyed turn left in progress on disk answers :interrupted after a resume",
        %{directory: directory} do
     session_id = Mead.UUID.generate()
