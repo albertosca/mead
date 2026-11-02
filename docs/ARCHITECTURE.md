@@ -45,7 +45,7 @@ graph TD
 1. **`Mead.Supervisor`:** The application root supervisor. Enforces a `rest_for_one` strategy for foundational infrastructure.
 2. **`Mead.Session.Pool` (Sessions):** A `DynamicSupervisor` that starts one `Mead.Session.Supervisor` per active conversation. Each of those supervises that conversation's `Mead.Session.History` and `Mead.Session.Server`.
 3. **`Registry`:** Fast in-memory process registry mapping conversation UUIDs to runtime PIDs for microsecond WebSocket routing.
-4. **`Mead.Router`:** A stateless `Mead.Session.TurnHandler` with no process of its own. It classifies each turn as local or cloud (or obeys a `route:` override), calls the provider in that slot, and emits `[:mead, :router, :route]` events. It is not a child of the root supervisor, so no conversation shares a router process with another.
+4. **`Mead.Router`:** A stateless `Mead.Session.TurnHandler` with no process of its own. It classifies each turn as local or cloud (or obeys a `route:` override, which may also name any other configured slot), calls the provider in that slot, and emits `[:mead, :router, :route]` events. It is not a child of the root supervisor, so no conversation shares a router process with another.
 5. **`Mead.MCP.Hub`:** The client side of MCP. A supervisor that keeps one `Mead.MCP.Connection` per configured server and exposes `tools_for/2` and `call_tool/4`; it comes after the session pool, so a crash of the hub restarts the hub and the MCP server after it, and nothing before it.
 6. **`Mead.Ledger`:** A ledger of what the router sends to providers, the first child of the root supervisor. It keeps usage aggregates per session and per route and a ring of the last 100 turns, written by a telemetry handler in the process that emitted the event, and journals them to a separate file in the storage directory so they survive a restart. Budgets and prices are not part of it.
 7. **`Mead.MCP.Server`:** The server side of MCP. A supervisor, the last child of the root, that starts a `Bandit` listener running `Mead.MCP.Server.Plug` only when `config :mead, :mcp_server` has a token. Clients such as the deck use it to start sessions, submit turns, read the history, stop, resume, delete, list, and compact sessions as nine MCP tools.
@@ -112,9 +112,10 @@ Any doubt goes to the cloud.
 
 ### Slots and providers
 
-The route names a slot, and a slot holds a `{provider, options}` pair that implements `Mead.Provider`.
+The route names a slot, and a slot holds a `{provider, options}` pair that implements `Mead.Provider`. Besides `local` and `cloud`, the config may hold named slots (`gemma:` for example) that a turn reaches only by forcing that route; `Mead.Router.routes/0` lists the valid routes from the config at submit time, and the MCP `submit_turn` enum follows it.
 
-* A turn routed to an empty slot fails with `:local_unavailable` or `:cloud_unavailable`. It is never sent to the other slot.
+* A turn routed to an empty slot fails with `:local_unavailable`, `:cloud_unavailable`, or `{:slot_unavailable, name}` for a named slot. It is never sent to another slot, and a resumed turn continues on the slot it was recorded on.
+* A slot with `tool_use: false` gets no tools: its turns are plain completions, for models such as Gemma 2 that reject any request carrying tools. The option is removed before the provider sees the options.
 * Only completed text turns are replayed to the provider as history.
 * A failed turn replies `{:error, {:failed, reason}}`.
 
