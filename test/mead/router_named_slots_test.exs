@@ -24,6 +24,19 @@ defmodule Mead.RouterNamedSlotsTest do
       send(Keyword.fetch!(options, :test_pid), :conversed)
       {:error, :tools_unsupported}
     end
+
+    # The path an interactive turn takes; it reports its tools and options like complete/2.
+    @impl true
+    def converse_stream(_messages, tools, options, _on_delta) do
+      send(Keyword.fetch!(options, :test_pid), {:streamed, tools, options})
+
+      {:ok,
+       %{
+         content: [%{type: :text, text: "plain"}],
+         stop_reason: :end_turn,
+         usage: %{input_tokens: 1, output_tokens: 1}
+       }}
+    end
   end
 
   defp gemma(extra \\ []), do: {OptionsProvider, Keyword.merge([test_pid: self()], extra)}
@@ -83,6 +96,8 @@ defmodule Mead.RouterNamedSlotsTest do
     assert Router.route([], "hello", options, [gemma: gemma(tool_use: false)], FakeHub) ==
              {:ok, "plain"}
 
+    assert_received {:streamed, [], streamed_options}
+    refute Keyword.has_key?(streamed_options, :tool_use)
     refute_received :conversed
   end
 

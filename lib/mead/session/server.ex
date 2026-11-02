@@ -315,7 +315,9 @@ defmodule Mead.Session.Server do
 
     case earlier_turn(state.session_id, client_turn_id) do
       nil ->
-        start_turn(state, input, options, client_turn_id, from)
+        if Mead.unknown_route?(options),
+          do: {:reply, {:error, :invalid_route}, state},
+          else: start_turn(state, input, options, client_turn_id, from)
 
       %Turn{input: ^input, status: :in_progress} when running != nil ->
         running = attach(running, Keyword.get(options, :interaction))

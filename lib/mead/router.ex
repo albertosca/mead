@@ -77,6 +77,10 @@ defmodule Mead.Router do
   @maximum_replayed_exchanges 20
   # A model that keeps asking for tools would otherwise spend the turn timeout and the budget.
   @maximum_provider_calls 8
+
+  # Atoms that are keyword keys but never name a slot: `:auto` asks the classifier, and a recorded
+  # step naming one of the others could not be told from a malformed one.
+  @not_slot_names [:auto, nil, true, false]
   @text_separator "\n\n"
   # The hub gives up on a tool after 15 seconds; this is the margin for the task around it.
   @tool_wait 20_000
@@ -103,7 +107,7 @@ defmodule Mead.Router do
   """
   @spec routes() :: [atom()]
   def routes do
-    names = Keyword.keys(configured_slots())
+    names = for name <- Keyword.keys(configured_slots()), name not in @not_slot_names, do: name
     Enum.uniq([:auto, :local, :cloud | names])
   end
 
@@ -210,7 +214,7 @@ defmodule Mead.Router do
   # across responses, so the segments are consumed in order. Whatever does not fit ends the parse
   # with a warning: only a bug writes such a log, and the turn goes on live from that point.
   defp parse_steps([{:route, route, source} | rest])
-       when is_atom(route) and route not in [:auto, nil, true, false] and
+       when is_atom(route) and route not in @not_slot_names and
               source in [:forced, :classified] do
     {segments, dropped} = segments(rest, [])
     warn_dropped(dropped)

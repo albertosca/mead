@@ -33,7 +33,7 @@ Mead.submit_turn(session_id, "Summarise this in one line: ...", route: :gemma)
 
 * The valid routes are `:auto`, `:local`, `:cloud` and every other key of `slots`, read when the turn is submitted; `Mead.Router.routes/0` lists them. Any other route gives `{:error, :invalid_route}`. A slot named `auto` is ignored.
 * `route: :auto` still chooses only between `local` and `cloud`; a named slot is reached only by asking for it.
-* A turn that a crash cut short continues on the slot it was recorded on. If that slot was removed from the config in the meantime, the turn fails with `{:slot_unavailable, name}` instead of moving to another model.
+* A turn that a crash cut short continues on the slot it was recorded on. If that slot was removed from the config in the meantime, the turn fails with `{:slot_unavailable, name}` instead of moving to another model, and submitting it again with the same `client_turn_id` (directly or over MCP) returns that outcome rather than `:invalid_route`; a new key on the removed slot is refused.
 * Over MCP, the `route` property of `submit_turn` lists the same names, and an unknown name is refused without ever becoming an atom.
 
 `tool_use: false` turns the tools off for that slot: its turns are plain completions even when MCP tools are visible. Gemma 2 needs it, because Ollama answers HTTP 400 ("does not support tools") to any request that carries tools, and without the option every turn on that slot fails with `:tools_unsupported` as soon as one tool is configured. Any value other than `true` or `false` fails the turn with `:invalid_slot`.

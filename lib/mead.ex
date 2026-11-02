@@ -183,7 +183,8 @@ defmodule Mead do
     * `:route` - `:auto` (the default), `:local`, `:cloud`, or the name of any other slot in
       `config :mead, :router, slots:` (see `Mead.Router.routes/0`); read by `Mead.Router` and
       ignored by other handlers. Any other value returns `{:error, :invalid_route}` before a turn
-      is recorded.
+      is recorded, except that a `:client_turn_id` naming an earlier turn still joins it or gets
+      its outcome after its slot was removed from the config.
     * `:tools` - `:effect` also shows the model tools that have side effects; see
       `Mead.MCP.Policy`. Handed to the handler unchanged and absent when not given.
     * `:interaction` - a `{module, context}` pair, `module` implementing `Mead.Router.Interaction`;
@@ -218,12 +219,26 @@ defmodule Mead do
     options = validate_submit_options!(options)
 
     cond do
-      Keyword.fetch!(options, :route) not in Mead.Router.routes() -> {:error, :invalid_route}
-      invalid_interaction?(options) -> {:error, :invalid_interaction}
-      invalid_client_turn_id?(options) -> {:error, :invalid_client_turn_id}
-      true -> run_turn(session_id, input, options)
+      unknown_route?(options) and not Keyword.has_key?(options, :client_turn_id) ->
+        {:error, :invalid_route}
+
+      invalid_interaction?(options) ->
+        {:error, :invalid_interaction}
+
+      invalid_client_turn_id?(options) ->
+        {:error, :invalid_client_turn_id}
+
+      true ->
+        run_turn(session_id, input, options)
     end
   end
+
+  @doc false
+  # A keyed turn on a route that is no longer configured still reaches the session server, which
+  # answers it only when the key names an earlier turn (see `Mead.Session.Server`).
+  @spec unknown_route?(keyword()) :: boolean()
+  def unknown_route?(options),
+    do: Keyword.get(options, :route, :auto) not in Mead.Router.routes()
 
   defp invalid_interaction?(options) do
     Keyword.has_key?(options, :interaction) and
