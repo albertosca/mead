@@ -1,27 +1,32 @@
 defmodule Mead.Router do
   @moduledoc """
-  Turn handler that sends each turn to a local or a cloud model.
+  Turn handler that sends each turn to a local or a cloud model, or to any other named slot.
 
-  The route is the one forced with `Mead.submit_turn/3` (`route: :local` or `route: :cloud`) or,
-  for `route: :auto`, the one `Mead.Router.Classifier` picks. The route names a slot, and each
-  slot holds a `{provider_module, provider_options}` pair implementing `Mead.Provider`, read from
-  the application environment:
+  The route is the one forced with `Mead.submit_turn/3` (`route: :local`, `route: :cloud`, or the
+  name of any other configured slot) or, for `route: :auto`, the one `Mead.Router.Classifier`
+  picks, which is always `:local` or `:cloud`. The route names a slot, and each slot holds a
+  `{provider_module, provider_options}` pair implementing `Mead.Provider`, read from the
+  application environment:
 
       config :mead, :router,
         slots: [
           local: {Mead.Provider.Ollama, model: "llama3.1"},
-          cloud: {Mead.Provider.Anthropic, model: "claude-sonnet-5-5"}
+          cloud: {Mead.Provider.Anthropic, model: "claude-sonnet-5-5"},
+          gemma: {Mead.Provider.Ollama, model: "gemma2:2b", tool_use: false}
         ]
 
-  A turn routed to an empty slot fails with `:local_unavailable` or `:cloud_unavailable` and
-  nothing is sent anywhere. In particular a turn meant for the local model is never sent to the
-  cloud on its own.
+  `routes/0` lists the routes a turn may ask for. A turn routed to an empty slot fails with
+  `:local_unavailable`, `:cloud_unavailable`, or `{:slot_unavailable, name}` for any other slot,
+  and nothing is sent anywhere. In particular a turn meant for the local model is never sent to
+  the cloud on its own.
 
   ## Tools
 
   When the provider of the chosen slot exports `converse/3`, whichever the route, and `Mead.MCP.Hub.tools_for/1` shows at least one tool for the turn, the turn becomes a loop: the model answers or asks for tools, each requested call goes to `Mead.MCP.Hub.call_tool/3`, and the results are sent back, until the model answers with text. The loop stops after eight provider calls with `:tool_loop_limit`. A tool that fails, is not allowed, or does not exist is reported to the model as an error result and is never retried; the turn does not fail for it. The turn option `tools: :effect` also shows tools that have side effects; see `Mead.MCP.Policy`. The whole loop runs inside the turn timeout, so a conversation that uses tools may need a larger `:turn_timeout` than the default of 30 seconds.
 
-  A tool result goes back to the model of the route that asked for it. A local turn therefore reaches every MCP server the cloud route reaches, including servers that talk to the network, and the result is seen only by the local model. A local model that does not support tools fails the turn with `:tools_unsupported` as soon as any tool is visible; the way out is `route: :cloud`, another model, or no tools configured.
+  A tool result goes back to the model of the route that asked for it. A local turn therefore reaches every MCP server the cloud route reaches, including servers that talk to the network, and the result is seen only by the local model. A local model that does not support tools fails the turn with `:tools_unsupported` as soon as any tool is visible; the way out is `route: :cloud`, another model, `tool_use: false` on the slot, or no tools configured.
+
+  A slot whose options carry `tool_use: false` never sees tools: its turns are plain completions even when tools are visible, also with `tools: :effect` or an interaction. The option is taken out before the provider sees the options, and any value other than `true` or `false` fails the turn with `:invalid_slot`.
 
   The router keeps no state, so every conversation stays independent of the others. Each turn
   emits `[:mead, :router, :route]` with the measurements `duration` (in native time units),
@@ -42,7 +47,9 @@ defmodule Mead.Router do
   `ask_user` answer, and an unknown tool included). A write that fails ends the turn at once with
   `{:error, {:checkpoint_failed, reason}}`, so nothing runs outside the record.
 
-  `resume_turn/4` continues a turn from those steps, by position (some models reuse tool call ids
+  `resume_turn/4` continues a turn on the slot it was recorded on, whatever its name, and fails it
+  as unavailable when that slot is gone, without moving it to another slot. It goes on from those
+  steps by position (some models reuse tool call ids
   across calls): recorded answers and results are used instead of asking again, and replayed
   answers are not streamed again. A call recorded as started with no result is in doubt: a `:read`
   call runs again, and an `:effect` call never does, the model is told it may or may not have
@@ -203,7 +210,8 @@ defmodule Mead.Router do
   # across responses, so the segments are consumed in order. Whatever does not fit ends the parse
   # with a warning: only a bug writes such a log, and the turn goes on live from that point.
   defp parse_steps([{:route, route, source} | rest])
-       when route in [:local, :cloud] and source in [:forced, :classified] do
+       when is_atom(route) and route not in [:auto, nil, true, false] and
+              source in [:forced, :classified] do
     {segments, dropped} = segments(rest, [])
     warn_dropped(dropped)
     {{route, source}, segments}
@@ -269,7 +277,7 @@ defmodule Mead.Router do
   # A slot of any other shape would crash inside the provider with its content in the stacktrace,
   # which the session stores and replies; refuse it by shape instead.
   defp call_slot(
-         {provider, provider_options} = slot,
+         {provider, provider_options},
          _route,
          history,
          input,
@@ -278,7 +286,13 @@ defmodule Mead.Router do
          segments
        ) do
     if is_atom(provider) and Keyword.keyword?(provider_options) do
-      call_provider(slot, history, input, options, hub, segments)
+      case Keyword.pop(provider_options, :tool_use, true) do
+        {tool_use, rest} when is_boolean(tool_use) ->
+          call_provider({provider, rest}, tool_use, history, input, options, hub, segments)
+
+        {_invalid, _rest} ->
+          outcome({:error, :invalid_slot}, nil)
+      end
     else
       outcome({:error, :invalid_slot}, nil)
     end
@@ -288,11 +302,19 @@ defmodule Mead.Router do
     outcome({:error, :invalid_slot}, nil)
   end
 
-  defp call_provider({provider, provider_options}, history, input, options, hub, segments) do
+  defp call_provider(
+         {provider, provider_options},
+         tool_use,
+         history,
+         input,
+         options,
+         hub,
+         segments
+       ) do
     if is_binary(input) and String.valid?(input) do
       messages = build_messages(history, input)
 
-      case tools_for_turn(provider, options, hub) do
+      case tools_for_turn(provider, tool_use, options, hub) do
         [] ->
           complete_once(provider, provider_options, messages, options, segments)
 
@@ -380,8 +402,11 @@ defmodule Mead.Router do
     end
   end
 
-  # Tools are offered on either route, and only through a provider that can carry them.
-  defp tools_for_turn(provider, options, hub) do
+  # Tools are offered on any route, and only through a provider that can carry them, to a slot
+  # that did not turn them off.
+  defp tools_for_turn(_provider, false, _options, _hub), do: []
+
+  defp tools_for_turn(provider, true, options, hub) do
     if Code.ensure_loaded?(provider) and function_exported?(provider, :converse, 3) do
       add_ask_user(hub.tools_for(options), options)
     else
@@ -775,6 +800,7 @@ defmodule Mead.Router do
 
   defp unavailable_reason(:local), do: :local_unavailable
   defp unavailable_reason(:cloud), do: :cloud_unavailable
+  defp unavailable_reason(name), do: {:slot_unavailable, name}
 
   defp no_usage, do: %{input_tokens: 0, output_tokens: 0}
 
