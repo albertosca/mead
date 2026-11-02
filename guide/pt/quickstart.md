@@ -4,7 +4,7 @@ Requer Elixir 1.20+ sobre Erlang/OTP 29. Adicione o mead às dependências no `m
 
 ```elixir
 def deps do
-  [{:mead, "~> 0.1"}]
+  [{:mead, "~> 0.3"}]
 end
 ```
 
