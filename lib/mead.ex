@@ -22,7 +22,6 @@ defmodule Mead do
   alias Mead.Session.Turn
 
   @default_turn_timeout 30_000
-  @routes [:auto, :local, :cloud]
   # The longest delay `Process.send_after/3` accepts on every platform.
   @maximum_turn_timeout 4_294_967_295
   @default_recent 20
@@ -181,9 +180,10 @@ defmodule Mead do
 
   ## Options
 
-    * `:route` - `:auto` (the default), `:local`, or `:cloud`; read by `Mead.Router` and ignored
-      by other handlers. Any other value returns `{:error, :invalid_route}` before a turn is
-      recorded.
+    * `:route` - `:auto` (the default), `:local`, `:cloud`, or the name of any other slot in
+      `config :mead, :router, slots:` (see `Mead.Router.routes/0`); read by `Mead.Router` and
+      ignored by other handlers. Any other value returns `{:error, :invalid_route}` before a turn
+      is recorded.
     * `:tools` - `:effect` also shows the model tools that have side effects; see
       `Mead.MCP.Policy`. Handed to the handler unchanged and absent when not given.
     * `:interaction` - a `{module, context}` pair, `module` implementing `Mead.Router.Interaction`;
@@ -218,7 +218,7 @@ defmodule Mead do
     options = validate_submit_options!(options)
 
     cond do
-      Keyword.fetch!(options, :route) not in @routes -> {:error, :invalid_route}
+      Keyword.fetch!(options, :route) not in Mead.Router.routes() -> {:error, :invalid_route}
       invalid_interaction?(options) -> {:error, :invalid_interaction}
       invalid_client_turn_id?(options) -> {:error, :invalid_client_turn_id}
       true -> run_turn(session_id, input, options)

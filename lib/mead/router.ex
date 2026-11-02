@@ -86,12 +86,27 @@ defmodule Mead.Router do
 
   @impl true
   def resume_turn(history, input, steps, options) do
-    slots =
-      :mead
-      |> Application.get_env(:router, [])
-      |> Keyword.get(:slots, [])
+    replay(history, input, steps, options, configured_slots())
+  end
 
-    replay(history, input, steps, options, slots)
+  @doc """
+  The routes a turn can name: `:auto`, `:local`, `:cloud`, and every other slot of
+  `config :mead, :router, slots:`, in config order. A slot named `auto` is never a route, because
+  `route: :auto` always means "let the classifier pick".
+  """
+  @spec routes() :: [atom()]
+  def routes do
+    names = Keyword.keys(configured_slots())
+    Enum.uniq([:auto, :local, :cloud | names])
+  end
+
+  defp configured_slots do
+    configuration = Application.get_env(:mead, :router, [])
+
+    slots =
+      if Keyword.keyword?(configuration), do: Keyword.get(configuration, :slots, []), else: []
+
+    if Keyword.keyword?(slots), do: slots, else: []
   end
 
   @doc """
