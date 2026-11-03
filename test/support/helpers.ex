@@ -96,7 +96,14 @@ defmodule Mead.TestHelpers do
           end
         end)
 
-      :trace.function(session, traced, true, [:local])
+      # A pattern on a module that is not loaded yet matches nothing and traces nothing, so a
+      # test run on its own, before anything else loaded the module, would see no calls at all.
+      Code.ensure_loaded!(module)
+
+      if :trace.function(session, traced, true, [:local]) == 0 do
+        raise ArgumentError, "#{inspect(traced)} matches no function, so no call can be traced"
+      end
+
       :trace.process(session, worker, true, [:call])
       send(worker, :go)
 

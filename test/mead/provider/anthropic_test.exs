@@ -120,6 +120,52 @@ defmodule Mead.Provider.AnthropicTest do
     assert Agent.get(counter, & &1) == 1
   end
 
+  describe "a refused request" do
+    defp refuse(status, error) do
+      Req.Test.stub(__MODULE__, fn conn ->
+        conn
+        |> Plug.Conn.put_status(status)
+        |> Req.Test.json(%{"type" => "error", "error" => error})
+      end)
+    end
+
+    test "logs the type and message the API gave, and keeps the reason a status" do
+      message = "Your credit balance is too low to access the Anthropic API."
+      refuse(400, %{"type" => "invalid_request_error", "message" => message})
+
+      log =
+        capture_log(fn ->
+          assert Anthropic.complete(@messages, options()) == {:error, {:http_status, 400}}
+        end)
+
+      assert log =~ "HTTP 400"
+      assert log =~ "invalid_request_error"
+      assert log =~ message
+      refute log =~ @sentinel_key
+    end
+
+    test "a body that is not the API's error shape still logs the status" do
+      Req.Test.stub(__MODULE__, fn conn -> Plug.Conn.send_resp(conn, 401, "unauthorized") end)
+
+      log =
+        capture_log(fn ->
+          assert Anthropic.complete(@messages, options()) == {:error, {:http_status, 401}}
+        end)
+
+      assert log =~ "HTTP 401"
+      refute log =~ @sentinel_key
+    end
+
+    test "a very long message is cut in the log" do
+      refuse(400, %{"type" => "invalid_request_error", "message" => String.duplicate("a", 5_000)})
+
+      log = capture_log(fn -> Anthropic.complete(@messages, options()) end)
+
+      assert log =~ String.duplicate("a", 200)
+      refute log =~ String.duplicate("a", 501)
+    end
+  end
+
   test "reports a timeout without retrying it" do
     {:ok, counter} = Agent.start_link(fn -> 0 end)
 

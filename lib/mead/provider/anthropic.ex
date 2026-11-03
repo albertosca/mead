@@ -23,9 +23,17 @@ defmodule Mead.Provider.Anthropic do
   Requests are retried at most twice, and only after HTTP 429 or a 5xx status. A timeout or a
   transport error is never retried. The key travels only in the request header and is never part
   of a returned reason.
+
+  A refused request still returns `{:http_status, status}`, and the type and message the API gave
+  (such as a credit balance that is too low) go to a warning in the log, cut to 500 characters.
   """
 
   @behaviour Mead.Provider
+
+  require Logger
+
+  @maximum_logged_message 500
+  @maximum_error_body 8_192
 
   @endpoint "https://api.anthropic.com/v1/messages"
   @api_version "2023-06-01"
@@ -152,10 +160,38 @@ defmodule Mead.Provider.Anthropic do
 
     case Req.post(request_options) do
       {:ok, %Req.Response{status: 200} = response} -> {:ok, response}
-      {:ok, %Req.Response{status: status}} -> {:error, {:http_status, status}}
+      {:ok, %Req.Response{status: status} = response} -> refused(status, response)
       {:error, %Req.TransportError{reason: :timeout}} -> {:error, :timeout}
       {:error, %Req.TransportError{reason: reason}} -> {:error, {:transport, reason}}
       {:error, exception} -> {:error, {:transport, exception.__struct__}}
+    end
+  end
+
+  # A status alone says 400 for a malformed request and for an empty credit balance alike, so the
+  # API's own words go to the log. They never hold the key, which travels only in a header.
+  defp refused(status, response) do
+    case refusal_body(response) do
+      %{"error" => %{"type" => type, "message" => message}}
+      when is_binary(type) and is_binary(message) ->
+        Logger.warning(
+          "Anthropic refused the request with HTTP #{status}: #{type}: " <>
+            String.slice(message, 0, @maximum_logged_message)
+        )
+
+      _other_body ->
+        Logger.warning("Anthropic refused the request with HTTP #{status}")
+    end
+
+    {:error, {:http_status, status}}
+  end
+
+  # A streamed request collects the body of a failure under :error_body instead of in the body.
+  defp refusal_body(%Req.Response{body: %{} = body}), do: body
+
+  defp refusal_body(response) do
+    case Jason.decode(Req.Response.get_private(response, :error_body, "")) do
+      {:ok, %{} = body} -> body
+      _not_json -> nil
     end
   end
 
@@ -253,8 +289,16 @@ defmodule Mead.Provider.Anthropic do
     Req.Response.put_private(response, :stream, state)
   end
 
-  # The body of a failed response is not a stream; the status alone is reported.
-  defp ingest(response, _data, _on_delta), do: response
+  # The body of a failed response is not a stream; it is kept, up to a bound, for the log.
+  defp ingest(response, data, _on_delta) do
+    collected = Req.Response.get_private(response, :error_body, "")
+
+    if byte_size(collected) < @maximum_error_body do
+      Req.Response.put_private(response, :error_body, collected <> data)
+    else
+      response
+    end
+  end
 
   defp new_stream do
     %{
