@@ -131,11 +131,14 @@ defmodule Mead.Deck.SocketTest do
   test "a client that answers pings stays connected past the idle timeout", %{
     directory: directory
   } do
-    {server, _session_id, ticket} = connected(directory, heartbeat_ms: 50, idle_timeout_ms: 200)
+    # The server measures silence on the clock, so a pause of the whole VM counts as silence even
+    # though the client could not answer either; CI's macOS machines pause for 150 ms and more.
+    # An idle timeout of 1 s leaves room for such a pause, and the loop still outlasts it.
+    {server, _session_id, ticket} = connected(directory, heartbeat_ms: 50, idle_timeout_ms: 1_000)
     client = DeckServer.open(server, ticket)
     {client, _snapshot} = WebSocketClient.receive_type(client, "session.snapshot")
 
-    deadline = System.monotonic_time(:millisecond) + 600
+    deadline = System.monotonic_time(:millisecond) + 1_500
 
     client =
       Stream.repeatedly(fn -> :tick end)
