@@ -43,7 +43,7 @@ defmodule Mead.Provider.ServerSentEventsTest do
 
   defp random_chunks(body, chunks) do
     size = min(:rand.uniform(7), byte_size(body))
-    <<chunk::binary-size(size), rest::binary>> = body
+    <<chunk::binary-size(^size), rest::binary>> = body
     random_chunks(rest, [chunk | chunks])
   end
 
