@@ -420,11 +420,15 @@ defmodule Mead.Provider.Anthropic do
         %{"type" => "tool_use"} = tool ->
           Map.put(Map.take(tool, ["type", "id", "name"]), "json", "")
 
+        # The deltas carry the text and the signature; a start field that is not a string would
+        # otherwise make every delta that follows miss its guard.
         %{"type" => "thinking"} = thinking ->
-          Map.merge(
-            %{"thinking" => "", "signature" => ""},
-            Map.take(thinking, ["type", "thinking", "signature"])
-          )
+          for key <- ["thinking", "signature"], into: %{"type" => "thinking"} do
+            case Map.get(thinking, key) do
+              value when is_binary(value) -> {key, value}
+              _not_a_string -> {key, ""}
+            end
+          end
 
         %{"type" => "redacted_thinking"} = redacted ->
           Map.take(redacted, ["type", "data"])

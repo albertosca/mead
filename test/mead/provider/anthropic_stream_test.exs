@@ -223,6 +223,29 @@ defmodule Mead.Provider.AnthropicStreamTest do
     assert {{:ok, ^expected}, ["Reading."]} = collect(serve(thinking_body(events), 7))
   end
 
+  test "a thinking start with a null or non-string field still takes the deltas" do
+    {:ok, expected} = Anthropic.converse(@messages, @tools, options(&plain_thinking_answer/1))
+
+    events =
+      thinking_delta(0, "Let me check.") <> signature_delta(0, "signature-one")
+
+    for start_fields <- [
+          %{"signature" => nil},
+          %{"thinking" => nil, "signature" => nil},
+          %{"thinking" => 5}
+        ] do
+      body =
+        String.replace(
+          thinking_body(events),
+          Jason.encode!(%{"type" => "thinking", "thinking" => "", "signature" => ""}),
+          Jason.encode!(Map.merge(%{"type" => "thinking"}, start_fields)),
+          global: false
+        )
+
+      assert {{:ok, ^expected}, ["Reading."]} = collect(serve(body, 1_000))
+    end
+  end
+
   test "a streamed thinking block that never got its signature is malformed" do
     events = thinking_delta(0, "Let me check.")
 

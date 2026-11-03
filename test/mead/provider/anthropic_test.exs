@@ -492,6 +492,26 @@ defmodule Mead.Provider.AnthropicTest do
       refute log =~ "MUST-NOT-LEAK"
     end
 
+    test "is logged even when the rest of the answer is malformed" do
+      Req.Test.stub(__MODULE__, fn conn ->
+        Req.Test.json(conn, %{
+          "content" => [],
+          "usage" => %{"input_tokens" => 1, "output_tokens" => 2},
+          "input_transformations" => [
+            %{"type" => "thinking_dropped", "path" => "messages.1.content.0", "reason" => "r"}
+          ]
+        })
+      end)
+
+      log =
+        capture_log(fn ->
+          assert Anthropic.complete(@messages, options()) == {:error, :malformed_response}
+        end)
+
+      assert log =~ "replayed thinking block"
+      assert log =~ "messages.1.content.0"
+    end
+
     test "an empty list, or none, logs nothing about it" do
       for entries <- [[], nil] do
         transformed(entries)

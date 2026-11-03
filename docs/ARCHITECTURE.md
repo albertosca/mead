@@ -117,6 +117,7 @@ The route names a slot, and a slot holds a `{provider, options}` pair that imple
 * A turn routed to an empty slot fails with `:local_unavailable`, `:cloud_unavailable`, or `{:slot_unavailable, name}` for a named slot. It is never sent to another slot, and a resumed turn continues on the slot it was recorded on.
 * A slot with `tool_use: false` gets no tools: its turns are plain completions, for models such as Gemma 2 that reject any request carrying tools. The option is removed before the provider sees the options.
 * Only completed text turns are replayed to the provider as history.
+* Inside a turn's tool loop, the Anthropic provider's `thinking` and `redacted_thinking` blocks go back to the model verbatim and in order. A turn resumed after a crash sends its recorded answers without them, because they were signed against tools and a model the resumed turn may no longer have; answers asked for after the resume keep theirs.
 * A failed turn replies `{:error, {:failed, reason}}`.
 
 ### Streaming
