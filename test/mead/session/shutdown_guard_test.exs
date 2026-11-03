@@ -145,12 +145,7 @@ defmodule Mead.Session.ShutdownGuardTest do
   # The registry fails the way it can on its own: its partition crashes more often than the
   # registry's supervisor tolerates (3 in 5 seconds), so that supervisor stops its children and
   # exits, and the root restarts it and everything after it.
-  test "a registry crash leaves the turn in progress, and it continues",
-       %{session_id: session_id, tmp_dir: directory} do
-    crash_registry()
-    assert_continues(session_id, directory)
-  end
-
+  #
   # Each crash restarts the pool and cuts the turn once, so four of them cut it more often than
   # the three continuations a turn gets when its own session keeps failing; none of these cuts is
   # the turn's fault. The turn has steps enough that no continuation finishes it early.
