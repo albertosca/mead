@@ -17,11 +17,20 @@ defmodule Mead.Session.ShutdownGuardTest do
     await_root_restart_budget(2)
     previous_storage = Application.fetch_env(:mead, :storage)
     Application.put_env(:mead, :storage, directory: directory)
+    # A caller waits 5 s by default for its session to come back; under a load of 20 or more a
+    # root restart and the keeper's revival took longer, and the caller got :session_crashed.
+    previous_wait = Application.fetch_env(:mead, :restart_wait)
+    Application.put_env(:mead, :restart_wait, 30_000)
 
     on_exit(fn ->
       case previous_storage do
         {:ok, value} -> Application.put_env(:mead, :storage, value)
         :error -> Application.delete_env(:mead, :storage)
+      end
+
+      case previous_wait do
+        {:ok, value} -> Application.put_env(:mead, :restart_wait, value)
+        :error -> Application.delete_env(:mead, :restart_wait)
       end
     end)
 
@@ -29,7 +38,8 @@ defmodule Mead.Session.ShutdownGuardTest do
     on_exit(fn -> Mead.stop_session(session_id) end)
     input = {:checkpointed, self(), [:a, :b]}
     Task.start(fn -> Mead.submit_turn(session_id, input, client_turn_id: "key-1") end)
-    assert_receive {:handler_at, handler_pid, [:a]}
+    # The tree may still be coming back from the previous test's restart.
+    assert_receive {:handler_at, handler_pid, [:a]}, 15_000
 
     %{session_id: session_id, handler_pid: handler_pid}
   end
