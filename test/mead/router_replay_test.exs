@@ -371,4 +371,73 @@ defmodule Mead.RouterReplayTest do
 
     assert recorded_steps() == []
   end
+
+  describe "thinking blocks" do
+    @recorded_thinking %{type: :thinking, thinking: "", signature: "signature-recorded"}
+    @live_thinking %{type: :thinking, thinking: "private reasoning", signature: "signature-live"}
+
+    defp with_thinking({:ok, %{content: content} = answer}, blocks),
+      do: {:ok, %{answer | content: blocks ++ content}}
+
+    test "a live tool loop sends the answer back with its thinking, and keeps it out of the output" do
+      hub()
+
+      tool_step =
+        [{"t1", "files__read_file", %{"path" => "/a"}}]
+        |> FakeProvider.tool_step()
+        |> with_thinking([@live_thinking, %{type: :redacted_thinking, data: "opaque"}])
+
+      text_step = with_thinking(FakeProvider.text_step("done"), [@live_thinking])
+
+      assert Router.route([], "read /a", options(), slots([tool_step, text_step]), FakeHub) ==
+               {:ok, "done"}
+
+      assert_received {:provider_conversed, _first, _tools}
+      assert_received {:provider_conversed, second, _tools}
+
+      assert %{
+               role: :assistant,
+               content: [@live_thinking, %{type: :redacted_thinking, data: "opaque"} | _rest]
+             } = Enum.at(second, -2)
+    end
+
+    test "a resumed turn sends a recorded answer without its thinking, and a live one with it" do
+      hub()
+
+      recorded_step =
+        [{"t1", "files__read_file", %{"path" => "/a"}}]
+        |> FakeProvider.tool_step()
+        |> with_thinking([@recorded_thinking, %{type: :redacted_thinking, data: "old"}])
+
+      live_step =
+        [{"t2", "files__read_file", %{"path" => "/b"}}]
+        |> FakeProvider.tool_step()
+        |> with_thinking([@live_thinking])
+
+      steps = [{:route, :cloud, :forced}, response(recorded_step)]
+
+      assert Router.replay(
+               [],
+               "read /a",
+               steps,
+               options(),
+               slots([live_step, FakeProvider.text_step("done")]),
+               FakeHub
+             ) == {:ok, "done"}
+
+      assert_received {:provider_conversed, _after_replay, _tools}
+      assert_received {:provider_conversed, messages, _tools}
+
+      assert [recorded_content, live_content] =
+               for(%{role: :assistant, content: content} <- messages, do: content)
+
+      assert [%{type: :tool_use, id: "t1"}] = recorded_content
+      assert [@live_thinking, %{type: :tool_use, id: "t2"}] = live_content
+
+      assert Enum.any?(recorded_steps(), fn
+               {:provider_response, %{content: [@live_thinking | _rest]}} -> true
+               _other -> false
+             end)
+    end
+  end
 end

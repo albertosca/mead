@@ -51,7 +51,7 @@ defmodule Mead.Router do
   as unavailable when that slot is gone, without moving it to another slot. It goes on from those
   steps by position (some models reuse tool call ids
   across calls): recorded answers and results are used instead of asking again, and replayed
-  answers are not streamed again. A call recorded as started with no result is in doubt: a `:read`
+  answers are not streamed again. A replayed answer goes back to the model without its `thinking` and `redacted_thinking` blocks, which were signed against the tools and model of the run that made them; answers asked for after the replay keep theirs. A call recorded as started with no result is in doubt: a `:read`
   call runs again, and an `:effect` call never does, the model is told it may or may not have
   taken effect. Steps that do not fit are dropped and the turn goes on live from there. Before
   replaying, it waits for the MCP servers to reconnect (`Mead.MCP.Hub.await_ready/2`, at most
@@ -472,7 +472,7 @@ defmodule Mead.Router do
   # The next answer is the next recorded one, with the tool records that followed it, or a fresh
   # one, recorded before it is acted on. A replayed answer is not streamed again.
   defp next_response(_context, _messages, _progress, [{response, records} | rest]),
-    do: {{:ok, response}, records, rest}
+    do: {{:ok, without_thinking(response)}, records, rest}
 
   defp next_response(context, messages, progress, []) do
     case converse(context, messages, progress) do
@@ -483,6 +483,20 @@ defmodule Mead.Router do
       other ->
         {other, %{}, []}
     end
+  end
+
+  # A recorded answer goes back without its reasoning. Its thinking blocks were signed against the
+  # tools and the model of the run that made them, which a resumed turn may no longer have, and a
+  # block that fails that check is a 400 on an enforced account; dropping the oldest blocks is
+  # always accepted. The checkpoint keeps them, so the same history goes out after every crash.
+  defp without_thinking(%{content: content} = response) do
+    kept =
+      Enum.reject(
+        content,
+        &match?(%{type: type} when type in [:thinking, :redacted_thinking], &1)
+      )
+
+    %{response | content: kept}
   end
 
   defp loop(context, messages, progress, segments) do
