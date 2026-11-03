@@ -176,6 +176,19 @@ defmodule Mead.Provider.AnthropicStreamTest do
     assert Agent.get(counter, & &1) == 3
   end
 
+  test "a refused stream logs the type and message the API gave" do
+    plug = fn conn ->
+      error = %{"type" => "invalid_request_error", "message" => "Your credit balance is too low."}
+      conn |> Plug.Conn.put_status(400) |> Req.Test.json(%{"type" => "error", "error" => error})
+    end
+
+    log = capture_log(fn -> assert {{:error, {:http_status, 400}}, []} = collect(plug) end)
+
+    assert log =~ "HTTP 400"
+    assert log =~ "invalid_request_error"
+    assert log =~ "Your credit balance is too low."
+  end
+
   test "a stream that ends without message_stop is malformed" do
     body = start() <> block_start(0, %{"type" => "text", "text" => ""}) <> text_delta(0, "x")
     assert {{:error, :malformed_response}, ["x"]} = collect(serve(body, 20))
