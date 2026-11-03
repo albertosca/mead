@@ -12,6 +12,8 @@ defmodule Mead.Provider do
   @type block ::
           %{type: :text, text: String.t()}
           | %{type: :tool_use, id: String.t(), name: String.t(), input: map()}
+          | %{type: :thinking, thinking: String.t(), signature: String.t()}
+          | %{type: :redacted_thinking, data: String.t()}
           | %{
               type: :tool_result,
               tool_use_id: String.t(),

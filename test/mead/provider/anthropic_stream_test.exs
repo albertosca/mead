@@ -41,6 +41,54 @@ defmodule Mead.Provider.AnthropicStreamTest do
         "delta" => %{"type" => "input_json_delta", "partial_json" => json}
       })
 
+  defp thinking_delta(index, text),
+    do:
+      event("content_block_delta", %{
+        "type" => "content_block_delta",
+        "index" => index,
+        "delta" => %{"type" => "thinking_delta", "thinking" => text}
+      })
+
+  defp signature_delta(index, signature),
+    do:
+      event("content_block_delta", %{
+        "type" => "content_block_delta",
+        "index" => index,
+        "delta" => %{"type" => "signature_delta", "signature" => signature}
+      })
+
+  defp thinking_body(thinking_events) do
+    start() <>
+      block_start(0, %{"type" => "thinking", "thinking" => "", "signature" => ""}) <>
+      thinking_events <>
+      block_stop(0) <>
+      block_start(1, %{"type" => "redacted_thinking", "data" => "opaque"}) <>
+      block_stop(1) <>
+      block_start(2, %{"type" => "text", "text" => ""}) <>
+      text_delta(2, "Reading.") <>
+      block_stop(2) <>
+      block_start(3, %{"type" => "tool_use", "id" => "toolu_1", "name" => "files__read_file"}) <>
+      json_delta(3, ~s({"path": "/a"})) <> block_stop(3) <> finish("tool_use", 9)
+  end
+
+  defp plain_thinking_answer(conn) do
+    Req.Test.json(conn, %{
+      "content" => [
+        %{"type" => "thinking", "thinking" => "Let me check.", "signature" => "signature-one"},
+        %{"type" => "redacted_thinking", "data" => "opaque"},
+        %{"type" => "text", "text" => "Reading."},
+        %{
+          "type" => "tool_use",
+          "id" => "toolu_1",
+          "name" => "files__read_file",
+          "input" => %{"path" => "/a"}
+        }
+      ],
+      "stop_reason" => "tool_use",
+      "usage" => %{"input_tokens" => 11, "output_tokens" => 9}
+    })
+  end
+
   defp block_stop(index),
     do: event("content_block_stop", %{"type" => "content_block_stop", "index" => index})
 
@@ -145,6 +193,66 @@ defmodule Mead.Provider.AnthropicStreamTest do
     end
   end
 
+  test "thinking streams into the blocks of the plain body and never into a delta" do
+    {:ok, expected} = Anthropic.converse(@messages, @tools, options(&plain_thinking_answer/1))
+
+    assert Enum.map(expected.content, & &1.type) == [
+             :thinking,
+             :redacted_thinking,
+             :text,
+             :tool_use
+           ]
+
+    events =
+      thinking_delta(0, "Let me ") <>
+        thinking_delta(0, "check.") <> signature_delta(0, "signature-one")
+
+    for size <- [1, 5, 64, 100_000] do
+      assert {{:ok, ^expected}, ["Reading."]} = collect(serve(thinking_body(events), size))
+    end
+  end
+
+  test "a signature before the thinking text gives the same block" do
+    {:ok, expected} = Anthropic.converse(@messages, @tools, options(&plain_thinking_answer/1))
+
+    events =
+      signature_delta(0, "signature-") <>
+        thinking_delta(0, "Let me ") <>
+        signature_delta(0, "one") <> thinking_delta(0, "check.")
+
+    assert {{:ok, ^expected}, ["Reading."]} = collect(serve(thinking_body(events), 7))
+  end
+
+  test "a thinking start with a null or non-string field still takes the deltas" do
+    {:ok, expected} = Anthropic.converse(@messages, @tools, options(&plain_thinking_answer/1))
+
+    events =
+      thinking_delta(0, "Let me check.") <> signature_delta(0, "signature-one")
+
+    for start_fields <- [
+          %{"signature" => nil},
+          %{"thinking" => nil, "signature" => nil},
+          %{"thinking" => 5}
+        ] do
+      body =
+        String.replace(
+          thinking_body(events),
+          Jason.encode!(%{"type" => "thinking", "thinking" => "", "signature" => ""}),
+          Jason.encode!(Map.merge(%{"type" => "thinking"}, start_fields)),
+          global: false
+        )
+
+      assert {{:ok, ^expected}, ["Reading."]} = collect(serve(body, 1_000))
+    end
+  end
+
+  test "a streamed thinking block that never got its signature is malformed" do
+    events = thinking_delta(0, "Let me check.")
+
+    assert {{:error, :malformed_response}, ["Reading."]} =
+             collect(serve(thinking_body(events), 1_000))
+  end
+
   test "a max_tokens stop is reported" do
     body =
       start() <>
@@ -242,5 +350,31 @@ defmodule Mead.Provider.AnthropicStreamTest do
   test "bad options are refused before the key is used" do
     assert {:error, :invalid_options} =
              Anthropic.converse_stream(@messages, [], %{api_key: "sk-secret"}, fn _text -> :ok end)
+  end
+
+  test "input_transformations on message_start is logged" do
+    start_with_entry =
+      event("message_start", %{
+        "type" => "message_start",
+        "message" => %{
+          "usage" => %{"input_tokens" => 11, "output_tokens" => 1},
+          "input_transformations" => [
+            %{
+              "type" => "thinking_dropped",
+              "path" => "messages.1.content.0",
+              "reason" => "prefix_binding_mismatch"
+            }
+          ]
+        }
+      })
+
+    body =
+      start_with_entry <>
+        block_start(0, %{"type" => "text", "text" => ""}) <>
+        text_delta(0, "ok") <> block_stop(0) <> finish("end_turn", 2)
+
+    log = capture_log(fn -> assert {{:ok, _result}, ["ok"]} = collect(serve(body, 1_000)) end)
+    assert log =~ "replayed thinking block"
+    assert log =~ "messages.1.content.0"
   end
 end
