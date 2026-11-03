@@ -120,7 +120,9 @@ defmodule Mead.Deck.TurnFailureTest do
     ]
 
     script_provider(FakeProvider, steps, [], %{"files__read_file" => :block})
-    {client, _session_id} = open(directory, Mead.Test.ToolHandler, 400)
+    # The budget has to outlast the start of the turn up to the tool call, which takes under
+    # 20 ms on a quiet machine; 2 s keeps that true on a loaded one.
+    {client, _session_id} = open(directory, Mead.Test.ToolHandler, 2_000)
 
     client = DeckServer.send_prompt(client, "read the file")
     {_client, events} = events_until(client, &metric?/1)

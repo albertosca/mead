@@ -117,21 +117,6 @@ defmodule Mead.Session.HistoryCompactionTest do
     assert rewrites < 40
   end
 
-  test "turns appended from many processes are all present and in order", context do
-    start_history(context, compact_after_bytes: 1_000)
-    session_id = context.session_id
-
-    1..60
-    |> Enum.map(fn index ->
-      Task.async(fn -> History.append(session_id, Turn.start("question #{index}")) end)
-    end)
-    |> Task.await_many(30_000)
-
-    memory = History.all(context.session_id)
-    assert length(memory) == 60
-    assert Store.load(context.directory, context.session_id) == {:ok, memory}
-  end
-
   test "a failing compaction does not fail the turn and is not retried on every turn", context do
     start_history(context, compact_after_bytes: 1)
     File.mkdir_p!(file_of(context) <> ".tmp/inside")

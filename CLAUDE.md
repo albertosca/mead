@@ -31,6 +31,7 @@ Welcome! This document provides complete operational guidelines and technical co
 5. **Testing Discipline:**
    * All features and refactorings must be verified with automated tests (`mix test`).
    * Never claim a task is complete without running verification commands and observing a green baseline.
+   * Run the full suite on a quiet machine: check `uptime` first and wait until the one-minute load average is below 10. Many tests wait on real deadlines (turn budgets, `assert_receive`, `wait_until`), and with a load above about 14 from other processes each run fails a different one of them; such a failure is not a regression until it repeats on a quiet machine.
 
 ---
 
