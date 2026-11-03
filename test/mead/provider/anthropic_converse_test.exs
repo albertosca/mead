@@ -121,7 +121,7 @@ defmodule Mead.Provider.AnthropicConverseTest do
     plug =
       reply(%{
         "content" => [
-          %{"type" => "thinking", "thinking" => "..."},
+          %{"type" => "future_block", "payload" => "..."},
           %{"type" => "text", "text" => "hi"}
         ],
         "usage" => @usage

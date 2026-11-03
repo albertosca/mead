@@ -18,7 +18,7 @@ defmodule Mead.Provider.Anthropic do
 
   `converse_stream/4` is `converse/3` over server-sent events: it calls `on_delta` with each text fragment as it arrives and returns the same result, built by the same parser, so a stream and the equivalent plain body cannot disagree.
 
-  `converse/3` also sends `tools` (omitted from the request when the list is empty) and returns the blocks of the answer; `complete/2` is built on it and keeps returning the joined text. Blocks other than text and tool_use are dropped.
+  `converse/3` also sends `tools` (omitted from the request when the list is empty) and returns the blocks of the answer; `complete/2` is built on it and keeps returning the joined text. Blocks of type thinking and redacted_thinking are kept verbatim and in order, because the model gets them back in the tool loop and the API checks each one against what preceded it; one that cannot be replayed makes the answer `:malformed_response`, and so does an answer with no text and no tool_use block. Other block types are dropped.
 
   Requests are retried at most twice, and only after HTTP 429 or a 5xx status. A timeout or a
   transport error is never retried. The key travels only in the request header and is never part
@@ -233,10 +233,10 @@ defmodule Mead.Provider.Anthropic do
 
   defp parse(%Req.Response{body: %{"content" => content, "usage" => usage} = body})
        when is_list(content) do
-    blocks = parse_blocks(content)
     stop_reason = stop_reason(Map.get(body, "stop_reason"))
 
-    with [_ | _] <- blocks,
+    with {:ok, blocks} <- parse_blocks(content),
+         true <- Enum.any?(blocks, &(&1.type in [:text, :tool_use])),
          true <- stop_reason != :tool_use or Enum.any?(blocks, &(&1.type == :tool_use)),
          %{"input_tokens" => input_tokens, "output_tokens" => output_tokens}
          when is_integer(input_tokens) and is_integer(output_tokens) <- usage do
@@ -257,20 +257,43 @@ defmodule Mead.Provider.Anthropic do
   defp stop_reason("max_tokens"), do: :max_tokens
   defp stop_reason(_other), do: :end_turn
 
-  # Blocks of any other type (thinking, for one) are not requested and are left out.
+  # Thinking blocks are kept verbatim and in order: the model gets them back in the tool loop, and
+  # the API checks each one against everything sent before it. One it cannot replay makes the
+  # whole answer malformed, since dropping only that block would leave a gap the check refuses.
+  # Blocks of any other type are not requested and are left out.
   defp parse_blocks(content) do
-    Enum.flat_map(content, fn
-      %{"type" => "text", "text" => text} when is_binary(text) ->
-        [%{type: :text, text: text}]
-
-      %{"type" => "tool_use", "id" => id, "name" => name, "input" => input}
-      when is_binary(id) and is_binary(name) and is_map(input) ->
-        [%{type: :tool_use, id: id, name: name, input: input}]
-
-      _other ->
-        []
+    content
+    |> Enum.reduce_while({:ok, []}, fn block, {:ok, blocks_reversed} ->
+      case parse_block(block) do
+        :skip -> {:cont, {:ok, blocks_reversed}}
+        :malformed -> {:halt, :malformed}
+        parsed -> {:cont, {:ok, [parsed | blocks_reversed]}}
+      end
     end)
+    |> case do
+      {:ok, blocks_reversed} -> {:ok, Enum.reverse(blocks_reversed)}
+      :malformed -> :malformed
+    end
   end
+
+  defp parse_block(%{"type" => "text", "text" => text}) when is_binary(text),
+    do: %{type: :text, text: text}
+
+  defp parse_block(%{"type" => "tool_use", "id" => id, "name" => name, "input" => input})
+       when is_binary(id) and is_binary(name) and is_map(input),
+       do: %{type: :tool_use, id: id, name: name, input: input}
+
+  defp parse_block(%{"type" => "thinking", "thinking" => thinking, "signature" => signature})
+       when is_binary(thinking) and is_binary(signature) and signature != "",
+       do: %{type: :thinking, thinking: thinking, signature: signature}
+
+  defp parse_block(%{"type" => "redacted_thinking", "data" => data}) when is_binary(data),
+    do: %{type: :redacted_thinking, data: data}
+
+  defp parse_block(%{"type" => type}) when type in ["thinking", "redacted_thinking"],
+    do: :malformed
+
+  defp parse_block(_other), do: :skip
 
   # --- streaming ---------------------------------------------------------------------------------
   #
@@ -341,6 +364,15 @@ defmodule Mead.Provider.Anthropic do
         %{"type" => "tool_use"} = tool ->
           Map.put(Map.take(tool, ["type", "id", "name"]), "json", "")
 
+        %{"type" => "thinking"} = thinking ->
+          Map.merge(
+            %{"thinking" => "", "signature" => ""},
+            Map.take(thinking, ["type", "thinking", "signature"])
+          )
+
+        %{"type" => "redacted_thinking"} = redacted ->
+          Map.take(redacted, ["type", "data"])
+
         other ->
           %{"type" => Map.get(other, "type", "unknown")}
       end
@@ -358,6 +390,16 @@ defmodule Mead.Provider.Anthropic do
       {%{"type" => "tool_use"} = block, %{"type" => "input_json_delta", "partial_json" => json}}
       when is_binary(json) ->
         put_block(state, index, %{block | "json" => block["json"] <> json})
+
+      {%{"type" => "thinking", "thinking" => thinking} = block,
+       %{"type" => "thinking_delta", "thinking" => text}}
+      when is_binary(thinking) and is_binary(text) ->
+        put_block(state, index, %{block | "thinking" => thinking <> text})
+
+      {%{"type" => "thinking", "signature" => signature} = block,
+       %{"type" => "signature_delta", "signature" => more}}
+      when is_binary(signature) and is_binary(more) ->
+        put_block(state, index, %{block | "signature" => signature <> more})
 
       _ignored ->
         state

@@ -276,6 +276,128 @@ defmodule Mead.Provider.AnthropicTest do
     end
   end
 
+  describe "thinking blocks" do
+    defp answer(content, stop_reason \\ "tool_use") do
+      Req.Test.stub(__MODULE__, fn conn ->
+        Req.Test.json(conn, %{
+          "content" => content,
+          "stop_reason" => stop_reason,
+          "usage" => %{"input_tokens" => 1, "output_tokens" => 2}
+        })
+      end)
+    end
+
+    @tool_use %{
+      "type" => "tool_use",
+      "id" => "toolu_1",
+      "name" => "files__read_file",
+      "input" => %{"path" => "/a"}
+    }
+
+    test "are kept verbatim and in order with text and tool use" do
+      answer([
+        %{"type" => "thinking", "thinking" => "", "signature" => "signature-one"},
+        %{"type" => "text", "text" => "Reading."},
+        %{"type" => "redacted_thinking", "data" => "opaque"},
+        @tool_use,
+        %{"type" => "thinking", "thinking" => "Then the second.", "signature" => "signature-two"},
+        Map.put(@tool_use, "id", "toolu_2")
+      ])
+
+      assert {:ok, %{content: content, stop_reason: :tool_use}} =
+               Anthropic.converse(@messages, [], options())
+
+      assert content == [
+               %{type: :thinking, thinking: "", signature: "signature-one"},
+               %{type: :text, text: "Reading."},
+               %{type: :redacted_thinking, data: "opaque"},
+               %{
+                 type: :tool_use,
+                 id: "toolu_1",
+                 name: "files__read_file",
+                 input: %{"path" => "/a"}
+               },
+               %{type: :thinking, thinking: "Then the second.", signature: "signature-two"},
+               %{
+                 type: :tool_use,
+                 id: "toolu_2",
+                 name: "files__read_file",
+                 input: %{"path" => "/a"}
+               }
+             ]
+    end
+
+    test "a thinking block without a signature, or a redacted one without data, is malformed" do
+      for broken <- [
+            %{"type" => "thinking", "thinking" => "x"},
+            %{"type" => "thinking", "thinking" => "x", "signature" => ""},
+            %{"type" => "thinking", "thinking" => "x", "signature" => nil},
+            %{"type" => "thinking", "signature" => "signature-one"},
+            %{"type" => "redacted_thinking"},
+            %{"type" => "redacted_thinking", "data" => 7}
+          ] do
+        answer([broken, %{"type" => "text", "text" => "hi"}], "end_turn")
+
+        assert Anthropic.converse(@messages, [], options()) == {:error, :malformed_response}
+      end
+    end
+
+    test "an answer holding only thinking, with no text and no tool use, is malformed" do
+      answer(
+        [
+          %{"type" => "thinking", "thinking" => "", "signature" => "signature-one"},
+          %{"type" => "redacted_thinking", "data" => "opaque"}
+        ],
+        "end_turn"
+      )
+
+      assert Anthropic.converse(@messages, [], options()) == {:error, :malformed_response}
+    end
+
+    test "complete/2 still returns only the text" do
+      answer(
+        [
+          %{"type" => "thinking", "thinking" => "private reasoning", "signature" => "s"},
+          %{"type" => "text", "text" => "hi"}
+        ],
+        "end_turn"
+      )
+
+      assert {:ok, %{text: "hi"}} = Anthropic.complete(@messages, options())
+    end
+
+    test "go back to the API in the shape it sent them" do
+      test_pid = self()
+
+      Req.Test.stub(__MODULE__, fn conn ->
+        {:ok, raw_body, conn} = Plug.Conn.read_body(conn)
+        send(test_pid, {:request_body, JSON.decode!(raw_body)})
+        Req.Test.json(conn, success_body())
+      end)
+
+      messages = [
+        %{role: :user, content: "read /a"},
+        %{
+          role: :assistant,
+          content: [
+            %{type: :thinking, thinking: "", signature: "signature-one"},
+            %{type: :redacted_thinking, data: "opaque"}
+          ]
+        },
+        %{role: :user, content: "go on"}
+      ]
+
+      Anthropic.converse(messages, [], options())
+
+      assert_received {:request_body, %{"messages" => [_first, assistant, _last]}}
+
+      assert assistant["content"] == [
+               %{"type" => "thinking", "thinking" => "", "signature" => "signature-one"},
+               %{"type" => "redacted_thinking", "data" => "opaque"}
+             ]
+    end
+  end
+
   @tag :live
   test "talks to the real API" do
     assert {:ok, %{text: text, usage: %{input_tokens: input_tokens}}} =
