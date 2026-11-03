@@ -43,7 +43,7 @@ defmodule Mead.Deck.StreamingTest do
   defp open(directory) do
     server =
       DeckServer.start(directory, [],
-        # Five thousand fragments are five thousand file writes; a slow disk or a loaded machine must not end the turn.
+        # A thousand fragments are a thousand synced writes; a slow disk or a loaded machine must not end the turn.
         session_options: [handler: Mead.Test.ToolHandler, turn_timeout: 150_000]
       )
 
@@ -116,24 +116,29 @@ defmodule Mead.Deck.StreamingTest do
     refute Enum.any?(history, &(&1.output == "fake reply"))
   end
 
-  # Under a loaded machine this takes up to ten times its idle five seconds.
+  # Every fragment is synced to disk before it is sent (F_FULLFSYNC on macOS). Under a load of 30,
+  # five thousand of them took longer than the 150 s turn budget, and the turn failed with what had
+  # streamed by then; no count of the code depends on the number, so a thousand keep the test.
   @tag timeout: 180_000
-  test "five thousand fragments keep the sequence gapless and the log readable",
+  test "a thousand fragments keep the sequence gapless and the log readable",
        %{directory: directory} do
-    text = String.duplicate("x", 5_000)
+    text = String.duplicate("x", 1_000)
     script_turn(StreamingProvider, text, fragment_size: 1)
     {client, session_id} = open(directory)
 
     client = DeckServer.send_prompt(client, "go")
     {client, events} = events_until_turn_end(client)
 
-    assert length(delta_texts(events)) == 5_000
+    refute Enum.find(events, &(&1["type"] == "turn.failed")),
+           "the turn failed after #{length(delta_texts(events))} fragments"
+
+    assert length(delta_texts(events)) == 1_000
     assert_gapless(events)
     WebSocketClient.close(client)
 
     {reconnected, _session_id} = reconnect(directory, session_id)
     {_reconnected, replayed} = replay_all(reconnected)
-    assert length(delta_texts(replayed)) == 5_000
+    assert length(delta_texts(replayed)) == 1_000
   end
 
   defp reconnect(directory, session_id) do
