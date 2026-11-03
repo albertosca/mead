@@ -328,4 +328,30 @@ defmodule Mead.Provider.AnthropicStreamTest do
     assert {:error, :invalid_options} =
              Anthropic.converse_stream(@messages, [], %{api_key: "sk-secret"}, fn _text -> :ok end)
   end
+
+  test "input_transformations on message_start is logged" do
+    start_with_entry =
+      event("message_start", %{
+        "type" => "message_start",
+        "message" => %{
+          "usage" => %{"input_tokens" => 11, "output_tokens" => 1},
+          "input_transformations" => [
+            %{
+              "type" => "thinking_dropped",
+              "path" => "messages.1.content.0",
+              "reason" => "prefix_binding_mismatch"
+            }
+          ]
+        }
+      })
+
+    body =
+      start_with_entry <>
+        block_start(0, %{"type" => "text", "text" => ""}) <>
+        text_delta(0, "ok") <> block_stop(0) <> finish("end_turn", 2)
+
+    log = capture_log(fn -> assert {{:ok, _result}, ["ok"]} = collect(serve(body, 1_000)) end)
+    assert log =~ "replayed thinking block"
+    assert log =~ "messages.1.content.0"
+  end
 end

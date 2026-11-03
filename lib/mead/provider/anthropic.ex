@@ -15,6 +15,7 @@ defmodule Mead.Provider.Anthropic do
       asks for more with `retry-after`; defaults to 2 seconds.
     * `:req_options` - extra options merged into the `Req` request, used by tests to stub the
       network.
+    * `:block_binding` - `:drop_block` or `:error`; absent by default.
 
   `converse_stream/4` is `converse/3` over server-sent events: it calls `on_delta` with each text fragment as it arrives and returns the same result, built by the same parser, so a stream and the equivalent plain body cannot disagree.
 
@@ -26,6 +27,8 @@ defmodule Mead.Provider.Anthropic do
 
   A refused request still returns `{:http_status, status}`, and the type and message the API gave
   (such as a credit balance that is too low) go to a warning in the log, cut to 500 characters.
+
+  `:block_binding` (`:drop_block` or `:error`) sends the preserved-thinking beta header `thinking-binding-controls-2026-08-01` and sets `thinking.block_binding.prefix_mismatch_behavior`; it is off by default because on an account that is not enforced it turns the check on. Whenever a response reports `input_transformations`, the type, reason and path of each entry go to a warning.
   """
 
   @behaviour Mead.Provider
@@ -43,6 +46,8 @@ defmodule Mead.Provider.Anthropic do
   @default_maximum_retry_delay 2_000
   @default_api_key_file "~/.config/anthropic/api.env"
   @api_key_variable "ANTHROPIC_API_KEY"
+  @block_binding_beta "thinking-binding-controls-2026-08-01"
+  @block_bindings [:drop_block, :error]
 
   @impl true
   def complete(messages, options) do
@@ -76,11 +81,17 @@ defmodule Mead.Provider.Anthropic do
   # A map or any other shape would crash deep inside `Keyword` with the key among the arguments of
   # the stacktrace, which the session stores and replies. Refuse it before the key is read.
   defp validate_options(options) do
-    if Keyword.keyword?(options) and Keyword.keyword?(Keyword.get(options, :req_options, [])) do
+    if Keyword.keyword?(options) and Keyword.keyword?(Keyword.get(options, :req_options, [])) and
+         valid_block_binding?(options) do
       :ok
     else
       {:error, :invalid_options}
     end
+  end
+
+  defp valid_block_binding?(options) do
+    not Keyword.has_key?(options, :block_binding) or
+      Keyword.fetch!(options, :block_binding) in @block_bindings
   end
 
   defp fetch_api_key(options) do
@@ -145,12 +156,15 @@ defmodule Mead.Provider.Anthropic do
       }
       |> put_tools(tools)
       |> put_stream(stream?)
+      |> put_block_binding(Keyword.get(options, :block_binding))
 
     request_options =
       [
         url: @endpoint,
         json: body,
-        headers: [{"x-api-key", api_key}, {"anthropic-version", @api_version}],
+        headers:
+          [{"x-api-key", api_key}, {"anthropic-version", @api_version}] ++
+            block_binding_headers(Keyword.get(options, :block_binding)),
         receive_timeout: Keyword.get(options, :receive_timeout, @default_receive_timeout),
         retry: &retry?(&1, &2, maximum_retry_delay(options)),
         max_retries: 2
@@ -219,6 +233,19 @@ defmodule Mead.Provider.Anthropic do
   defp put_stream(body, true), do: Map.put(body, :stream, true)
   defp put_stream(body, false), do: body
 
+  # Opt-in, because on an account that is not enforced yet the field turns the check on.
+  defp put_block_binding(body, nil), do: body
+
+  defp put_block_binding(body, behavior) do
+    Map.put(body, :thinking, %{
+      type: "adaptive",
+      block_binding: %{prefix_mismatch_behavior: Atom.to_string(behavior)}
+    })
+  end
+
+  defp block_binding_headers(nil), do: []
+  defp block_binding_headers(_behavior), do: [{"anthropic-beta", @block_binding_beta}]
+
   defp put_tools(body, []), do: body
   defp put_tools(body, tools), do: Map.put(body, :tools, Enum.map(tools, &encode_tool/1))
 
@@ -233,6 +260,7 @@ defmodule Mead.Provider.Anthropic do
 
   defp parse(%Req.Response{body: %{"content" => content, "usage" => usage} = body})
        when is_list(content) do
+    warn_transformations(Map.get(body, "input_transformations"))
     stop_reason = stop_reason(Map.get(body, "stop_reason"))
 
     with {:ok, blocks} <- parse_blocks(content),
@@ -252,6 +280,29 @@ defmodule Mead.Provider.Anthropic do
   end
 
   defp parse(_response), do: {:error, :malformed_response}
+
+  # The API reports here each replayed thinking block it dropped or let through unchecked. Only
+  # the entry's type, reason and path are logged: they name a position, never any content.
+  defp warn_transformations([_ | _] = entries) do
+    described = Enum.map_join(entries, "; ", &describe_transformation/1)
+
+    Logger.warning(
+      "Anthropic reported #{length(entries)} replayed thinking block(s) changed: #{described}"
+    )
+  end
+
+  defp warn_transformations(_none), do: :ok
+
+  defp describe_transformation(%{} = entry) do
+    Enum.map_join(["type", "reason", "path"], " ", fn key ->
+      case Map.get(entry, key) do
+        value when is_binary(value) -> String.slice(value, 0, 100)
+        _missing -> "?"
+      end
+    end)
+  end
+
+  defp describe_transformation(_not_a_map), do: "?"
 
   defp stop_reason("tool_use"), do: :tool_use
   defp stop_reason("max_tokens"), do: :max_tokens
@@ -328,6 +379,7 @@ defmodule Mead.Provider.Anthropic do
       parser: Mead.Provider.ServerSentEvents.new(),
       blocks: %{},
       input_tokens: nil,
+      input_transformations: nil,
       output_tokens: nil,
       stop_reason: nil,
       completed: false,
@@ -347,7 +399,11 @@ defmodule Mead.Provider.Anthropic do
   end
 
   defp fold("message_start", payload, state, _on_delta) do
-    %{state | input_tokens: get_in(payload, ["message", "usage", "input_tokens"])}
+    %{
+      state
+      | input_tokens: get_in(payload, ["message", "usage", "input_tokens"]),
+        input_transformations: get_in(payload, ["message", "input_transformations"])
+    }
   end
 
   defp fold(
@@ -447,6 +503,7 @@ defmodule Mead.Provider.Anthropic do
 
     %{
       "content" => content,
+      "input_transformations" => state.input_transformations,
       "stop_reason" => state.stop_reason,
       "usage" => %{"input_tokens" => state.input_tokens, "output_tokens" => state.output_tokens}
     }

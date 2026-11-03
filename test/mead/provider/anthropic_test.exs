@@ -398,6 +398,120 @@ defmodule Mead.Provider.AnthropicTest do
     end
   end
 
+  describe "block binding" do
+    defp capture_request do
+      test_pid = self()
+
+      Req.Test.stub(__MODULE__, fn conn ->
+        {:ok, raw_body, conn} = Plug.Conn.read_body(conn)
+        beta = Plug.Conn.get_req_header(conn, "anthropic-beta")
+        send(test_pid, {:request, beta, JSON.decode!(raw_body)})
+        Req.Test.json(conn, success_body())
+      end)
+    end
+
+    test ":drop_block sends the beta header and the field" do
+      capture_request()
+      assert {:ok, _reply} = Anthropic.complete(@messages, options(block_binding: :drop_block))
+      assert_received {:request, ["thinking-binding-controls-2026-08-01"], body}
+
+      assert body["thinking"] == %{
+               "type" => "adaptive",
+               "block_binding" => %{"prefix_mismatch_behavior" => "drop_block"}
+             }
+    end
+
+    test ":error sends error as the behavior" do
+      capture_request()
+      assert {:ok, _reply} = Anthropic.complete(@messages, options(block_binding: :error))
+      assert_received {:request, ["thinking-binding-controls-2026-08-01"], body}
+      assert body["thinking"]["block_binding"] == %{"prefix_mismatch_behavior" => "error"}
+    end
+
+    test "absent, the request has neither the header nor the field" do
+      capture_request()
+      assert {:ok, _reply} = Anthropic.complete(@messages, options())
+      assert_received {:request, [], body}
+      refute Map.has_key?(body, "thinking")
+    end
+
+    test "any other value is invalid options and sends nothing" do
+      capture_request()
+
+      for value <- [:drop, "drop_block", true, nil] do
+        assert Anthropic.complete(@messages, options(block_binding: value)) ==
+                 {:error, :invalid_options}
+      end
+
+      refute_received {:request, _beta, _body}
+    end
+  end
+
+  describe "input_transformations" do
+    defp transformed(entries) do
+      Req.Test.stub(__MODULE__, fn conn ->
+        Req.Test.json(conn, Map.put(success_body(), "input_transformations", entries))
+      end)
+    end
+
+    test "a non-empty list logs type, reason and path, and the answer is unchanged" do
+      transformed([
+        %{
+          "type" => "thinking_dropped",
+          "path" => "messages.1.content.0",
+          "reason" => "prefix_binding_mismatch"
+        }
+      ])
+
+      log =
+        capture_log(fn ->
+          assert {:ok, %{text: "hi there"}} = Anthropic.complete(@messages, options())
+        end)
+
+      assert log =~ "replayed thinking block"
+      assert log =~ "thinking_dropped"
+      assert log =~ "prefix_binding_mismatch"
+      assert log =~ "messages.1.content.0"
+      refute log =~ @sentinel_key
+    end
+
+    test "an entry never logs a field other than type, reason and path" do
+      transformed([
+        %{
+          "type" => "thinking_dropped",
+          "path" => "messages.1.content.0",
+          "reason" => "prefix_binding_mismatch",
+          "signature" => "SIGNATURE-MUST-NOT-LEAK",
+          "thinking" => "REASONING-MUST-NOT-LEAK"
+        }
+      ])
+
+      log = capture_log(fn -> Anthropic.complete(@messages, options()) end)
+
+      assert log =~ "thinking_dropped"
+      refute log =~ "MUST-NOT-LEAK"
+    end
+
+    test "an empty list, or none, logs nothing about it" do
+      for entries <- [[], nil] do
+        transformed(entries)
+        log = capture_log(fn -> Anthropic.complete(@messages, options()) end)
+        refute log =~ "replayed thinking block"
+      end
+    end
+
+    test "an entry that is not a map is logged without crashing" do
+      transformed(["unexpected"])
+
+      log =
+        capture_log(fn ->
+          assert {:ok, %{text: "hi there"}} = Anthropic.complete(@messages, options())
+        end)
+
+      assert log =~ "replayed thinking block"
+    end
+  end
+
   @tag :live
   test "talks to the real API" do
     assert {:ok, %{text: text, usage: %{input_tokens: input_tokens}}} =
