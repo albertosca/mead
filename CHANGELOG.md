@@ -8,10 +8,12 @@
 * `Mead.Router.routes/0`, the routes a turn may ask for, read from the config when called.
 * The slot option `tool_use: false`, which gives that slot no tools, for models such as Gemma 2 that reject any request carrying tools.
 * The `route` enum of the MCP `submit_turn` tool now lists the configured slots, and an unknown route name is refused without becoming an atom.
+* Provider option `block_binding: :drop_block | :error` on `Mead.Provider.Anthropic` for preserved-thinking checks (beta header `thinking-binding-controls-2026-08-01`), off by default, and a warning naming the type, reason and path of every `input_transformations` entry a response reports.
 * An opt-in test of `Mead.Provider.Anthropic` against the real API (`mix test --include live test/mead/live_anthropic_test.exs`, on `claude-haiku-5-5`): a plain answer, a tool request, a stream, a refused key, and a routed turn through the whole tool loop.
 
 ### Changed
 
+* The Anthropic provider keeps the `thinking` and `redacted_thinking` blocks of an answer, verbatim and in order, so the model gets its reasoning back between tool calls; a thinking block without a signature, or an answer with no text and no tool use, is `:malformed_response`. A turn resumed after a crash sends its recorded answers without those blocks, since they were signed against tools and a model the resumed turn may no longer have.
 * A request the Anthropic API refuses still returns `{:http_status, status}`, and now also logs a warning with the type and message the API gave (cut to 500 characters), streamed or not, so a 400 for an empty credit balance no longer reads the same as a malformed request.
 
 ## 0.3.0 — 2026-11-01

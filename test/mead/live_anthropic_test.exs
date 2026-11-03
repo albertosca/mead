@@ -3,6 +3,8 @@ defmodule Mead.LiveAnthropicTest do
   # request and spends a fraction of a cent: mix test --include live test/mead/live_anthropic_test.exs
   use ExUnit.Case, async: true
 
+  import ExUnit.CaptureLog
+
   alias Mead.Provider.Anthropic
   alias Mead.Router
   alias Mead.Test.FakeHub
@@ -92,6 +94,58 @@ defmodule Mead.LiveAnthropicTest do
     assert {:ok, text} = Router.route([], prompt, [route: :cloud], slots, FakeHub)
     assert_received {:tool_called, "files__read_file", %{"path" => _path}, _options}
     assert text =~ ~r/mango/i
+  end
+
+  test "a routed tool loop sends its thinking back and the API changes none of it" do
+    FakeHub.configure(
+      test_pid: self(),
+      tools: [@tool],
+      results: %{
+        "files__read_file" =>
+          {:ok,
+           %{content: "Order A: 17 boxes. Order B: 26 boxes. Order C: 9 boxes.", is_error: false}}
+      }
+    )
+
+    test_pid = self()
+
+    checkpoint = fn step ->
+      send(test_pid, {:step, step})
+      :ok
+    end
+
+    slots = [local: nil, cloud: {Anthropic, Keyword.put(@options, :block_binding, :drop_block)}]
+
+    # Adaptive thinking skips a request this simple unless asked, and the test needs a block.
+    prompt =
+      "Before using any tool, think carefully about which file to read. Then use " <>
+        "files__read_file to read orders.txt and report the total number of boxes and the " <>
+        "average per order."
+
+    log =
+      capture_log(fn ->
+        assert {:ok, text} =
+                 Router.route([], prompt, [route: :cloud, checkpoint: checkpoint], slots, FakeHub)
+
+        assert text =~ "52"
+      end)
+
+    answers = for {:step, {:provider_response, %{content: content}}} <- steps([]), do: content
+
+    assert [first | [_ | _]] = answers
+
+    assert Enum.any?(first, &match?(%{type: :thinking}, &1)),
+           "the first answer held no thinking block, so the replay proved nothing"
+
+    refute log =~ "replayed thinking block"
+  end
+
+  defp steps(collected) do
+    receive do
+      {:step, _step} = message -> steps([message | collected])
+    after
+      0 -> Enum.reverse(collected)
+    end
   end
 
   defp collect_deltas(deltas_reversed) do
