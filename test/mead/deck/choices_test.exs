@@ -42,9 +42,19 @@ defmodule Mead.Deck.ChoicesTest do
     assert is_map(envelope), "expected an event before #{type}, got #{inspect(envelope)}"
 
     cond do
-      envelope["type"] == "heartbeat" -> events_until(client, type, collected)
-      envelope["type"] == type -> {client, collected ++ [envelope]}
-      true -> events_until(client, type, collected ++ [envelope])
+      envelope["type"] == "heartbeat" ->
+        events_until(client, type, collected)
+
+      envelope["type"] == type ->
+        {client, collected ++ [envelope]}
+
+      # No test here expects a failed turn, and the event it waits for never follows one: the
+      # heartbeats would keep the wait alive until the test timeout and hide the reason.
+      envelope["type"] == "turn.failed" ->
+        flunk("the turn failed before #{type}: #{inspect(envelope["payload"])}")
+
+      true ->
+        events_until(client, type, collected ++ [envelope])
     end
   end
 
@@ -241,11 +251,14 @@ defmodule Mead.Deck.ChoicesTest do
     assert List.last(answer)["payload"]["text"] == "no choice expired"
   end
 
+  # The budget must outlast the start of the turn up to the choice, which pauses the clock; under
+  # a load of 16 to 20 that took more than 200 ms, the turn timed out before the pause, and the
+  # test waited for an answer that never came. The wait stays well past the budget.
   test "the turn clock is paused while a choice waits", %{directory: directory} do
-    {client, _session_id} = connect(start_server(directory, [], 200))
+    {client, _session_id} = connect(start_server(directory, [], 1_000))
     {client, requested} = ask(client)
 
-    Process.sleep(450)
+    Process.sleep(1_500)
     client = choose(client, requested["request_id"], "a")
 
     {_client, answer} = events_until(client, "text.delta")
