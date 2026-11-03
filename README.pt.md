@@ -48,7 +48,7 @@ Persistência, hub e servidor MCP e o endpoint do deck são ligados cada um por 
 </picture>
 
 - **Sessões.** Um grupo de processos supervisionado por conversa; a falha de um turno fica nessa conversa.
-- **Router.** Uma função sem estado que classifica cada turno como local ou nuvem. `route: :local` ou `route: :cloud` sobrescreve.
+- **Router.** Uma função sem estado que classifica cada turno como local ou nuvem. `route: :local`, `route: :cloud` ou o nome de qualquer outro slot configurado (como um segundo modelo local) sobrescreve.
 - **MCP.** Um hub cliente para os servidores que você configurar e um servidor que expõe sessões como nove ferramentas.
 - **Ledger.** Tokens, chamadas de ferramenta e latência por sessão e por rota, com journal em disco.
 

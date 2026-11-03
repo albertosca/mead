@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+* Named router slots: besides `local` and `cloud`, `config :mead, :router, slots:` can hold any other slot, such as `gemma: {Mead.Provider.Ollama, model: "gemma2:2b", tool_use: false}`, and `Mead.submit_turn/3` reaches it with `route: :gemma`. `route: :auto` still picks only `local` or `cloud`. A missing named slot fails with `{:slot_unavailable, name}`, and a resumed turn continues on the slot it was recorded on. See [Named slots](https://github.com/albertosca/mead/blob/main/guide/en/router.md#named-slots).
+* `Mead.Router.routes/0`, the routes a turn may ask for, read from the config when called.
+* The slot option `tool_use: false`, which gives that slot no tools, for models such as Gemma 2 that reject any request carrying tools.
+* The `route` enum of the MCP `submit_turn` tool now lists the configured slots, and an unknown route name is refused without becoming an atom.
+
 ## 0.3.0 — 2026-11-01
 
 Turns are durable: a turn survives a crash of its session server, a restart of the session pool and a stop of the whole node, and continues where it stopped instead of ending interrupted. See [Durable turns](https://github.com/albertosca/mead/blob/main/guide/en/persistence.md#durable-turns) for the full behaviour.

@@ -48,7 +48,7 @@ Persistence, the MCP hub and server, and the deck endpoint are each enabled by t
 </picture>
 
 - **Sessions.** One supervised process group per conversation; a failure in a turn stays in that conversation.
-- **Router.** A stateless function that classifies each turn as local or cloud. `route: :local` or `route: :cloud` overrides it.
+- **Router.** A stateless function that classifies each turn as local or cloud. `route: :local`, `route: :cloud`, or the name of any other configured slot (such as a second local model) overrides it.
 - **MCP.** A client hub for the servers you configure, and a server that exposes sessions as nine tools.
 - **Ledger.** Tokens, tool calls and latency per session and per route, journaled to disk.
 

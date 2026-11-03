@@ -18,7 +18,6 @@ defmodule Mead.MCP.Server.Tools do
   # `Process.send_after/3` allows, for an operator who needs more.
   @maximum_turn_timeout 3_600_000
   @maximum_recent 100
-  @routes %{"auto" => :auto, "local" => :local, "cloud" => :cloud}
   @inspect_options [limit: 50, printable_limit: 1_000]
 
   @type context :: %{allow_effect: boolean()}
@@ -50,8 +49,9 @@ defmodule Mead.MCP.Server.Tools do
             },
             "route" => %{
               "type" => "string",
-              "enum" => ["auto", "local", "cloud"],
-              "description" => "Where the turn is answered; defaults to auto."
+              "enum" => Enum.map(Mead.Router.routes(), &Atom.to_string/1),
+              "description" =>
+                "Where the turn is answered: auto, or the name of a configured slot; defaults to auto."
             },
             "tools" => %{
               "type" => "string",
@@ -204,7 +204,11 @@ defmodule Mead.MCP.Server.Tools do
       else
         effect_options = if effect_requested, do: [tools: :effect], else: []
         options = [route: route] ++ effect_options ++ key_options
-        {:ok, turn_result(Mead.submit_turn(session_id, input, options), key_options != [])}
+
+        case Mead.submit_turn(session_id, input, options) do
+          {:error, :invalid_route} -> invalid_route(Mead.Router.routes())
+          result -> {:ok, turn_result(result, key_options != [])}
+        end
       end
     end
   end
@@ -242,20 +246,37 @@ defmodule Mead.MCP.Server.Tools do
   end
 
   defp fetch_route(arguments) do
+    routes = Mead.Router.routes()
+
     case Map.fetch(arguments, "route") do
       :error ->
         {:ok, :auto}
 
       {:ok, name} when is_binary(name) ->
-        case Map.fetch(@routes, name) do
-          {:ok, route} -> {:ok, route}
-          :error -> invalid("route must be one of auto, local, cloud")
+        case Enum.find(routes, &(Atom.to_string(&1) == name)) do
+          nil -> removed_route(name, routes, is_binary(Map.get(arguments, "client_turn_id")))
+          route -> {:ok, route}
         end
 
       {:ok, _other} ->
-        invalid("route must be one of auto, local, cloud")
+        invalid_route(routes)
     end
   end
+
+  # A keyed retry may name a slot removed since its turn was recorded; the session answers it only
+  # when the key names that earlier turn. `String.to_existing_atom/1` never creates an atom, so a
+  # name nothing ever used is refused here.
+  defp removed_route(name, routes, true = _keyed) do
+    {:ok, String.to_existing_atom(name)}
+  rescue
+    ArgumentError -> invalid_route(routes)
+  end
+
+  defp removed_route(_name, routes, false = _keyed), do: invalid_route(routes)
+
+  # Without a key the name is compared as a string and never converted: atoms are never freed.
+  defp invalid_route(routes),
+    do: invalid("route must be one of #{Enum.map_join(routes, ", ", &Atom.to_string/1)}")
 
   defp turn_result({:ok, output}, _keyed), do: success(text_of(output))
 
