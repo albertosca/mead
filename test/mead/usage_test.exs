@@ -76,7 +76,8 @@ defmodule Mead.UsageTest do
 
     test "refuses an unknown option and a non-keyword list", context do
       assert_raise ArgumentError, fn -> Mead.usage(ledger: context.name, windows: 1) end
-      assert_raise ArgumentError, fn -> Mead.usage(:recent) end
+      # Function.identity keeps the type checker from flagging this deliberate bad argument.
+      assert_raise ArgumentError, fn -> Mead.usage(Function.identity(:recent)) end
     end
   end
 
