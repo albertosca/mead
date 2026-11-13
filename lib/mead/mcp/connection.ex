@@ -177,10 +177,14 @@ defmodule Mead.MCP.Connection do
   end
 
   # Crash reports and `:sys.get_status/1` print the state, and the transport options can carry an
-  # HTTP credential.
+  # HTTP credential in the headers or a credential in the environment of a stdio child.
   @impl GenServer
   def format_status(%{state: state} = status) do
-    redacted = Keyword.replace(state.transport_options, :headers, "[redacted]")
+    redacted =
+      state.transport_options
+      |> Keyword.replace(:headers, "[redacted]")
+      |> Keyword.replace(:env, "[redacted]")
+
     %{status | state: %{state | transport_options: redacted}}
   end
 

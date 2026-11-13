@@ -59,6 +59,31 @@ defmodule Mead.MCP.EndToEndTest do
              {:ok, %{content: "it failed", is_error: true}}
   end
 
+  @tag :tmp_dir
+  test "a configured directory and variables reach a real stdio server through the hub",
+       %{tmp_dir: directory} do
+    start_hub(
+      stub: [
+        transport:
+          {:stdio,
+           command: System.find_executable("elixir"),
+           arguments: [@stub, @marker],
+           cwd: directory,
+           env: [{"MEAD_STUB_VARIABLE", "from-the-configuration"}]},
+        tools: [environment: :read]
+      ]
+    )
+
+    wait_until(fn -> names() != [] end, 60_000)
+
+    assert Hub.call_tool("stub__environment", %{}, [], :end_to_end_hub) ==
+             {:ok,
+              %{
+                content: "directory=#{Path.basename(directory)};variable=from-the-configuration",
+                is_error: false
+              }}
+  end
+
   test "an effect tool needs the opt-in, and the server's own annotations grant nothing" do
     start_hub(stub_server())
     wait_until(fn -> names() != [] end, 60_000)

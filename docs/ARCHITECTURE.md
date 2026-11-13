@@ -158,7 +158,7 @@ With a storage directory, the ledger also appends every counted turn, every forg
 
 `config :mead, :mcp, servers: [...]` lists the MCP servers. Each entry has:
 
-* a transport: `{:stdio, command:, arguments:}` or `{:http, url:, headers:}`;
+* a transport: `{:stdio, command:, arguments:, cwd:, env:}` (the last two optional: an absolute directory to start in, and variables added to the inherited environment) or `{:http, url:, headers:}`;
 * the tools the operator allows, each with a class declared in the configuration: `:read` or `:effect`.
 
 `Mead.MCP.Configuration` validates it when the application starts and refuses a typo instead of silently granting or denying the wrong tool.

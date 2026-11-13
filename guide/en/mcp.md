@@ -13,6 +13,24 @@ config :mead, :mcp,
   ]
 ```
 
+A stdio server can also start in a directory of its own and receive variables of its own:
+
+```elixir
+bridge: [
+  transport:
+    {:stdio,
+     command: "uv",
+     arguments: ["run", "bridge"],
+     cwd: "/srv/bridge",
+     env: [{"BRIDGE_TOKEN", "..."}]},
+  tools: [status: :read]
+]
+```
+
+* `cwd` must be an absolute path. A directory that does not exist stops that server from connecting, with `{:transport_start_failed, {:cwd_not_found, directory}}` in the log, and the retries above apply.
+* `env` is added to the environment mead was started with, and replaces an inherited variable of the same name. A name may not repeat, and a value reaches the server exactly as written, with no shell in between.
+* `command` is looked up on the `PATH` of mead, before the directory changes.
+
 * The policy is deny by default. A tool the server offers and the configuration does not list does not exist for the model.
 * `:read` tools are always shown. `:effect` tools are shown only when the turn passes `tools: :effect`.
 * The class comes from your configuration, never from the server.

@@ -486,5 +486,20 @@ defmodule Mead.MCP.ConnectionTest do
 
       refute status =~ "SECRET-0123456789"
     end
+
+    test "the state shown in crash reports never carries the configured environment", context do
+      connection =
+        start_connection(context,
+          transport:
+            {FakeTransport, [test_pid: self(), env: [{"BRIDGE_TOKEN", "SECRET-ENV-0123456789"}]]}
+        )
+
+      started_transport()
+
+      status =
+        connection |> :sys.get_status() |> inspect(limit: :infinity, printable_limit: :infinity)
+
+      refute status =~ "SECRET-ENV-0123456789"
+    end
   end
 end

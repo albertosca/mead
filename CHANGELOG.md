@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+* The stdio MCP transport takes `cwd:` (an absolute directory the server starts in) and `env:` (`{name, value}` pairs added to the environment the VM was started with). A server that must run from its own directory no longer needs an `sh` envelope, and a `cwd` that does not exist is `{:cwd_not_found, directory}`. A name in `env` may not repeat, and a rejected configuration names the variable, never its value. See the [MCP guide](https://github.com/albertosca/mead/blob/main/guide/en/mcp.md).
+
+### Changed
+
+* A validated stdio transport is always `{:stdio, command:, arguments:, cwd:, env:}`, with `cwd: nil` and `env: []` when unset.
+* A connection's state in a crash report or `:sys.get_status/1` hides `env` as it already hid `headers`.
+
 ## 0.4.0 — 2026-11-03
 
 ### Added

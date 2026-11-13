@@ -71,6 +71,74 @@ defmodule Mead.MCP.Transport.StdioTest do
     assert Stdio.start_link([command: 123], self()) == {:error, :invalid_command}
   end
 
+  describe "the directory and the environment the child starts with" do
+    @describetag :tmp_dir
+
+    test "the child starts in the configured working directory", %{tmp_dir: directory} do
+      File.write!(Path.join(directory, "marker.txt"), "")
+
+      transport = start(shell("ls", cwd: directory))
+
+      assert_receive {:mcp_message, ^transport, "marker.txt"}, 10_000
+    end
+
+    test "an unset working directory leaves the child where the VM is" do
+      transport = start(shell("echo started", cwd: nil))
+
+      assert_receive {:mcp_message, ^transport, "started"}, 10_000
+    end
+
+    test "a working directory that is not there is an error, not a crash", %{tmp_dir: directory} do
+      missing = Path.join(directory, "missing")
+
+      assert Stdio.start_link(shell("pwd", cwd: missing), self()) ==
+               {:error, {:cwd_not_found, missing}}
+    end
+
+    test "a file is not a working directory", %{tmp_dir: directory} do
+      file = Path.join(directory, "not-a-directory.txt")
+      File.write!(file, "")
+
+      assert Stdio.start_link(shell("pwd", cwd: file), self()) == {:error, {:cwd_not_found, file}}
+    end
+
+    test "configured variables are added to the inherited environment" do
+      transport =
+        start(shell("echo $MEAD_TEST_VARIABLE:$PATH", env: [{"MEAD_TEST_VARIABLE", "added"}]))
+
+      assert_receive {:mcp_message, ^transport, "added:" <> inherited_path}, 10_000
+      assert inherited_path == System.get_env("PATH")
+    end
+
+    test "a configured variable replaces an inherited one of the same name" do
+      transport = start(shell("echo $HOME", env: [{"HOME", "/nowhere"}]))
+
+      assert_receive {:mcp_message, ^transport, "/nowhere"}, 10_000
+    end
+
+    test "a value reaches the child as written, with no shell interpretation" do
+      value = ~S(a b "c" $HOME `date` = d)
+
+      transport =
+        start(
+          command: "printenv",
+          arguments: ["MEAD_TEST_VARIABLE"],
+          env: [{"MEAD_TEST_VARIABLE", value}]
+        )
+
+      assert_receive {:mcp_message, ^transport, ^value}, 10_000
+    end
+
+    test "the state shown in crash reports never carries the configured variables" do
+      transport = start(command: "cat", env: [{"API_TOKEN", "SECRET-ENV-0123456789"}])
+
+      status =
+        transport |> :sys.get_status() |> inspect(limit: :infinity, printable_limit: :infinity)
+
+      refute status =~ "SECRET-ENV-0123456789"
+    end
+  end
+
   test "sending after the child is gone is an error, not a crash" do
     transport = start(shell("exit 0"))
     assert_receive {:mcp_closed, ^transport, {:exit_status, 0}}, 10_000
