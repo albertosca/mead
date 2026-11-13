@@ -47,7 +47,8 @@ defmodule Mead.MCP.Hub do
     children =
       [
         {Registry, keys: :unique, name: registry_name(hub)},
-        {Catalog, name: catalog_name(hub), servers: servers}
+        {Catalog,
+         name: catalog_name(hub), servers: Enum.map(servers, &Map.delete(&1, :transport))}
       ] ++ Enum.map(servers, &connection_child(&1, hub, options))
 
     Supervisor.init(children, strategy: :rest_for_one)
@@ -154,13 +155,17 @@ defmodule Mead.MCP.Hub do
   defp connection_child(server, hub, options) do
     {kind, transport_options} = server.transport
     {module, extra_options} = options |> transports() |> Map.fetch!(kind)
+    merged_options = Keyword.merge(transport_options, extra_options)
 
+    # A supervisor prints the arguments its child was started with, in a report and in
+    # `:sys.get_status/1`, and the transport options can hold a credential. A function prints as
+    # `#Fun<...>` and never shows what it returns; the connection calls it when it connects.
     connection_options =
       [
         server: server.name,
         registry: registry_name(hub),
         catalog: catalog_name(hub),
-        transport: {module, Keyword.merge(transport_options, extra_options)}
+        transport: {module, fn -> merged_options end}
       ] ++ Keyword.take(options, [:reconnect_delays, :handshake_timeout])
 
     Supervisor.child_spec({Connection, connection_options}, id: {:connection, server.name})

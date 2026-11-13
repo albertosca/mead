@@ -11,6 +11,10 @@
 * A validated stdio transport is always `{:stdio, command:, arguments:, cwd:, env:}`, with `cwd: nil` and `env: []` when unset.
 * A connection's state in a crash report or `:sys.get_status/1` hides `env` as it already hid `headers`.
 
+### Fixed
+
+* A credential in the options of a transport (`headers` of an HTTP server, `env` of a stdio one) no longer shows in what the hub's supervisor prints for its children, in a supervisor report or in `:sys.get_status/1`. The hub started each connection with the options as an argument, and the catalog with the whole server list, transports included. It now hands the connection a function that returns the options, which prints as `#Fun<...>`, and the catalog gets no transport at all. `Mead.MCP.Connection` accepts either a list or such a function as the options of its `:transport`.
+
 ## 0.4.0 — 2026-11-03
 
 ### Added

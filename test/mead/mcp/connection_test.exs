@@ -282,6 +282,32 @@ defmodule Mead.MCP.ConnectionTest do
       assert entry_names(context.catalog) == []
     end
 
+    test "options given as a function are asked for on every attempt and never printed",
+         context do
+      test_pid = self()
+
+      options = fn ->
+        send(test_pid, :options_resolved)
+
+        [
+          test_pid: test_pid,
+          start_error: :enoent,
+          env: [{"BRIDGE_TOKEN", "SECRET-ENV-0123456789"}]
+        ]
+      end
+
+      connection = start_connection(context, transport: {FakeTransport, options})
+
+      assert_receive :options_resolved, 10_000
+      assert_receive :options_resolved, 10_000
+      assert_receive :options_resolved, 10_000
+
+      status =
+        connection |> :sys.get_status() |> inspect(limit: :infinity, printable_limit: :infinity)
+
+      refute status =~ "SECRET-ENV-0123456789"
+    end
+
     test "a transport process that dies is handled like a closed one", context do
       start_connection(context)
       first = started_transport()

@@ -17,6 +17,13 @@ defmodule Mead.MCP.Connection do
   ignored. The connection traps exits so that a transport that dies is an ordinary event.
 
   Calls are carried by `call_tool/5`; each pending call monitors its caller and has its own timer.
+
+  ## Options
+
+    * `:transport` - `{module, options}`, where `options` is a keyword list or a function that
+      returns one. The hub gives a function, so that options holding a credential never show in the
+      arguments a supervisor prints for this process; it is called each time the connection
+      connects, and the list it returns goes to `module.start_link/2`.
   """
 
   use GenServer
@@ -180,18 +187,25 @@ defmodule Mead.MCP.Connection do
   # HTTP credential in the headers or a credential in the environment of a stdio child.
   @impl GenServer
   def format_status(%{state: state} = status) do
-    redacted =
-      state.transport_options
-      |> Keyword.replace(:headers, "[redacted]")
-      |> Keyword.replace(:env, "[redacted]")
-
-    %{status | state: %{state | transport_options: redacted}}
+    %{status | state: %{state | transport_options: redact(state.transport_options)}}
   end
+
+  # A function prints as `#Fun<...>`, and only a list can show a credential.
+  defp redact(options) when is_list(options) do
+    options
+    |> Keyword.replace(:headers, "[redacted]")
+    |> Keyword.replace(:env, "[redacted]")
+  end
+
+  defp redact(options), do: options
+
+  defp resolve_options(options) when is_function(options, 0), do: options.()
+  defp resolve_options(options) when is_list(options), do: options
 
   # -- connecting --------------------------------------------------------------------------------
 
   defp connect(state) do
-    case state.transport_module.start_link(state.transport_options, self()) do
+    case state.transport_module.start_link(resolve_options(state.transport_options), self()) do
       {:ok, transport} ->
         reference = make_ref()
         Process.send_after(self(), {:handshake_timeout, reference}, state.handshake_timeout)
