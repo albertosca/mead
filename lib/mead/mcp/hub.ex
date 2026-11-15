@@ -24,7 +24,8 @@ defmodule Mead.MCP.Hub do
 
   alias Mead.MCP.{Catalog, Configuration, Connection, Policy}
 
-  @tool_timeout 15_000
+  @default_tool_timeout 15_000
+  @maximum_tool_timeout 3_600_000
   @ready_poll 50
 
   @default_transports %{
@@ -69,6 +70,27 @@ defmodule Mead.MCP.Hub do
     end
   end
 
+  @doc """
+  Milliseconds one tool call may take before it reports `{:error, :timeout}`. It is the `:tool_timeout`
+  key under `config :mead, :mcp` and defaults to 15 seconds; a positive integer of at most one hour.
+  A tool that reads a large mailbox needs more, and a bound that is too small makes a call that is
+  still running look like a failure.
+  """
+  @spec tool_timeout() :: pos_integer()
+  def tool_timeout do
+    case :mead
+         |> Application.get_env(:mcp, [])
+         |> Keyword.get(:tool_timeout, @default_tool_timeout) do
+      timeout when is_integer(timeout) and timeout > 0 and timeout <= @maximum_tool_timeout ->
+        timeout
+
+      other ->
+        raise ArgumentError,
+              "tool_timeout must be a positive integer of at most #{@maximum_tool_timeout} milliseconds, " <>
+                "got: #{inspect(other)}"
+    end
+  end
+
   @spec call_tool(term(), term(), keyword(), atom()) ::
           {:ok, %{content: String.t(), is_error: boolean()}} | {:error, term()}
   def call_tool(name, arguments, options, hub \\ __MODULE__) do
@@ -80,7 +102,7 @@ defmodule Mead.MCP.Hub do
         target.server,
         target.tool,
         arguments,
-        @tool_timeout
+        tool_timeout()
       )
     end
   end

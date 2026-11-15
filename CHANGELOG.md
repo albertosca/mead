@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+* `tool_timeout:` under `config :mead, :mcp` sets how long one MCP tool call may take before it reports `{:error, :timeout}`. It defaults to the 15 seconds it was and takes a positive integer of at most one hour; anything else raises. A tool that reads a large mailbox no longer looks failed while it is still running.
+
 ## 0.5.0 — 2026-11-15
 
 ### Added
