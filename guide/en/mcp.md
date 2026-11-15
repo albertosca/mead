@@ -34,7 +34,7 @@ bridge: [
 * The policy is deny by default. A tool the server offers and the configuration does not list does not exist for the model.
 * `:read` tools are always shown. `:effect` tools are shown only when the turn passes `tools: :effect`.
 * The class comes from your configuration, never from the server.
-* `never_remember: [:status]` beside `tools:` marks a tool the person must confirm on every call. The deck then offers no "always allow" for it and asks even at the `allow_all` policy level. A name that is not listed under `tools:` is refused at boot, so a typo cannot leave a tool unprotected.
+* `never_remember: [:status]` beside `tools:` marks a tool the person must confirm on every call in a deck turn. The deck then offers no "always allow" for it and asks even at the `allow_all` policy level; a turn submitted without a deck interaction has nobody to ask and is not affected. A name that is not listed under `tools:` is refused at boot, so a typo cannot leave a tool unprotected.
 * A connection that fails is retried after 1, 2, 5, 15, then 30 seconds, and never crashes the application.
 
 ## Server: drive mead from another client

@@ -6,7 +6,7 @@
 
 * The stdio MCP transport takes `cwd:` (an absolute directory the server starts in) and `env:` (`{name, value}` pairs added to the environment the VM was started with). A server that must run from its own directory no longer needs an `sh` envelope, and a `cwd` that does not exist is `{:cwd_not_found, directory}`. A name in `env` may not repeat, and a rejected configuration names the variable, never its value. See the [MCP guide](https://github.com/albertosca/mead/blob/main/guide/en/mcp.md).
 
-* `never_remember: [...]` in the configuration of an MCP server marks tools the person must confirm on every call. The deck asks for them at every policy level, `allow_all` included, offers only `allow_once` and `reject_once`, and ignores an `allow_always` answer and any rule remembered before the tool was marked. A name that is not listed under `tools:` is refused.
+* `never_remember: [...]` in the configuration of an MCP server marks tools the person must confirm on every call of a deck turn (a turn submitted without a deck interaction has nobody to ask and is not affected). The deck asks for them at every policy level, `allow_all` included, offers only `allow_once` and `reject_once`, and ignores an `allow_always` answer and any rule remembered before the tool was marked. A name that is not listed under `tools:` is refused.
 
 * The [MCP guide](https://github.com/albertosca/mead/blob/main/guide/en/mcp.md#a-browser-deck-one-origin-through-a-proxy) carries a same-origin reverse proxy for a browser deck, and says why mead sends no CORS headers.
 

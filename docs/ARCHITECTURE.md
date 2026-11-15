@@ -449,7 +449,8 @@ Each deck turn carries `Mead.Deck.Interaction`, so `Mead.Router` asks the channe
 
 * A server may list tools under `never_remember:` (each must also be under `tools:`). A call of such a tool always emits `permission.requested` and waits, at every policy level, `allow_all` included, and for a `:read` tool at `ask_for_risky`.
 * Its request offers only `allow_once` and `reject_once`. An `allow_always` answer to it settles nothing, and the request stays open.
-* A rule remembered before the tool was marked stays in the log and is ignored while the mark stands, so the operator's configuration wins over the log.
+* A rule remembered before the tool was marked stays in the log and is ignored while the mark stands, so the operator's configuration wins over the log. If the mark is removed later, that rule applies again.
+* The tap exists only in a turn that carries a deck interaction. A turn submitted without one (through `Mead.submit_turn/3` without `:interaction`, or the MCP server's `submit_turn`) has nobody to ask, and for it `never_remember` changes nothing: its effect tools are governed by `tools: :effect` and the server's `allow_effect`.
 
 Request details are the model's arguments cut at 2 000 characters each, and they are never logged. They travel twice in `permission.requested`: `details` as `key: value` strings, and `detail_items` as objects with the raw `key` and `value`, a `label` (the key as words) and, when the value is a snake_case identifier, a `display` (the identifier as words). A deck that only reads `details` keeps working.
 
