@@ -6,6 +6,8 @@ defmodule Mead.MCP.EndToEndTest.Hub do
 
   def call_tool(name, arguments, options),
     do: Mead.MCP.Hub.call_tool(name, arguments, options, :end_to_end_hub)
+
+  def describe_tool(name, options), do: Mead.MCP.Hub.describe_tool(name, options, :end_to_end_hub)
 end
 
 defmodule Mead.MCP.EndToEndTest do
@@ -151,6 +153,35 @@ defmodule Mead.MCP.EndToEndTest do
 
     assert %{content: [%{tool_use_id: "toolu_1", content: "from the model", is_error: false}]} =
              List.last(second)
+  end
+
+  test "a tool marked never_remember is announced as such in a turn through the real hub and stdio" do
+    servers = [
+      stub: Keyword.put(Keyword.fetch!(stub_server(), :stub), :never_remember, [:echo])
+    ]
+
+    start_hub(servers)
+    wait_until(fn -> names() != [] end, 60_000)
+
+    {:ok, script} =
+      Agent.start_link(fn ->
+        [
+          FakeProvider.tool_step([
+            {"toolu_1", "stub__echo", %{"text" => "marked"}},
+            {"toolu_2", "stub__fail", %{}}
+          ]),
+          FakeProvider.text_step("done")
+        ]
+      end)
+
+    slots = [cloud: {FakeProvider, test_pid: self(), script: script}]
+    context = Mead.Test.FakeInteraction.start([:allow, :allow])
+    options = [route: :cloud, interaction: {Mead.Test.FakeInteraction, context}]
+
+    assert Router.route([], "call both", options, slots, TestHub) == {:ok, "done"}
+
+    assert_received {:request_permission, %{tool: "echo", never_remember: true}}
+    assert_received {:request_permission, %{tool: "fail", never_remember: false}}
   end
 
   defp os_pids do
