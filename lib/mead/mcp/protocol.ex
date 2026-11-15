@@ -7,7 +7,11 @@ defmodule Mead.MCP.Protocol do
   stdio transport can frame messages with a trailing newline. `decode/1` never raises.
   """
 
-  @protocol_version "2025-06-18"
+  # The client offers the newest revision, as the specification asks, and accepts the answer of a
+  # server that speaks an older one. What mead uses (`initialize`, `tools/list`, `tools/call`) is
+  # the same in all three; 2025-06-18 only adds structured tool output, which mead does not read.
+  @supported_versions ["2025-06-18", "2025-03-26", "2024-11-05"]
+  @protocol_version hd(@supported_versions)
 
   @type request_id :: integer() | String.t()
 
@@ -19,12 +23,16 @@ defmodule Mead.MCP.Protocol do
           | {:invalid,
              :not_binary | :malformed_json | :not_jsonrpc | :result_and_error | :unrecognized}
 
-  @doc "The one protocol version this client negotiates."
+  @doc "The protocol version this client offers in `initialize`: the newest it speaks."
   @spec protocol_version() :: String.t()
   def protocol_version, do: @protocol_version
 
+  @doc "Every version a server may answer `initialize` with, newest first."
+  @spec supported_versions() :: [String.t()]
+  def supported_versions, do: @supported_versions
+
   @spec supported_version?(term()) :: boolean()
-  def supported_version?(version), do: version == @protocol_version
+  def supported_version?(version), do: version in @supported_versions
 
   @spec initialize_request(request_id()) :: binary()
   def initialize_request(id) do

@@ -48,6 +48,13 @@ defmodule Mead.MCP.Transport.Http do
     :exit, _reason -> {:error, :closed}
   end
 
+  @impl Mead.MCP.Transport
+  def protocol_negotiated(transport, version) when is_binary(version) do
+    GenServer.call(transport, {:protocol_negotiated, version})
+  catch
+    :exit, _reason -> {:error, :closed}
+  end
+
   @impl GenServer
   def init({options, owner}) do
     {:ok, task_supervisor} = Task.Supervisor.start_link()
@@ -60,7 +67,8 @@ defmodule Mead.MCP.Transport.Http do
        headers: Keyword.get(options, :headers, []),
        receive_timeout: Keyword.get(options, :receive_timeout, @default_receive_timeout),
        req_options: Keyword.get(options, :req_options, []),
-       session_id: nil
+       session_id: nil,
+       protocol_version: Protocol.protocol_version()
      }}
   end
 
@@ -71,6 +79,10 @@ defmodule Mead.MCP.Transport.Http do
   end
 
   @impl GenServer
+  def handle_call({:protocol_negotiated, version}, _from, state) do
+    {:reply, :ok, %{state | protocol_version: version}}
+  end
+
   def handle_call({:send, id, message}, _from, state) do
     transport = self()
     request = build_request(state, message)
@@ -111,7 +123,7 @@ defmodule Mead.MCP.Transport.Http do
       [
         {"content-type", "application/json"},
         {"accept", "application/json, text/event-stream"},
-        {"mcp-protocol-version", Protocol.protocol_version()}
+        {"mcp-protocol-version", state.protocol_version}
       ] ++ session_header(state) ++ state.headers
 
     Keyword.merge(

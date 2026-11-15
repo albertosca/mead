@@ -358,6 +358,8 @@ defmodule Mead.MCP.Connection do
   defp handle_result(:initialize, %{"protocolVersion" => version}, state)
        when is_binary(version) do
     if Protocol.supported_version?(version) do
+      announce_version(state, version)
+
       state.transport_module.send_message(
         state.transport,
         nil,
@@ -416,6 +418,17 @@ defmodule Mead.MCP.Connection do
       fn _id -> {:list_tools, page} end,
       &Protocol.list_tools_request(&1, cursor)
     )
+  end
+
+  # Optional callback: a transport that does not put the version on the wire does not define it.
+  defp announce_version(state, version) do
+    module = state.transport_module
+
+    if Code.ensure_loaded?(module) and function_exported?(module, :protocol_negotiated, 2) do
+      module.protocol_negotiated(state.transport, version)
+    end
+
+    :ok
   end
 
   defp parse_tools(tools) when is_list(tools) do

@@ -172,7 +172,7 @@ The class is never read from the server. A tool the server offers and the config
 * `Mead.MCP.Transport.Stdio` runs a child process over a `Port`.
 * `Mead.MCP.Transport.Http` posts each message with `Req` and reads a JSON or event-stream answer.
 
-The connection performs the handshake with the pinned protocol version, follows the tool list across pages, publishes the tools in `Mead.MCP.Catalog`, and refreshes them on a `tools/list_changed` notification.
+The connection performs the handshake offering protocol version 2025-06-18 and accepts a server that answers 2025-03-26 or 2024-11-05 (anything else is `{:unsupported_protocol_version, version}`); a transport that sends the version on the wire, the HTTP one, is told the negotiated one through the optional `protocol_negotiated/2` callback. It follows the tool list across pages, publishes the tools in `Mead.MCP.Catalog`, and refreshes them on a `tools/list_changed` notification.
 
 **When something goes wrong**
 

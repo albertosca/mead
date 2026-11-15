@@ -19,4 +19,14 @@ defmodule Mead.MCP.Transport do
 
   @callback send_message(transport :: pid(), id :: integer() | nil, message :: binary()) ::
               :ok | {:error, term()}
+
+  @doc """
+  Tells the transport which protocol version the server chose in its `initialize` answer, before
+  anything else is sent. A transport that puts the version on the wire (the HTTP one, in a header
+  on every request) uses it from then on; one that does not need it leaves this out.
+  """
+  @callback protocol_negotiated(transport :: pid(), version :: String.t()) ::
+              :ok | {:error, term()}
+
+  @optional_callbacks protocol_negotiated: 2
 end

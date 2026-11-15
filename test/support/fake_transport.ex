@@ -30,6 +30,13 @@ defmodule Mead.Test.FakeTransport do
     :exit, _reason -> {:error, :closed}
   end
 
+  @impl Mead.MCP.Transport
+  def protocol_negotiated(transport, version) do
+    GenServer.call(transport, {:protocol_negotiated, version})
+  catch
+    :exit, _reason -> {:error, :closed}
+  end
+
   def deliver(transport, message), do: GenServer.cast(transport, {:deliver, message})
   def close(transport, reason), do: GenServer.cast(transport, {:close, reason})
   def fail_sends(transport, reason), do: GenServer.call(transport, {:fail_sends, reason})
@@ -79,6 +86,11 @@ defmodule Mead.Test.FakeTransport do
 
   def handle_call({:send, _id, _message}, _from, state),
     do: {:reply, {:error, state.send_error}, state}
+
+  def handle_call({:protocol_negotiated, version}, _from, state) do
+    send(state.test_pid, {:protocol_negotiated, self(), version})
+    {:reply, :ok, state}
+  end
 
   def handle_call({:fail_sends, reason}, _from, state),
     do: {:reply, :ok, %{state | send_error: reason}}

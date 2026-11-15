@@ -8,6 +8,7 @@
 
 ### Changed
 
+* An MCP server that answers `initialize` with protocol version `2025-03-26` or `2024-11-05` is now kept, where only `2025-06-18` was before; the client still offers `2025-06-18`, and any other answer is still `{:unsupported_protocol_version, version}`. The HTTP transport sends the negotiated version in its `mcp-protocol-version` header, and `Mead.MCP.Transport` has the optional callback `protocol_negotiated/2` for that.
 * A validated stdio transport is always `{:stdio, command:, arguments:, cwd:, env:}`, with `cwd: nil` and `env: []` when unset.
 * A connection's state in a crash report or `:sys.get_status/1` hides `env` as it already hid `headers`.
 

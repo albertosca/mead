@@ -212,6 +212,25 @@ defmodule Mead.MCP.ConnectionTest do
       assert entry_names(context.catalog) == []
     end
 
+    for version <- ["2025-06-18", "2025-03-26", "2024-11-05"] do
+      test "a server that answers #{version} is kept, and the transport is told", context do
+        version = unquote(version)
+        start_connection(context)
+        transport = started_transport()
+
+        initialize = FakeTransport.next_request(transport)
+        assert initialize["params"]["protocolVersion"] == "2025-06-18"
+        FakeTransport.reply(transport, initialize, %{"protocolVersion" => version})
+
+        assert_receive {:protocol_negotiated, ^transport, ^version}, 10_000
+        assert FakeTransport.next_request(transport)["method"] == "notifications/initialized"
+
+        list = FakeTransport.next_request(transport)
+        FakeTransport.reply(transport, list, %{"tools" => [raw_tool("read_file")]})
+        wait_until(fn -> entry_names(context.catalog) == ["read_file"] end)
+      end
+    end
+
     test "an initialize answer without a version is disconnected and retried", context do
       start_connection(context)
       first = started_transport()
