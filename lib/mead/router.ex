@@ -82,8 +82,8 @@ defmodule Mead.Router do
   # step naming one of the others could not be told from a malformed one.
   @not_slot_names [:auto, nil, true, false]
   @text_separator "\n\n"
-  # The hub gives up on a tool after 15 seconds; this is the margin for the task around it.
-  @tool_wait 20_000
+  # The router waits this long beyond the hub's own tool deadline, for the task around the call.
+  @tool_wait_margin 5_000
   @default_hub_wait 10_000
   @in_doubt "This call was already running when the server stopped. It may or may not have taken effect; check before calling it again."
   @doubt " It may or may not have taken effect; check before calling it again."
@@ -736,7 +736,7 @@ defmodule Mead.Router do
       tool_update(tool_use, :in_progress, %{cancellable: true})
     )
 
-    case Task.yield(task, @tool_wait) || Task.shutdown(task, :brutal_kill) do
+    case Task.yield(task, tool_wait()) || Task.shutdown(task, :brutal_kill) do
       {:ok, result} ->
         {:finished, result}
 
@@ -752,6 +752,10 @@ defmodule Mead.Router do
          doubtful_result(tool_use, "The tool call failed: #{describe(:timeout)}.", class)}
     end
   end
+
+  @doc false
+  @spec tool_wait() :: pos_integer()
+  def tool_wait, do: Mead.MCP.Hub.tool_timeout() + @tool_wait_margin
 
   # The task is not linked to the router, so a router that dies (its turn timed out, or it was
   # killed) would leave the tool running with nobody to wait for it. The watcher ends the tool

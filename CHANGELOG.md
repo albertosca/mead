@@ -4,7 +4,7 @@
 
 ### Added
 
-* `tool_timeout:` under `config :mead, :mcp` sets how long one MCP tool call may take before it reports `{:error, :timeout}`. It defaults to the 15 seconds it was and takes a positive integer of at most one hour; anything else raises. A tool that reads a large mailbox no longer looks failed while it is still running.
+* `tool_timeout:` under `config :mead, :mcp` sets how long one MCP tool call may take before it reports `{:error, :timeout}`. It defaults to the 15 seconds it was and takes a positive integer of at most one hour; anything else raises. A tool that reads a large mailbox no longer looks failed while it is still running. The router now waits five seconds beyond that deadline instead of a fixed 20 seconds, so it no longer cuts a call the hub still allows.
 
 ## 0.5.0 — 2026-11-15
 
