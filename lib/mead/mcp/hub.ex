@@ -91,7 +91,14 @@ defmodule Mead.MCP.Hub do
   name that is unknown or not allowed in this turn.
   """
   @spec describe_tool(term(), keyword(), atom()) ::
-          {:ok, %{server: atom(), tool: String.t(), class: Policy.class()}} | {:error, term()}
+          {:ok,
+           %{
+             server: atom(),
+             tool: String.t(),
+             class: Policy.class(),
+             never_remember: boolean()
+           }}
+          | {:error, term()}
   def describe_tool(name, options, hub \\ __MODULE__) do
     with {:ok, entries, servers} <- snapshot(hub) do
       Policy.authorize(name, entries, servers, options)

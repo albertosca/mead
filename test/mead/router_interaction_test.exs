@@ -80,8 +80,16 @@ defmodule Mead.RouterInteractionTest do
              tool: "read_file",
              server: "files",
              class: :read,
-             arguments: %{"path" => "/a"}
+             arguments: %{"path" => "/a"},
+             never_remember: false
            }
+  end
+
+  test "the request says when the operator marked the tool as never to be remembered" do
+    hub(never_remember: ["files__read_file"])
+    route(tool_use_step([@call]), [:allow])
+
+    assert_received {:request_permission, %{never_remember: true}}
   end
 
   test "a rejected call never reaches the hub and the model gets an error result" do

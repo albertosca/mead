@@ -49,7 +49,7 @@ defmodule Mead.MCP.Policy do
   end
 
   @spec authorize(term(), [map()], [map()], keyword()) ::
-          {:ok, %{server: atom(), tool: String.t(), class: class()}}
+          {:ok, %{server: atom(), tool: String.t(), class: class(), never_remember: boolean()}}
           | {:error, :unknown_tool | :not_allowed}
   def authorize(model_name, entries, servers, options) when is_binary(model_name) do
     with true <- Regex.match?(@model_name, model_name),
@@ -59,7 +59,8 @@ defmodule Mead.MCP.Policy do
          class when class != nil <- Map.get(server.tools, tool),
          true <- Enum.any?(entries, &(&1.server == server_name and &1.name == tool)) do
       if class in allowed_classes(options) do
-        {:ok, %{server: server_name, tool: tool, class: class}}
+        never_remember = tool in Map.get(server, :never_remember, MapSet.new())
+        {:ok, %{server: server_name, tool: tool, class: class, never_remember: never_remember}}
       else
         {:error, :not_allowed}
       end

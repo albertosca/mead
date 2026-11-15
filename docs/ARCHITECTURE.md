@@ -445,6 +445,12 @@ Each deck turn carries `Mead.Deck.Interaction`, so `Mead.Router` asks the channe
 * The rules are rebuilt from the log and kept through compaction.
 * `permission.forget {tool}` takes one back with a `permission.forgotten` event.
 
+**A tool that is never remembered**
+
+* A server may list tools under `never_remember:` (each must also be under `tools:`). A call of such a tool always emits `permission.requested` and waits, at every policy level, `allow_all` included, and for a `:read` tool at `ask_for_risky`.
+* Its request offers only `allow_once` and `reject_once`. An `allow_always` answer to it settles nothing, and the request stays open.
+* A rule remembered before the tool was marked stays in the log and is ignored while the mark stands, so the operator's configuration wins over the log.
+
 Request details are the model's arguments cut at 2 000 characters each, and they are never logged. They travel twice in `permission.requested`: `details` as `key: value` strings, and `detail_items` as objects with the raw `key` and `value`, a `label` (the key as words) and, when the value is a snake_case identifier, a `display` (the identifier as words). A deck that only reads `details` keeps working.
 
 ### Frames, heartbeat and idle timeout

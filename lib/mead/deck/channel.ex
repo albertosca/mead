@@ -52,6 +52,10 @@ defmodule Mead.Deck.Channel do
   are rebuilt from the log, and `permission.forget` with the tool name removes one
   (`permission.forgotten`).
 
+  A tool the operator marked `never_remember` always asks, at every level and whatever the log
+  remembers; its request offers only `allow_once` and `reject_once`, and an answer that was not
+  offered settles nothing.
+
   The channel monitors the session and stops with it. It is registered in `Mead.Registry` as
   `{:deck, session_id}`.
   """
@@ -80,6 +84,11 @@ defmodule Mead.Deck.Channel do
     },
     %{"option_id" => "reject_once", "label" => "Reject", "kind" => "reject_once"}
   ]
+  # A tool the operator marked `never_remember` is never offered "always allow".
+  @marked_permission_options Enum.reject(
+                               @permission_options,
+                               &(&1["option_id"] == "allow_always")
+                             )
 
   def start_link(options) do
     session_id = Keyword.fetch!(options, :session_id)
@@ -420,6 +429,11 @@ defmodule Mead.Deck.Channel do
 
   def handle_call({:permission_request, request}, from, state) do
     cond do
+      # The operator's mark beats every shortcut below, and the log: a rule remembered before the
+      # tool was marked stays in the log and is ignored while the mark stands.
+      never_remember?(request) ->
+        ask_permission(state, from, request)
+
       state.policy_level == :allow_all ->
         approve(state, request, %{"decided_by_policy" => "allow_all"})
 
@@ -587,6 +601,7 @@ defmodule Mead.Deck.Channel do
           from: from,
           action: action(request),
           tool: tool_key(request),
+          option_ids: Enum.map(permission_options(request), & &1["option_id"]),
           monitor: Process.monitor(requester),
           timer:
             Process.send_after(
@@ -663,7 +678,14 @@ defmodule Mead.Deck.Channel do
     end
   end
 
+  # An answer that was not among the options offered settles nothing, whatever the client sends.
   defp answer_pending(state, socket, request_id, option_id) do
+    if option_id in state.pending[request_id].option_ids,
+      do: settle_permission(state, socket, request_id, option_id),
+      else: {:noreply, state}
+  end
+
+  defp settle_permission(state, socket, request_id, option_id) do
     case option_id do
       "allow_once" ->
         settle(state, request_id, "allowed", :allow, device_of(state, socket))
@@ -676,9 +698,6 @@ defmodule Mead.Deck.Channel do
 
       "reject_once" ->
         settle(state, request_id, "rejected", {:deny, :rejected}, device_of(state, socket))
-
-      _not_offered ->
-        {:noreply, state}
     end
   end
 
@@ -761,12 +780,17 @@ defmodule Mead.Deck.Channel do
       "risk_level" => if(request.class == :effect, do: "high", else: "low"),
       "details" => Details.lines(request.arguments),
       "detail_items" => Details.items(request.arguments),
-      "options" => @permission_options,
+      "options" => permission_options(request),
       "expires_at" => DateTime.to_iso8601(expires_at)
     }
   end
 
   defp tool_key(request), do: "#{request.server}__#{request.tool}"
+
+  defp never_remember?(request), do: Map.get(request, :never_remember, false)
+
+  defp permission_options(request),
+    do: if(never_remember?(request), do: @marked_permission_options, else: @permission_options)
 
   defp action(request), do: "Run #{request.tool} on the #{request.server} server"
 

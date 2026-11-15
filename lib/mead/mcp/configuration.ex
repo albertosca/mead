@@ -14,6 +14,10 @@ defmodule Mead.MCP.Configuration do
           ]
         ]
 
+  A server may also list, under `never_remember:`, tools the person must confirm on every call
+  (`never_remember: [:write_file]`); each must be listed under `tools:`, since a typo would leave
+  the tool it meant to protect asking to be remembered.
+
   The class of a tool (`:read` or `:effect`) is declared here and nowhere else; the hub never
   trusts what a server says about itself. A tool the server offers that is not listed here does
   not exist for the model. A server name may hold letters, digits, and hyphens but no underscore,
@@ -51,7 +55,8 @@ defmodule Mead.MCP.Configuration do
   @type server :: %{
           name: atom(),
           transport: transport(),
-          tools: %{String.t() => :read | :effect}
+          tools: %{String.t() => :read | :effect},
+          never_remember: MapSet.t(String.t())
         }
 
   @server_name ~r/\A[a-zA-Z0-9-]+\z/
@@ -98,8 +103,33 @@ defmodule Mead.MCP.Configuration do
     with :ok <- check_name(name),
          {:ok, definition} <- check_definition(name, definition),
          {:ok, transport} <- check_transport(name, Keyword.get(definition, :transport)),
-         {:ok, tools} <- check_tools(name, Keyword.get(definition, :tools, [])) do
-      {:ok, %{name: name, transport: transport, tools: tools}}
+         {:ok, tools} <- check_tools(name, Keyword.get(definition, :tools, [])),
+         {:ok, never_remember} <-
+           check_never_remember(name, Keyword.get(definition, :never_remember, []), tools) do
+      {:ok, %{name: name, transport: transport, tools: tools, never_remember: never_remember}}
+    end
+  end
+
+  # A name that is not a listed tool is refused: a typo here would leave the tool it meant to
+  # protect asking to be remembered, without a word.
+  defp check_never_remember(name, tool_names, tools) do
+    if is_list(tool_names) and Enum.all?(tool_names, &is_atom/1) do
+      Enum.reduce_while(tool_names, {:ok, MapSet.new()}, fn tool, {:ok, marked} ->
+        key = Atom.to_string(tool)
+
+        cond do
+          not Map.has_key?(tools, key) ->
+            {:halt, {:error, {:invalid_server, name, {:never_remember_not_in_tools, tool}}}}
+
+          MapSet.member?(marked, key) ->
+            {:halt, {:error, {:invalid_server, name, {:duplicate_never_remember, tool}}}}
+
+          true ->
+            {:cont, {:ok, MapSet.put(marked, key)}}
+        end
+      end)
+    else
+      {:error, {:invalid_server, name, :invalid_never_remember}}
     end
   end
 
@@ -111,7 +141,7 @@ defmodule Mead.MCP.Configuration do
 
   defp check_definition(name, definition) do
     if is_list(definition) and Keyword.keyword?(definition) do
-      case Keyword.keys(definition) -- [:transport, :tools] do
+      case Keyword.keys(definition) -- [:transport, :tools, :never_remember] do
         [] -> {:ok, definition}
         unknown -> {:error, {:invalid_server, name, {:unknown_options, Enum.uniq(unknown)}}}
       end

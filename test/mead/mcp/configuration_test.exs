@@ -27,9 +27,38 @@ defmodule Mead.MCP.ConfigurationTest do
                   name: :filesystem,
                   transport:
                     {:stdio, command: "npx", arguments: ["-y", "server"], cwd: nil, env: []},
-                  tools: %{"read_file" => :read, "write_file" => :effect}
+                  tools: %{"read_file" => :read, "write_file" => :effect},
+                  never_remember: MapSet.new()
                 }
               ]}
+  end
+
+  describe "never_remember" do
+    test "names the tools that must be confirmed on every call" do
+      assert {:ok, [server]} = Configuration.validate(a: stdio(never_remember: [:write_file]))
+      assert server.never_remember == MapSet.new(["write_file"])
+    end
+
+    test "defaults to no tool" do
+      assert {:ok, [server]} = Configuration.validate(a: stdio())
+      assert server.never_remember == MapSet.new()
+    end
+
+    test "a tool that is not listed under tools is refused, since a typo would leave it unprotected" do
+      assert Configuration.validate(a: stdio(never_remember: [:write_fil])) ==
+               {:error, {:invalid_server, :a, {:never_remember_not_in_tools, :write_fil}}}
+    end
+
+    test "a repeated name, a non-list and a non-atom are refused" do
+      assert Configuration.validate(a: stdio(never_remember: [:write_file, :write_file])) ==
+               {:error, {:invalid_server, :a, {:duplicate_never_remember, :write_file}}}
+
+      assert Configuration.validate(a: stdio(never_remember: :write_file)) ==
+               {:error, {:invalid_server, :a, :invalid_never_remember}}
+
+      assert Configuration.validate(a: stdio(never_remember: ["write_file"])) ==
+               {:error, {:invalid_server, :a, :invalid_never_remember}}
+    end
   end
 
   test "stdio arguments, working directory, environment and tools default to unset" do
