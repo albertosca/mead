@@ -487,7 +487,7 @@ For a client that cannot hold a WebSocket (a proxy that strips the upgrade, a pl
 * The client sends messages with `POST /deck/messages`, `Authorization: Bearer <connection_token>` and the exact body of a WebSocket client message. The answer is 202 with an empty body, 400 with `{"error": reason}` (`session.resume` is refused with `resume_not_accepted`, because the position is chosen when the stream opens), 401, 403 for a foreign Origin, or 413 over `maximum_frame_bytes`.
 * To resume, open a new stream with a new ticket and `last_sequence`. When the session stops the stream ends with `event: closed`, and so it does when the server shuts down.
 * A client that vanished is noticed by a failed write, at the latest one heartbeat later; the stream then detaches from the channel synchronously (`Channel.detach/2`) and drops its connection token.
-* There are no CORS headers, as everywhere else in the deck transport, so a browser must reach it from the same origin (for example through a reverse proxy).
+* There are no CORS headers, as everywhere else in the deck transport, so a browser must reach it from the same origin (for example through a reverse proxy; the [MCP guide](https://github.com/albertosca/mead/blob/main/guide/en/mcp.md#a-browser-deck-one-origin-through-a-proxy) has a working one).
 
 ### Recovery
 
