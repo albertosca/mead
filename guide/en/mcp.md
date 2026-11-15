@@ -49,65 +49,21 @@ Add `certfile` and `keyfile` to serve HTTPS. The full list of limits and status 
 
 ## A browser deck: one origin, through a proxy
 
-mead sends no CORS headers, on `/mcp` and on `/deck/*` alike: a bearer token guards both, and a header that lets a page read their answers would widen what a listed origin can do. A web deck therefore needs one origin, and the way to get it is a small reverse proxy that serves the built app and forwards `/deck/*` to mead, HTTP, server-sent events and WebSocket included. The proxy passes `Origin` and `Authorization` through, so mead still checks both.
+mead sends no CORS headers, on `/mcp` and on `/deck/*` alike: a bearer token guards both, and a header that lets a page read their answers would widen what a listed origin can do. A web deck therefore needs one origin, and the way to get it is a small reverse proxy that serves the built app and forwards `/deck/*` to mead, HTTP, server-sent events and WebSocket included. The proxy passes `Origin` and `Authorization` through, so mead still checks both. Any proxy that forwards those paths works; mead ships none, because the repository holds only Elixir. With Caddy, for example:
 
-```ts
-// bun proxy.ts <listen_port> <mead_host:port> <web_build_directory>
-const listenPort = Number(Bun.argv[2] ?? 8080);
-const upstreamHost = Bun.argv[3] ?? "127.0.0.1:4040";
-const staticRoot = Bun.argv[4] ?? "./build/web";
-
-type SocketData = { upstreamUrl: string; upstream?: WebSocket; pending: Array<string | Buffer> };
-
-const server = Bun.serve<SocketData>({
-  port: listenPort,
-  hostname: "127.0.0.1",
-  async fetch(request, serverInstance) {
-    const url = new URL(request.url);
-    if (url.pathname.startsWith("/deck/")) {
-      if (request.headers.get("upgrade")?.toLowerCase() === "websocket") {
-        const upgraded = serverInstance.upgrade(request, {
-          data: { upstreamUrl: `ws://${upstreamHost}${url.pathname}${url.search}`, pending: [] },
-        });
-        return upgraded ? undefined : new Response("upgrade failed", { status: 400 });
-      }
-      const forwardedHeaders = new Headers(request.headers);
-      for (const hopHeader of ["host", "content-length", "accept-encoding", "connection"]) forwardedHeaders.delete(hopHeader);
-      const upstreamResponse = await fetch(`http://${upstreamHost}${url.pathname}${url.search}`, {
-        method: request.method,
-        headers: forwardedHeaders,
-        body: request.method === "GET" || request.method === "HEAD" ? undefined : await request.arrayBuffer(),
-      });
-      const responseHeaders = new Headers(upstreamResponse.headers);
-      for (const hopHeader of ["content-encoding", "content-length", "transfer-encoding", "connection"]) responseHeaders.delete(hopHeader);
-      return new Response(upstreamResponse.body, { status: upstreamResponse.status, headers: responseHeaders });
-    }
-    const relativePath = url.pathname === "/" ? "/index.html" : url.pathname;
-    const file = Bun.file(`${staticRoot}${relativePath}`);
-    return (await file.exists()) ? new Response(file) : new Response("not found", { status: 404 });
-  },
-  websocket: {
-    open(clientSocket) {
-      const upstream = new WebSocket(clientSocket.data.upstreamUrl);
-      clientSocket.data.upstream = upstream;
-      upstream.onopen = () => clientSocket.data.pending.splice(0).forEach((frame) => upstream.send(frame));
-      upstream.onmessage = (message) => clientSocket.send(message.data as string);
-      upstream.onclose = () => clientSocket.close();
-    },
-    message(clientSocket, frame) {
-      const upstream = clientSocket.data.upstream;
-      if (upstream && upstream.readyState === WebSocket.OPEN) upstream.send(frame);
-      else clientSocket.data.pending.push(frame);
-    },
-    close(clientSocket) {
-      clientSocket.data.upstream?.close();
-    },
-  },
-});
-console.log(`proxy on http://127.0.0.1:${server.port} -> ${upstreamHost}, static ${staticRoot}`);
+```
+:8080 {
+	handle /deck/* {
+		reverse_proxy 127.0.0.1:4040
+	}
+	handle {
+		root * ./build/web
+		file_server
+	}
+}
 ```
 
 * The page then talks to its own origin (`/deck/ticket`, `/deck/socket`, `/deck/events`, `/deck/messages`), so there is nothing cross-origin to allow.
 * While the proxy listens on a loopback address, the `Origin` of the page is a loopback one and mead accepts it. Served from any other host name, the page's origin must be listed in `allowed_origins` of `:mcp_server`.
-* Checked: the static route and a proxied `POST` with its `Origin` and `Authorization` reach the upstream untouched. The WebSocket and event-stream paths were measured against the real deck on 2026-11-06 and are not covered by a test in this repository.
-* Anything that forwards the same paths works as well (nginx, Caddy, a Phoenix endpoint); the point is only that the browser sees one origin.
+* Measured on 2026-11-06 with a hand-written proxy (not the Caddy file above): a proxied `POST` with its `Origin` and `Authorization` reached mead untouched, and the WebSocket and event-stream paths worked against the real deck. None of this is covered by a test in this repository, and the Caddy file was not run.
+* Anything else that forwards the same paths works as well (nginx, a Phoenix endpoint); the point is only that the browser sees one origin.
