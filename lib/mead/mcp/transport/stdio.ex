@@ -5,8 +5,14 @@ defmodule Mead.MCP.Transport.Stdio do
 
   ## Options
 
-    * `:command` - the executable, looked up on the `PATH` (required).
+    * `:command` - the executable, looked up on the `PATH` of the VM, not on one set through `:env`,
+      and before the directory changes (required).
     * `:arguments` - a list of binaries; defaults to `[]`.
+    * `:cwd` - the directory the child starts in; defaults to `nil`, the directory of the VM. A
+      directory that does not exist is `{:error, {:cwd_not_found, directory}}`.
+    * `:env` - `{name, value}` binaries added to the environment the child inherits, replacing an
+      inherited variable of the same name; defaults to `[]`. The values are never kept in the state
+      this process shows in crash reports.
     * `:maximum_message_bytes` - the longest message accepted; defaults to 4 MiB. A longer one
       closes the transport with `:message_too_large` instead of growing without bound.
     * `:exit_grace_milliseconds` - how long a child gets to leave after its stdin closes before it
@@ -33,7 +39,8 @@ defmodule Mead.MCP.Transport.Stdio do
 
   @impl Mead.MCP.Transport
   def start_link(options, owner) when is_list(options) and is_pid(owner) do
-    with {:ok, executable} <- find_executable(options) do
+    with {:ok, executable} <- find_executable(options),
+         :ok <- check_working_directory(options) do
       GenServer.start_link(__MODULE__, {executable, options, owner})
     end
   end
@@ -58,17 +65,28 @@ defmodule Mead.MCP.Transport.Stdio do
     end
   end
 
+  defp check_working_directory(options) do
+    case Keyword.get(options, :cwd) do
+      nil -> :ok
+      directory -> if File.dir?(directory), do: :ok, else: {:error, {:cwd_not_found, directory}}
+    end
+  end
+
   @impl GenServer
   def init({executable, options, owner}) do
     Process.flag(:trap_exit, true)
 
     port =
-      Port.open({:spawn_executable, executable}, [
-        :binary,
-        :exit_status,
-        {:line, @port_line_bytes},
-        {:args, Keyword.get(options, :arguments, [])}
-      ])
+      Port.open(
+        {:spawn_executable, executable},
+        [
+          :binary,
+          :exit_status,
+          {:line, @port_line_bytes},
+          {:args, Keyword.get(options, :arguments, [])},
+          {:env, port_environment(Keyword.get(options, :env, []))}
+        ] ++ working_directory_option(Keyword.get(options, :cwd))
+      )
 
     {:ok,
      %{
@@ -84,6 +102,16 @@ defmodule Mead.MCP.Transport.Stdio do
      }}
   rescue
     error in ErlangError -> {:stop, {:spawn_failed, error.original}}
+  end
+
+  defp working_directory_option(nil), do: []
+  defp working_directory_option(directory), do: [{:cd, directory}]
+
+  # The port wants charlists, and a variable it already inherited is replaced, not repeated.
+  defp port_environment(environment) do
+    for {variable, value} <- environment do
+      {String.to_charlist(variable), String.to_charlist(value)}
+    end
   end
 
   # A child that exits at once may already be gone when the port is asked for its pid.

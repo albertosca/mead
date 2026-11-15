@@ -12,12 +12,18 @@ defmodule Mead.MCP.PolicyTest do
     )
   end
 
-  defp server(name, tools),
-    do: %{name: name, transport: {:stdio, command: "x", arguments: []}, tools: tools}
+  defp server(name, tools, never_remember \\ []) do
+    %{
+      name: name,
+      transport: {:stdio, command: "x", arguments: []},
+      tools: tools,
+      never_remember: MapSet.new(never_remember)
+    }
+  end
 
   defp servers do
     [
-      server(:filesystem, %{"read_file" => :read, "write_file" => :effect}),
+      server(:filesystem, %{"read_file" => :read, "write_file" => :effect}, ["write_file"]),
       server(:github, %{"search" => :read})
     ]
   end
@@ -116,7 +122,14 @@ defmodule Mead.MCP.PolicyTest do
   describe "authorize/4" do
     test "allows a listed read tool" do
       assert Policy.authorize("filesystem__read_file", entries(), servers(), []) ==
-               {:ok, %{server: :filesystem, tool: "read_file", class: :read}}
+               {:ok,
+                %{server: :filesystem, tool: "read_file", class: :read, never_remember: false}}
+    end
+
+    test "reports a tool the operator marked as never to be remembered" do
+      assert Policy.authorize("filesystem__write_file", entries(), servers(), tools: :effect) ==
+               {:ok,
+                %{server: :filesystem, tool: "write_file", class: :effect, never_remember: true}}
     end
 
     test "refuses an effect tool without the opt-in, and allows it with" do
@@ -126,15 +139,15 @@ defmodule Mead.MCP.PolicyTest do
       assert Policy.authorize("filesystem__write_file", entries(), servers(), tools: :everything) ==
                {:error, :not_allowed}
 
-      assert Policy.authorize("filesystem__write_file", entries(), servers(), tools: :effect) ==
-               {:ok, %{server: :filesystem, tool: "write_file", class: :effect}}
+      assert {:ok, %{tool: "write_file", class: :effect}} =
+               Policy.authorize("filesystem__write_file", entries(), servers(), tools: :effect)
     end
 
     test "a tool name containing the separator still resolves on the first split" do
       servers = [server(:fs, %{"a__b" => :read})]
 
       assert Policy.authorize("fs__a__b", [entry(:fs, "a__b")], servers, []) ==
-               {:ok, %{server: :fs, tool: "a__b", class: :read}}
+               {:ok, %{server: :fs, tool: "a__b", class: :read, never_remember: false}}
     end
 
     test "everything the model was not shown is an unknown tool" do

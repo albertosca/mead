@@ -25,16 +25,64 @@ defmodule Mead.MCP.ConfigurationTest do
               [
                 %{
                   name: :filesystem,
-                  transport: {:stdio, command: "npx", arguments: ["-y", "server"]},
-                  tools: %{"read_file" => :read, "write_file" => :effect}
+                  transport:
+                    {:stdio, command: "npx", arguments: ["-y", "server"], cwd: nil, env: []},
+                  tools: %{"read_file" => :read, "write_file" => :effect},
+                  never_remember: MapSet.new()
                 }
               ]}
   end
 
-  test "stdio arguments and tools default to empty" do
+  describe "never_remember" do
+    test "names the tools that must be confirmed on every call" do
+      assert {:ok, [server]} = Configuration.validate(a: stdio(never_remember: [:write_file]))
+      assert server.never_remember == MapSet.new(["write_file"])
+    end
+
+    test "defaults to no tool" do
+      assert {:ok, [server]} = Configuration.validate(a: stdio())
+      assert server.never_remember == MapSet.new()
+    end
+
+    test "a tool that is not listed under tools is refused, since a typo would leave it unprotected" do
+      assert Configuration.validate(a: stdio(never_remember: [:write_fil])) ==
+               {:error, {:invalid_server, :a, {:never_remember_not_in_tools, :write_fil}}}
+    end
+
+    test "a repeated name, a non-list and a non-atom are refused" do
+      assert Configuration.validate(a: stdio(never_remember: [:write_file, :write_file])) ==
+               {:error, {:invalid_server, :a, {:duplicate_never_remember, :write_file}}}
+
+      assert Configuration.validate(a: stdio(never_remember: :write_file)) ==
+               {:error, {:invalid_server, :a, :invalid_never_remember}}
+
+      assert Configuration.validate(a: stdio(never_remember: ["write_file"])) ==
+               {:error, {:invalid_server, :a, :invalid_never_remember}}
+    end
+  end
+
+  test "stdio arguments, working directory, environment and tools default to unset" do
     assert {:ok, [server]} = Configuration.validate(bare: [transport: {:stdio, command: "x"}])
-    assert server.transport == {:stdio, command: "x", arguments: []}
+    assert server.transport == {:stdio, command: "x", arguments: [], cwd: nil, env: []}
     assert server.tools == %{}
+  end
+
+  test "a stdio server may name the directory it starts in and variables it adds" do
+    transport =
+      {:stdio,
+       command: "uv",
+       arguments: ["run", "server"],
+       cwd: "/srv/bridge",
+       env: [{"BRIDGE_TOKEN", "value"}, {"LOG_LEVEL", "debug"}]}
+
+    assert {:ok, [server]} = Configuration.validate(bridge: [transport: transport])
+
+    assert server.transport ==
+             {:stdio,
+              command: "uv",
+              arguments: ["run", "server"],
+              cwd: "/srv/bridge",
+              env: [{"BRIDGE_TOKEN", "value"}, {"LOG_LEVEL", "debug"}]}
   end
 
   test "an http server is normalized, with headers defaulting to empty" do
@@ -105,6 +153,52 @@ defmodule Mead.MCP.ConfigurationTest do
 
       assert Configuration.validate(a: [transport: {:stdio, command: "x", argument: []}]) ==
                {:error, {:invalid_server, :a, {:unknown_transport_options, [:argument]}}}
+    end
+
+    test "a working directory must be a non-empty absolute path" do
+      for cwd <- ["relative/dir", "", "~/bridge", 123, :"/srv", ["/srv"]] do
+        assert Configuration.validate(a: [transport: {:stdio, command: "x", cwd: cwd}]) ==
+                 {:error, {:invalid_server, :a, :invalid_cwd}},
+               "cwd #{inspect(cwd)} should be refused"
+      end
+    end
+
+    test "an environment must be a list of name and value binaries" do
+      for environment <- [
+            %{"A" => "1"},
+            "A=1",
+            [{"A", 1}],
+            [{:A, "1"}],
+            [{"", "1"}],
+            [{"A=B", "1"}],
+            [{"A", "one\0two"}],
+            [{"A\0B", "1"}],
+            ["A=1"]
+          ] do
+        assert Configuration.validate(a: [transport: {:stdio, command: "x", env: environment}]) ==
+                 {:error, {:invalid_server, :a, :invalid_env}},
+               "env #{inspect(environment)} should be refused"
+      end
+    end
+
+    # A reason names a key and never a value: a configured token must not reach a log through an
+    # error, so even a malformed entry that carries one is reported without it.
+    test "a refused environment never carries a value in the reason" do
+      environment = [{"BRIDGE_TOKEN", "first-secret"}, {"BAD=NAME", "second-secret"}]
+
+      result = Configuration.validate(a: [transport: {:stdio, command: "x", env: environment}])
+
+      assert result == {:error, {:invalid_server, :a, :invalid_env}}
+      refute inspect(result) =~ "secret"
+    end
+
+    test "an environment name given twice is refused by name, never by value" do
+      environment = [{"BRIDGE_TOKEN", "first-secret"}, {"BRIDGE_TOKEN", "second-secret"}]
+
+      result = Configuration.validate(a: [transport: {:stdio, command: "x", env: environment}])
+
+      assert result == {:error, {:invalid_server, :a, {:duplicate_env_name, "BRIDGE_TOKEN"}}}
+      refute inspect(result) =~ "secret"
     end
 
     test "http options that are wrong" do

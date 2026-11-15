@@ -180,6 +180,30 @@ defmodule Mead.MCP.HubTest do
     wait_until(fn -> tool_names(hub) == [] end)
   end
 
+  test "describe_tool reports never_remember from the configuration through the real catalog" do
+    hub =
+      start_hub([
+        {:files,
+         [
+           transport: {:stdio, command: "unused"},
+           tools: [read_file: :read, write_file: :effect],
+           never_remember: [:write_file]
+         ]}
+      ])
+
+    connect([raw_tool("read_file"), raw_tool("write_file")])
+
+    wait_until(fn ->
+      tool_names(hub, tools: :effect) == ["files__read_file", "files__write_file"]
+    end)
+
+    assert {:ok, %{never_remember: true, class: :effect}} =
+             Hub.describe_tool("files__write_file", [tools: :effect], hub)
+
+    assert {:ok, %{never_remember: false, class: :read}} =
+             Hub.describe_tool("files__read_file", [tools: :effect], hub)
+  end
+
   test "a server that cannot start does not stop the others, or the hub" do
     hub =
       start_hub(

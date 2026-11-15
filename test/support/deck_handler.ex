@@ -22,9 +22,12 @@ defmodule Mead.Test.DeckHandler do
   end
 
   # "ask <read|effect> <server>__<tool> <argument text>" plays the router's calls on the turn's
-  # interaction for one tool call and answers "allowed" or "denied <reason>".
+  # interaction for one tool call and answers "allowed" or "denied <reason>". A class written with
+  # a trailing "!" (`effect!`) marks the tool as one the operator never lets be remembered.
   def handle_turn(_history, "ask " <> specification, options) do
-    [class, name, argument_text] = String.split(specification, " ", parts: 3)
+    [class_token, name, argument_text] = String.split(specification, " ", parts: 3)
+    never_remember = String.ends_with?(class_token, "!")
+    class = String.trim_trailing(class_token, "!")
     [server, tool] = String.split(name, "__", parts: 2)
     {module, context} = Keyword.fetch!(options, :interaction)
 
@@ -33,7 +36,8 @@ defmodule Mead.Test.DeckHandler do
       tool: tool,
       server: server,
       class: String.to_existing_atom(class),
-      arguments: %{"argument" => argument_text}
+      arguments: %{"argument" => argument_text},
+      never_remember: never_remember
     }
 
     update = fn status ->

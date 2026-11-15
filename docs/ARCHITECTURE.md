@@ -158,7 +158,7 @@ With a storage directory, the ledger also appends every counted turn, every forg
 
 `config :mead, :mcp, servers: [...]` lists the MCP servers. Each entry has:
 
-* a transport: `{:stdio, command:, arguments:}` or `{:http, url:, headers:}`;
+* a transport: `{:stdio, command:, arguments:, cwd:, env:}` (the last two optional: an absolute directory to start in, and variables added to the inherited environment) or `{:http, url:, headers:}`;
 * the tools the operator allows, each with a class declared in the configuration: `:read` or `:effect`.
 
 `Mead.MCP.Configuration` validates it when the application starts and refuses a typo instead of silently granting or denying the wrong tool.
@@ -172,7 +172,7 @@ The class is never read from the server. A tool the server offers and the config
 * `Mead.MCP.Transport.Stdio` runs a child process over a `Port`.
 * `Mead.MCP.Transport.Http` posts each message with `Req` and reads a JSON or event-stream answer.
 
-The connection performs the handshake with the pinned protocol version, follows the tool list across pages, publishes the tools in `Mead.MCP.Catalog`, and refreshes them on a `tools/list_changed` notification.
+The connection performs the handshake offering protocol version 2025-06-18 and accepts a server that answers 2025-03-26 or 2024-11-05 (anything else is `{:unsupported_protocol_version, version}`); a transport that sends the version on the wire, the HTTP one, is told the negotiated one through the optional `protocol_negotiated/2` callback. It follows the tool list across pages, publishes the tools in `Mead.MCP.Catalog`, and refreshes them on a `tools/list_changed` notification.
 
 **When something goes wrong**
 
@@ -445,6 +445,13 @@ Each deck turn carries `Mead.Deck.Interaction`, so `Mead.Router` asks the channe
 * The rules are rebuilt from the log and kept through compaction.
 * `permission.forget {tool}` takes one back with a `permission.forgotten` event.
 
+**A tool that is never remembered**
+
+* A server may list tools under `never_remember:` (each must also be under `tools:`). A call of such a tool always emits `permission.requested` and waits, at every policy level, `allow_all` included, and for a `:read` tool at `ask_for_risky`.
+* Its request offers only `allow_once` and `reject_once`. An `allow_always` answer to it settles nothing, and the request stays open.
+* A rule remembered before the tool was marked stays in the log and is ignored while the mark stands, so the operator's configuration wins over the log. If the mark is removed later, that rule applies again.
+* The tap exists only in a turn that carries a deck interaction. A turn submitted without one (through `Mead.submit_turn/3` without `:interaction`, or the MCP server's `submit_turn`) has nobody to ask, and for it `never_remember` changes nothing: its effect tools are governed by `tools: :effect` and the server's `allow_effect`.
+
 Request details are the model's arguments cut at 2 000 characters each, and they are never logged. They travel twice in `permission.requested`: `details` as `key: value` strings, and `detail_items` as objects with the raw `key` and `value`, a `label` (the key as words) and, when the value is a snake_case identifier, a `display` (the identifier as words). A deck that only reads `details` keeps working.
 
 ### Frames, heartbeat and idle timeout
@@ -481,7 +488,7 @@ For a client that cannot hold a WebSocket (a proxy that strips the upgrade, a pl
 * The client sends messages with `POST /deck/messages`, `Authorization: Bearer <connection_token>` and the exact body of a WebSocket client message. The answer is 202 with an empty body, 400 with `{"error": reason}` (`session.resume` is refused with `resume_not_accepted`, because the position is chosen when the stream opens), 401, 403 for a foreign Origin, or 413 over `maximum_frame_bytes`.
 * To resume, open a new stream with a new ticket and `last_sequence`. When the session stops the stream ends with `event: closed`, and so it does when the server shuts down.
 * A client that vanished is noticed by a failed write, at the latest one heartbeat later; the stream then detaches from the channel synchronously (`Channel.detach/2`) and drops its connection token.
-* There are no CORS headers, as everywhere else in the deck transport, so a browser must reach it from the same origin (for example through a reverse proxy).
+* There are no CORS headers, as everywhere else in the deck transport, so a browser must reach it from the same origin (for example through a reverse proxy; the [MCP guide](https://github.com/albertosca/mead/blob/main/guide/en/mcp.md#a-browser-deck-one-origin-through-a-proxy) has a working one).
 
 ### Recovery
 

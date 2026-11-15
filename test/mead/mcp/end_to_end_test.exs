@@ -6,6 +6,8 @@ defmodule Mead.MCP.EndToEndTest.Hub do
 
   def call_tool(name, arguments, options),
     do: Mead.MCP.Hub.call_tool(name, arguments, options, :end_to_end_hub)
+
+  def describe_tool(name, options), do: Mead.MCP.Hub.describe_tool(name, options, :end_to_end_hub)
 end
 
 defmodule Mead.MCP.EndToEndTest do
@@ -57,6 +59,31 @@ defmodule Mead.MCP.EndToEndTest do
 
     assert Hub.call_tool("stub__fail", %{}, [], :end_to_end_hub) ==
              {:ok, %{content: "it failed", is_error: true}}
+  end
+
+  @tag :tmp_dir
+  test "a configured directory and variables reach a real stdio server through the hub",
+       %{tmp_dir: directory} do
+    start_hub(
+      stub: [
+        transport:
+          {:stdio,
+           command: System.find_executable("elixir"),
+           arguments: [@stub, @marker],
+           cwd: directory,
+           env: [{"MEAD_STUB_VARIABLE", "from-the-configuration"}]},
+        tools: [environment: :read]
+      ]
+    )
+
+    wait_until(fn -> names() != [] end, 60_000)
+
+    assert Hub.call_tool("stub__environment", %{}, [], :end_to_end_hub) ==
+             {:ok,
+              %{
+                content: "directory=#{Path.basename(directory)};variable=from-the-configuration",
+                is_error: false
+              }}
   end
 
   test "an effect tool needs the opt-in, and the server's own annotations grant nothing" do
@@ -126,6 +153,35 @@ defmodule Mead.MCP.EndToEndTest do
 
     assert %{content: [%{tool_use_id: "toolu_1", content: "from the model", is_error: false}]} =
              List.last(second)
+  end
+
+  test "a tool marked never_remember is announced as such in a turn through the real hub and stdio" do
+    servers = [
+      stub: Keyword.put(Keyword.fetch!(stub_server(), :stub), :never_remember, [:echo])
+    ]
+
+    start_hub(servers)
+    wait_until(fn -> names() != [] end, 60_000)
+
+    {:ok, script} =
+      Agent.start_link(fn ->
+        [
+          FakeProvider.tool_step([
+            {"toolu_1", "stub__echo", %{"text" => "marked"}},
+            {"toolu_2", "stub__fail", %{}}
+          ]),
+          FakeProvider.text_step("done")
+        ]
+      end)
+
+    slots = [cloud: {FakeProvider, test_pid: self(), script: script}]
+    context = Mead.Test.FakeInteraction.start([:allow, :allow])
+    options = [route: :cloud, interaction: {Mead.Test.FakeInteraction, context}]
+
+    assert Router.route([], "call both", options, slots, TestHub) == {:ok, "done"}
+
+    assert_received {:request_permission, %{tool: "echo", never_remember: true}}
+    assert_received {:request_permission, %{tool: "fail", never_remember: false}}
   end
 
   defp os_pids do

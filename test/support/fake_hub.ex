@@ -41,7 +41,8 @@ defmodule Mead.Test.FakeHub do
     :ok
   end
 
-  # The class of a tool defaults to :read; `classes: %{"server__tool" => :effect}` overrides it. A
+  # The class of a tool defaults to :read; `classes: %{"server__tool" => :effect}` overrides it, and
+  # `never_remember: ["server__tool"]` marks a tool as one that is confirmed on every call. A
   # name with no configured result is unknown, as it is for call_tool/3.
   def describe_tool(name, _options) do
     settings = settings()
@@ -49,7 +50,15 @@ defmodule Mead.Test.FakeHub do
     if Map.has_key?(settings.results, name) do
       [server, tool] = String.split(name, "__", parts: 2)
       class = settings |> Map.get(:classes, %{}) |> Map.get(name, :read)
-      {:ok, %{server: String.to_atom(server), tool: tool, class: class}}
+      never_remember = name in Map.get(settings, :never_remember, [])
+
+      {:ok,
+       %{
+         server: String.to_atom(server),
+         tool: tool,
+         class: class,
+         never_remember: never_remember
+       }}
     else
       {:error, :unknown_tool}
     end

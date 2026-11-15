@@ -790,7 +790,8 @@ defmodule Mead.Router do
       tool: target.tool,
       server: Atom.to_string(target.server),
       class: target.class,
-      arguments: input
+      arguments: input,
+      never_remember: Map.get(target, :never_remember, false)
     }
   end
 

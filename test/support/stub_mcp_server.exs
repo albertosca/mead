@@ -39,6 +39,7 @@ defmodule StubServer do
         tool("echo", "Echo the text back"),
         tool("fail", "Always fails"),
         tool("write_note", "Writes a note"),
+        tool("environment", "Reports the directory and the variable this process started with"),
         # Not listed in the test configuration, and it claims to be harmless.
         Map.put(tool("secret", "Hidden"), "annotations", %{"readOnlyHint" => true})
       ]
@@ -59,6 +60,11 @@ defmodule StubServer do
 
   defp respond(%{"method" => "tools/call", "id" => id, "params" => %{"name" => "write_note"}}) do
     reply(id, text("note written"))
+  end
+
+  defp respond(%{"method" => "tools/call", "id" => id, "params" => %{"name" => "environment"}}) do
+    variable = System.get_env("MEAD_STUB_VARIABLE", "unset")
+    reply(id, text("directory=#{Path.basename(File.cwd!())};variable=#{variable}"))
   end
 
   defp respond(%{"id" => id}) do

@@ -17,6 +17,13 @@ defmodule Mead.MCP.Connection do
   ignored. The connection traps exits so that a transport that dies is an ordinary event.
 
   Calls are carried by `call_tool/5`; each pending call monitors its caller and has its own timer.
+
+  ## Options
+
+    * `:transport` - `{module, options}`, where `options` is a keyword list or a function that
+      returns one. The hub gives a function, so that options holding a credential never show in the
+      arguments a supervisor prints for this process; it is called each time the connection
+      connects, and the list it returns goes to `module.start_link/2`.
   """
 
   use GenServer
@@ -177,17 +184,28 @@ defmodule Mead.MCP.Connection do
   end
 
   # Crash reports and `:sys.get_status/1` print the state, and the transport options can carry an
-  # HTTP credential.
+  # HTTP credential in the headers or a credential in the environment of a stdio child.
   @impl GenServer
   def format_status(%{state: state} = status) do
-    redacted = Keyword.replace(state.transport_options, :headers, "[redacted]")
-    %{status | state: %{state | transport_options: redacted}}
+    %{status | state: %{state | transport_options: redact(state.transport_options)}}
   end
+
+  # A function prints as `#Fun<...>`, and only a list can show a credential.
+  defp redact(options) when is_list(options) do
+    options
+    |> Keyword.replace(:headers, "[redacted]")
+    |> Keyword.replace(:env, "[redacted]")
+  end
+
+  defp redact(options), do: options
+
+  defp resolve_options(options) when is_function(options, 0), do: options.()
+  defp resolve_options(options) when is_list(options), do: options
 
   # -- connecting --------------------------------------------------------------------------------
 
   defp connect(state) do
-    case state.transport_module.start_link(state.transport_options, self()) do
+    case state.transport_module.start_link(resolve_options(state.transport_options), self()) do
       {:ok, transport} ->
         reference = make_ref()
         Process.send_after(self(), {:handshake_timeout, reference}, state.handshake_timeout)
@@ -340,6 +358,8 @@ defmodule Mead.MCP.Connection do
   defp handle_result(:initialize, %{"protocolVersion" => version}, state)
        when is_binary(version) do
     if Protocol.supported_version?(version) do
+      announce_version(state, version)
+
       state.transport_module.send_message(
         state.transport,
         nil,
@@ -398,6 +418,17 @@ defmodule Mead.MCP.Connection do
       fn _id -> {:list_tools, page} end,
       &Protocol.list_tools_request(&1, cursor)
     )
+  end
+
+  # Optional callback: a transport that does not put the version on the wire does not define it.
+  defp announce_version(state, version) do
+    module = state.transport_module
+
+    if Code.ensure_loaded?(module) and function_exported?(module, :protocol_negotiated, 2) do
+      module.protocol_negotiated(state.transport, version)
+    end
+
+    :ok
   end
 
   defp parse_tools(tools) when is_list(tools) do

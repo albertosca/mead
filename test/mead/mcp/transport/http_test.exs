@@ -71,6 +71,27 @@ defmodule Mead.MCP.Transport.HttpTest do
     assert {"mcp-protocol-version", "2025-06-18"} in headers
   end
 
+  test "after the version is negotiated, the header carries the negotiated version" do
+    test_pid = self()
+
+    transport =
+      start(fn conn ->
+        send(test_pid, {:headers, conn.req_headers})
+        json(conn, @response)
+      end)
+
+    Http.send_message(transport, 1, "{}")
+    assert_receive {:headers, first}, 10_000
+    assert {"mcp-protocol-version", "2025-06-18"} in first
+
+    assert Http.protocol_negotiated(transport, "2025-03-26") == :ok
+
+    Http.send_message(transport, 2, "{}")
+    assert_receive {:headers, second}, 10_000
+    assert {"mcp-protocol-version", "2025-03-26"} in second
+    refute {"mcp-protocol-version", "2025-06-18"} in second
+  end
+
   test "sends the configured headers" do
     test_pid = self()
 

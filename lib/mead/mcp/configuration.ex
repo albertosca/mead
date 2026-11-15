@@ -14,14 +14,28 @@ defmodule Mead.MCP.Configuration do
           ]
         ]
 
+  A server may also list, under `never_remember:`, tools the person must confirm on every call
+  (`never_remember: [:write_file]`); each must be listed under `tools:`, since a typo would leave
+  the tool it meant to protect asking to be remembered.
+
   The class of a tool (`:read` or `:effect`) is declared here and nowhere else; the hub never
   trusts what a server says about itself. A tool the server offers that is not listed here does
   not exist for the model. A server name may hold letters, digits, and hyphens but no underscore,
   so the first `__` of `server__tool` always splits the model-facing name.
 
+  A stdio server may also name the directory it starts in and the variables it adds to the
+  environment it inherits from the VM:
+
+      transport: {:stdio, command: "uv", arguments: ["run", "bridge"], cwd: "/srv/bridge", env: [{"BRIDGE_TOKEN", "..."}]}
+
+  `:cwd` must be an absolute path, since a relative one would resolve against wherever the VM was
+  started; that the directory exists is checked when the server starts, not here. `:env` adds to
+  the inherited environment and replaces an inherited variable of the same name; a name may not
+  repeat.
+
   Validation is strict on purpose: an unknown option is almost always a typo, and a typo in a
   permission list silently denies or, worse, mis-grants. Reasons name keys, never values, so a
-  header carrying a credential cannot reach a log through an error.
+  header or a variable carrying a credential cannot reach a log through an error.
 
   A listed tool must also be one the model can be shown: `server__tool` may hold letters, digits,
   underscores, and hyphens, and be at most 64 characters. A name outside that would be hidden
@@ -31,13 +45,18 @@ defmodule Mead.MCP.Configuration do
   alias Mead.MCP.Policy
 
   @type transport ::
-          {:stdio, command: String.t(), arguments: [String.t()]}
+          {:stdio,
+           command: String.t(),
+           arguments: [String.t()],
+           cwd: Path.t() | nil,
+           env: [{String.t(), String.t()}]}
           | {:http, url: String.t(), headers: [{String.t(), String.t()}]}
 
   @type server :: %{
           name: atom(),
           transport: transport(),
-          tools: %{String.t() => :read | :effect}
+          tools: %{String.t() => :read | :effect},
+          never_remember: MapSet.t(String.t())
         }
 
   @server_name ~r/\A[a-zA-Z0-9-]+\z/
@@ -84,8 +103,33 @@ defmodule Mead.MCP.Configuration do
     with :ok <- check_name(name),
          {:ok, definition} <- check_definition(name, definition),
          {:ok, transport} <- check_transport(name, Keyword.get(definition, :transport)),
-         {:ok, tools} <- check_tools(name, Keyword.get(definition, :tools, [])) do
-      {:ok, %{name: name, transport: transport, tools: tools}}
+         {:ok, tools} <- check_tools(name, Keyword.get(definition, :tools, [])),
+         {:ok, never_remember} <-
+           check_never_remember(name, Keyword.get(definition, :never_remember, []), tools) do
+      {:ok, %{name: name, transport: transport, tools: tools, never_remember: never_remember}}
+    end
+  end
+
+  # A name that is not a listed tool is refused: a typo here would leave the tool it meant to
+  # protect asking to be remembered, without a word.
+  defp check_never_remember(name, tool_names, tools) do
+    if is_list(tool_names) and Enum.all?(tool_names, &is_atom/1) do
+      Enum.reduce_while(tool_names, {:ok, MapSet.new()}, fn tool, {:ok, marked} ->
+        key = Atom.to_string(tool)
+
+        cond do
+          not Map.has_key?(tools, key) ->
+            {:halt, {:error, {:invalid_server, name, {:never_remember_not_in_tools, tool}}}}
+
+          MapSet.member?(marked, key) ->
+            {:halt, {:error, {:invalid_server, name, {:duplicate_never_remember, tool}}}}
+
+          true ->
+            {:cont, {:ok, MapSet.put(marked, key)}}
+        end
+      end)
+    else
+      {:error, {:invalid_server, name, :invalid_never_remember}}
     end
   end
 
@@ -97,7 +141,7 @@ defmodule Mead.MCP.Configuration do
 
   defp check_definition(name, definition) do
     if is_list(definition) and Keyword.keyword?(definition) do
-      case Keyword.keys(definition) -- [:transport, :tools] do
+      case Keyword.keys(definition) -- [:transport, :tools, :never_remember] do
         [] -> {:ok, definition}
         unknown -> {:error, {:invalid_server, name, {:unknown_options, Enum.uniq(unknown)}}}
       end
@@ -108,10 +152,17 @@ defmodule Mead.MCP.Configuration do
 
   defp check_transport(name, {:stdio, options}) when is_list(options) do
     with {:ok, options} <-
-           validate_options(name, options, command: nil, arguments: []),
+           validate_options(name, options, command: nil, arguments: [], cwd: nil, env: []),
          :ok <- check_command(name, options[:command]),
-         :ok <- check_arguments(name, options[:arguments]) do
-      {:ok, {:stdio, command: options[:command], arguments: options[:arguments]}}
+         :ok <- check_arguments(name, options[:arguments]),
+         :ok <- check_working_directory(name, options[:cwd]),
+         :ok <- check_environment(name, options[:env]) do
+      {:ok,
+       {:stdio,
+        command: options[:command],
+        arguments: options[:arguments],
+        cwd: options[:cwd],
+        env: options[:env]}}
     end
   end
 
@@ -151,6 +202,38 @@ defmodule Mead.MCP.Configuration do
       do: :ok,
       else: {:error, {:invalid_server, name, :invalid_arguments}}
   end
+
+  defp check_working_directory(_name, nil), do: :ok
+
+  defp check_working_directory(name, directory) do
+    if is_binary(directory) and Path.type(directory) == :absolute,
+      do: :ok,
+      else: {:error, {:invalid_server, name, :invalid_cwd}}
+  end
+
+  # A malformed entry is reported as `:invalid_env` with no entry in the reason, and a repeated
+  # name is reported by that name alone: a value may be a credential.
+  defp check_environment(name, environment) do
+    if is_list(environment) and Enum.all?(environment, &environment_entry?/1) do
+      names = Enum.map(environment, fn {variable, _value} -> variable end)
+
+      case names -- Enum.uniq(names) do
+        [] -> :ok
+        [duplicate | _rest] -> {:error, {:invalid_server, name, {:duplicate_env_name, duplicate}}}
+      end
+    else
+      {:error, {:invalid_server, name, :invalid_env}}
+    end
+  end
+
+  # The operating system cannot hold a NUL in a variable, and an `=` in a name would split the
+  # entry somewhere else than where it was written.
+  defp environment_entry?({variable, value}) when is_binary(variable) and is_binary(value) do
+    variable != "" and not String.contains?(variable, ["=", <<0>>]) and
+      not String.contains?(value, <<0>>)
+  end
+
+  defp environment_entry?(_other), do: false
 
   defp check_url(name, url) do
     if is_binary(url) and String.starts_with?(url, ["http://", "https://"]),

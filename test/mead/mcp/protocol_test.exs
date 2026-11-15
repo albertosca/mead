@@ -153,10 +153,17 @@ defmodule Mead.MCP.ProtocolTest do
     end
   end
 
-  test "only the pinned protocol version is supported" do
+  test "the client offers the newest version and accepts the two before it" do
     assert Protocol.protocol_version() == "2025-06-18"
-    assert Protocol.supported_version?("2025-06-18")
-    refute Protocol.supported_version?("2024-11-05")
+    assert Protocol.supported_versions() == ["2025-06-18", "2025-03-26", "2024-11-05"]
+
+    for version <- Protocol.supported_versions() do
+      assert Protocol.supported_version?(version)
+    end
+
+    refute Protocol.supported_version?("2024-10-07")
+    refute Protocol.supported_version?("1999-01-01")
     refute Protocol.supported_version?(nil)
+    refute Protocol.supported_version?(20_250_618)
   end
 end

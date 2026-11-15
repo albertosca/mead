@@ -212,6 +212,25 @@ defmodule Mead.MCP.ConnectionTest do
       assert entry_names(context.catalog) == []
     end
 
+    for version <- ["2025-06-18", "2025-03-26", "2024-11-05"] do
+      test "a server that answers #{version} is kept, and the transport is told", context do
+        version = unquote(version)
+        start_connection(context)
+        transport = started_transport()
+
+        initialize = FakeTransport.next_request(transport)
+        assert initialize["params"]["protocolVersion"] == "2025-06-18"
+        FakeTransport.reply(transport, initialize, %{"protocolVersion" => version})
+
+        assert_receive {:protocol_negotiated, ^transport, ^version}, 10_000
+        assert FakeTransport.next_request(transport)["method"] == "notifications/initialized"
+
+        list = FakeTransport.next_request(transport)
+        FakeTransport.reply(transport, list, %{"tools" => [raw_tool("read_file")]})
+        wait_until(fn -> entry_names(context.catalog) == ["read_file"] end)
+      end
+    end
+
     test "an initialize answer without a version is disconnected and retried", context do
       start_connection(context)
       first = started_transport()
@@ -280,6 +299,32 @@ defmodule Mead.MCP.ConnectionTest do
 
       assert Process.alive?(connection)
       assert entry_names(context.catalog) == []
+    end
+
+    test "options given as a function are asked for on every attempt and never printed",
+         context do
+      test_pid = self()
+
+      options = fn ->
+        send(test_pid, :options_resolved)
+
+        [
+          test_pid: test_pid,
+          start_error: :enoent,
+          env: [{"BRIDGE_TOKEN", "SECRET-ENV-0123456789"}]
+        ]
+      end
+
+      connection = start_connection(context, transport: {FakeTransport, options})
+
+      assert_receive :options_resolved, 10_000
+      assert_receive :options_resolved, 10_000
+      assert_receive :options_resolved, 10_000
+
+      status =
+        connection |> :sys.get_status() |> inspect(limit: :infinity, printable_limit: :infinity)
+
+      refute status =~ "SECRET-ENV-0123456789"
     end
 
     test "a transport process that dies is handled like a closed one", context do
@@ -485,6 +530,21 @@ defmodule Mead.MCP.ConnectionTest do
         connection |> :sys.get_status() |> inspect(limit: :infinity, printable_limit: :infinity)
 
       refute status =~ "SECRET-0123456789"
+    end
+
+    test "the state shown in crash reports never carries the configured environment", context do
+      connection =
+        start_connection(context,
+          transport:
+            {FakeTransport, [test_pid: self(), env: [{"BRIDGE_TOKEN", "SECRET-ENV-0123456789"}]]}
+        )
+
+      started_transport()
+
+      status =
+        connection |> :sys.get_status() |> inspect(limit: :infinity, printable_limit: :infinity)
+
+      refute status =~ "SECRET-ENV-0123456789"
     end
   end
 end
